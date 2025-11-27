@@ -6,8 +6,8 @@ from torch.utils.data import Dataset
 def load_face_data(data):
     Heat_data_sample = np.load('./%s-npy/Heat_data_sample.npy' % data, allow_pickle=True)
     Shape_sample = np.load('./%s-npy/shape_sample.npy' % data, allow_pickle=True)
-    landmark_position_select_all = np.load('./%s-npy/landmark_position_select_all.npy' % data, allow_pickle=True)
-    if data == 'BU-3DFE' or data == 'FaceScape' or data == 'FRGC':
+    landmark_position_select_all = np.load('./%s-npy/landmark_sample.npy' % data, allow_pickle=True)
+    if data == 'BU-3DFE' or data == 'FaceScape' or data == 'FRGC' or data == 'Ear296_Korean':
         return Shape_sample, landmark_position_select_all, Heat_data_sample
 
 
@@ -17,6 +17,8 @@ class FaceLandmarkData(Dataset):
             self.data, self.landmark, self.seg = load_face_data(data)
         if data == 'FRGC':
             self.data, self.landmark, self.seg = load_face_data(data)
+        if data == 'Ear296_Korean':
+            self.data, self.landmark, self.seg = load_face_data(data)    
         self.partition = partition
         self.DATA = data
 
@@ -27,6 +29,10 @@ class FaceLandmarkData(Dataset):
         if self.DATA == 'FRGC':
             data_T, landmark_T, seg_T = torch.Tensor(self.data), torch.Tensor(self.landmark), torch.Tensor(self.seg)
             face = data_T[item]
+        #데이터 추가 코드 (확인필요)
+        if self.DATA == 'Ear296_Korean':
+            data_T, landmark_T, seg_T = torch.Tensor(self.data), torch.Tensor(self.landmark), torch.Tensor(self.seg)
+            face = data_T[item]    
         landmark = landmark_T[item]
         heatmap = seg_T[item]
         if self.partition == 'trainval':

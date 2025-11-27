@@ -1,0 +1,11 @@
+setup.py
+assign_score_withk.egg-info/PKG-INFO
+assign_score_withk.egg-info/SOURCES.txt
+assign_score_withk.egg-info/dependency_links.txt
+assign_score_withk.egg-info/top_level.txt
+src/gpu/assign_score_withk_gpu.cu
+src/gpu/assign_score_withk_halfkernel_gpu.cu
+src/gpu/operator.cpp
+src/gpu/assign_score_withk_gpu.cu
+src/gpu/assign_score_withk_halfkernel_gpu.cu
+src/gpu/operator.cpp

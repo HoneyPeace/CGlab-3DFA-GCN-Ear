@@ -1,0 +1,8 @@
+# ninja log v5
+0	3752	7708365142779986	D:/3DFA-GCN-master/PAConv/cuda_lib/build/temp.win-amd64-cpython-38/Release/src/gpu/operator.obj	7a3d250d774d690a
+0	11476	7708367987930527	D:/3DFA-GCN-master/PAConv/cuda_lib/build/temp.win-amd64-cpython-38/Release/src/gpu/assign_score_withk_gpu.obj	aace120364315b7b
+6	3935	7708382800591287	D:/3DFA-GCN-master/PAConv/cuda_lib/build/temp.win-amd64-cpython-38/Release/src/gpu/operator.obj	b576015b1bed7284
+4	11984	7708382881746829	D:/3DFA-GCN-master/PAConv/cuda_lib/build/temp.win-amd64-cpython-38/Release/src/gpu/assign_score_withk_halfkernel_gpu.obj	a767a52953e20876
+2	12014	7708382881881375	D:/3DFA-GCN-master/PAConv/cuda_lib/build/temp.win-amd64-cpython-38/Release/src/gpu/assign_score_withk_gpu.obj	730828de13b8b6d
+2	11341	7708390335162017	D:/3DFA-GCN-master/PAConv/cuda_lib/build/temp.win-amd64-cpython-38/Release/src/gpu/assign_score_withk_halfkernel_gpu.obj	a767a52953e20876
+3	11319	7708391335574706	D:/3DFA-GCN-master/PAConv/cuda_lib/build/temp.win-amd64-cpython-38/Release/src/gpu/assign_score_withk_gpu.obj	730828de13b8b6d

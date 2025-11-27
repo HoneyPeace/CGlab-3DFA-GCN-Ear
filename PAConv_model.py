@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,11 +22,12 @@ class PAConv(nn.Module):
         self.calc_scores = args.calc_scores
         self.hidden = args.hidden
 
+        #기존은 10차원에서 6차원으로 변경 <-- 06.07: 차원 수 의심으로 인한 변경
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices
-        self.scorenet2 = ScoreNet(10, self.m2, hidden_unit=self.hidden[0])
-        self.scorenet3 = ScoreNet(10, self.m3, hidden_unit=self.hidden[1])
-        self.scorenet4 = ScoreNet(10, self.m4, hidden_unit=self.hidden[2])
-        self.scorenet5 = ScoreNet(10, self.m5, hidden_unit=self.hidden[3])
+        self.scorenet2 = ScoreNet(6, self.m2, hidden_unit=self.hidden[0])
+        self.scorenet3 = ScoreNet(6, self.m3, hidden_unit=self.hidden[1])
+        self.scorenet4 = ScoreNet(6, self.m4, hidden_unit=self.hidden[2])
+        self.scorenet5 = ScoreNet(6, self.m5, hidden_unit=self.hidden[3])
 
         i2 = 64       # channel dim of input_2nd
         o2 = i3 = 64  # channel dim of output_2st and input_3rd
@@ -84,7 +84,7 @@ class PAConv(nn.Module):
         xyz = get_scorenet_input(x, k=self.k, idx=idx)  # ScoreNet input
         # use MLP at the 1st layer, same with DGCNN
         x = get_graph_feature(x, k=self.k, idx=idx)
-        x = x.permute(0, 3, 1, 2)  # b,2cin,n,k
+        #x = x.permute(0, 3, 1, 2) <-- 06.06: 차원 부풀리기로 임의 제거함
         x = F.relu(self.conv1(x))
         x1 = x.max(dim=-1, keepdim=False)[0]
         # replace the last 4 DGCNN-EdgeConv with PAConv:
@@ -123,7 +123,8 @@ class PAConv(nn.Module):
         x = self.dp2(x)
         x = F.relu(self.conv8(x))
         """ Output the heatmap regression result: """
-        x = self.conv9(x) 
+        x = self.conv9(x) # 06.11 추가 모델 출력 후 softmax 적용 확인
+        x = F.softmax(x, dim=1)  # 06.11 추가 모델 출력 후 softmax 적용 확인
         return x
 
 

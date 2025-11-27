@@ -9,19 +9,21 @@ import os
 import torch
 
 
-def _init_():
+def _init_(args):
     if not os.path.exists('checkpoints'):
         os.makedirs('checkpoints')
-    if not os.path.exists('checkpoints/'+args.exp_name):
-        os.makedirs('checkpoints/'+args.exp_name)
-    if not os.path.exists('checkpoints/'+args.exp_name+'/'+'models'):
-        os.makedirs('checkpoints/'+args.exp_name+'/'+'models')
-    os.system('cp My_main.py checkpoints'+'/'+args.exp_name+'/'+'My_main.py.backup')
-    os.system('cp My_model.py checkpoints' + '/' + args.exp_name + '/' + 'My_model.py.backup')
-    os.system('cp My_util.py checkpoints' + '/' + args.exp_name + '/' + 'My_util.py.backup')
-    os.system('cp My_data.py checkpoints' + '/' + args.exp_name + '/' + 'My_data.py.backup')
-    os.system('cp My_loss.py checkpoints' + '/' + args.exp_name + '/' + 'My_loss.py.backup')
-    os.system('cp My_args.py checkpoints' + '/' + args.exp_name + '/' + 'My_args.py.backup')
+    if not os.path.exists(f'checkpoints/{args.exp_name}'):
+        os.makedirs(f'checkpoints/{args.exp_name}')
+    if not os.path.exists(f'checkpoints/{args.exp_name}/models'):
+        os.makedirs(f'checkpoints/{args.exp_name}/models')
+
+    os.system(f'copy My_main.py checkpoints\\{args.exp_name}\\My_main.py.backup')
+    os.system(f'copy My_model.py checkpoints\\{args.exp_name}\\My_model.py.backup')
+    os.system(f'copy My_util.py checkpoints\\{args.exp_name}\\My_util.py.backup')
+    os.system(f'copy My_data.py checkpoints\\{args.exp_name}\\My_data.py.backup')
+    os.system(f'copy My_loss.py checkpoints\\{args.exp_name}\\My_loss.py.backup')
+    os.system(f'copy My_args.py checkpoints\\{args.exp_name}\\My_args.py.backup')
+
 
 
 def weight_init(m):
