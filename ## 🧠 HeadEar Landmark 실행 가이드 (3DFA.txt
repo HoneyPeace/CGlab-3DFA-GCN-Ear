@@ -1,0 +1,183 @@
+## 🧠 HeadEar Landmark 실행 가이드 (3DFA-GCN 기반)
+
+
+
+### 🛠️ 1. Conda 환경 초기 설정 (최초 1회만)
+
+```
+set PATH=C:\Users\CGlab\anaconda3;C:\Users\CGlab\anaconda3\Scripts;C:\Users\CGlab\anaconda3\condabin;%PATH%
+
+conda init cmd.exe
+
+conda create -n EarLandMarking_CGLAB python=3.8 -y
+conda activate EarLandMarking_CGLAB
+call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
+conda install pytorch torchvision torchaudio cudatoolkit=11.1 -c pytorch -c nvidia
+pip install numpy scikit-learn matplotlib
+
+```
+
+---
+
+### 📁 2. 작업 디렉토리 이동
+
+``'
+conda activate EarLandMarking_CGLAB
+cd C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN
+
+```
+
+---
+
+### 🧹 3. 데이터 전처리
+
+### ✅ 처음 실행 시 (mat 파일 생성)
+
+matlab에서 make_mat 실행
+
+---
+
+### 🧪 4. 학습 (Training)
+
+### 🔄 실행 (npy전처리까지 함께)
+
+```bash
+python train.py --dataset Ear296_Korean --need_resample True --sigma 10 --num_points 2048 --dataset_seed 1 --sample_way FPS
+
+```
+
+.\checkpoints\Face_alignment_with_PAConv\Ear296_Korean\models\ 경로생성
+
+---
+
+### 📊 5. 평가 (Evaluation)
+
+```
+python eval_all.py --dataset Ear296_Korean --sigma 5 --num_points 2048 --regression_point_num 10 --Eval_DataType sample
+```
+
+sample, train, test 선택
+
+| 파라미터 | 역할 | 영향 받는 모듈/단계 |
+| --- | --- | --- |
+| `dataset` | 사용할 데이터셋 선택 | `main_sample`, `calculateHeatMap` |
+| `number_point` | FPS로 추출할 포인트 수 | 샘플링 (FPS) |
+| `seed` | 재현 가능성 보장 | 모든 난수 관련 |
+| `sigma` | 가우시안 히트맵 폭 조절 | `Gaussian_Heatmap()` → 히트맵 분포 직접 결정 |
+| `sample_way` | FPS 방식으로 샘플링 | `main_sample()` |
+| **`regression_point_num`** | **히트맵 후처리 시 top-k 수 선택** | 🔥 `landmark_regression()` 단계에서 사용됨 |
+| **`k`** | PAConv에서 이웃 수 | 🔥 GCN 학습 시 point graph 구성에 영향 |
+
+https://drive.google.com/file/d/1N3LNgrAsMeTg2jCQrMT6txFqNGpPrgIU/view?usp=drive_link
+https://www.notion.so/23181a79cb4380429733ea1631253222?source=copy_link
+
+---
+
+CUDA version 11.1
+
+Python 3.8.20 (anaconda)
+
+torch 1.9.0+cu111
+
+- 설치 packag(anaconda 기본 포함)
+    
+    absl-py                           2.3.0
+    assign-score-withk        0.0.0
+    asttokens                       3.0.0
+    attrs                               25.3.0
+    backcall                         0.2.0
+    blinker                           1.8.2
+    cachetools                     5.5.2
+    certifi                             2025.4.26
+    charset-normalizer        3.4.2
+    click                               8.1.8
+    colorama                       0.4.6
+    comm                            0.2.2
+    ConfigArgParse             1.7.1
+    contourpy                     1.1.1
+    cycler                             0.12.1
+    dash                              3.0.4
+    decorator                      5.2.1
+    executing                     2.2.0
+    fastjsonschema            2.21.1
+    filelock                          3.16.1
+    Flask                             3.0.3
+    fonttools                      4.57.0
+    fsspec                          2025.3.0
+    google-auth                2.40.3
+    google-auth-oauthlib      1.0.0
+    grpcio                        1.70.0
+    h5py                           3.11.0
+    idna                           3.10
+    importlib_metadata        8.5.0
+    importlib_resources       6.4.5
+    ipython                   8.12.3
+    ipywidgets                8.1.7
+    itsdangerous              2.2.0
+    jedi                      0.19.2
+    Jinja2                    3.1.6
+    joblib                    1.4.2
+    jsonschema                4.23.0
+    jsonschema-specifications 2023.12.1
+    jupyter_core              5.8.1
+    jupyterlab_widgets        3.0.15
+    kiwisolver                1.4.7
+    Markdown                  3.7
+    MarkupSafe                2.1.5
+    matplotlib                3.7.5
+    matplotlib-inline         0.1.7
+    mpmath                    1.3.0
+    narwhals                  1.41.1
+    nbformat                  5.10.4
+    nest-asyncio              1.6.0
+    networkx                  3.1
+    ninja                     1.11.1.4
+    numpy                     1.24.4
+    oauthlib                  3.2.2
+    open3d                    0.19.0
+    opencv-python             4.11.0.86
+    packaging                 25.0
+    parso                     0.8.4
+    pickleshare               0.7.5
+    pillow                    10.4.0
+    pip                       24.2
+    pkgutil_resolve_name      1.3.10
+    platformdirs              4.3.6
+    plotly                    6.1.2
+    prompt_toolkit            3.0.51
+    protobuf                  5.29.5
+    pure_eval                 0.2.3
+    pyasn1                    0.6.1
+    pyasn1_modules            0.4.2
+    Pygments                  2.19.1
+    pyparsing                 3.1.4
+    python-dateutil           2.9.0.post0
+    pywin32                   310
+    referencing               0.35.1
+    requests                  2.32.3
+    requests-oauthlib         2.0.0
+    retrying                  1.3.4
+    rpds-py                   0.20.1
+    rsa                       4.9.1
+    scikit-learn              1.3.2
+    scipy                     1.10.1
+    setuptools                59.5.0
+    six                       1.17.0
+    stack-data                0.6.3
+    sympy                     1.13.3
+    tensorboard               2.14.0
+    tensorboard-data-server   0.7.2
+    threadpoolctl             3.5.0
+    torch                     1.9.0+cu111
+    torchaudio                0.9.0
+    torchvision               0.10.0+cu111
+    tqdm                      4.67.1
+    traitlets                 5.14.3
+    typing_extensions         4.13.2
+    urllib3                   2.2.3
+    wcwidth                   0.2.13
+    Werkzeug                  3.0.6
+    wheel                     0.44.0
+    widgetsnbextension        4.0.14
+    zipp                      3.20.2
+    

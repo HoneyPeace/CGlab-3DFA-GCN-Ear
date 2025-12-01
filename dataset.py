@@ -1,50 +1,45 @@
+import os
 import torch
 import numpy as np
 from torch.utils.data import Dataset
 
-
-def load_face_data(data):
-    Heat_data_sample = np.load('./%s-npy/Heat_data_sample.npy' % data, allow_pickle=True)
-    Shape_sample = np.load('./%s-npy/shape_sample.npy' % data, allow_pickle=True)
-    landmark_position_select_all = np.load('./%s-npy/landmark_sample.npy' % data, allow_pickle=True)
-    if data == 'BU-3DFE' or data == 'FaceScape' or data == 'FRGC' or data == 'Ear296_Korean':
-        return Shape_sample, landmark_position_select_all, Heat_data_sample
+def load_face_data(data_root, data_name):
+    """
+    저장된 .npy 파일들을 불러오는 함수
+    경로: {data_root}/{data_name}-npy/
+    """
+    # 저장된 npy 경로 설정
+    base_path = os.path.join(data_root, f"{data_name}-npy")
+    
+    print(f">> Loading NPY data from: {base_path}")
+    
+    Heat_data_sample = np.load(os.path.join(base_path, 'Heat_data_sample.npy'), allow_pickle=True)
+    Shape_sample = np.load(os.path.join(base_path, 'shape_sample.npy'), allow_pickle=True)
+    landmark_position_select_all = np.load(os.path.join(base_path, 'landmark_sample.npy'), allow_pickle=True)
+    
+    return Shape_sample, landmark_position_select_all, Heat_data_sample
 
 
 class FaceLandmarkData(Dataset):
-    def __init__(self, partition='trainval', data='BU-3DFE'):
-        if data == 'BU-3DFE' or data == 'FaceScape':
-            self.data, self.landmark, self.seg = load_face_data(data)
-        if data == 'FRGC':
-            self.data, self.landmark, self.seg = load_face_data(data)
-        if data == 'Ear296_Korean':
-            self.data, self.landmark, self.seg = load_face_data(data)    
+    def __init__(self, data_root, partition='train', data='Ear296_Korean'):
+        # [수정] data_root 인자 추가
+        self.data_root = data_root
         self.partition = partition
         self.DATA = data
+        
+        # 데이터 로드
+        self.data, self.landmark, self.seg = load_face_data(self.data_root, self.DATA)
 
     def __getitem__(self, item):
-        if self.DATA == 'BU-3DFE' or self.DATA == 'FaceScape':
-            data_T, landmark_T, seg_T = torch.Tensor(self.data), torch.Tensor(self.landmark), torch.Tensor(self.seg)
-            face = data_T[item]
-        if self.DATA == 'FRGC':
-            data_T, landmark_T, seg_T = torch.Tensor(self.data), torch.Tensor(self.landmark), torch.Tensor(self.seg)
-            face = data_T[item]
-        #데이터 추가 코드 (확인필요)
-        if self.DATA == 'Ear296_Korean':
-            data_T, landmark_T, seg_T = torch.Tensor(self.data), torch.Tensor(self.landmark), torch.Tensor(self.seg)
-            face = data_T[item]    
-        landmark = landmark_T[item]
-        heatmap = seg_T[item]
-        if self.partition == 'trainval':
-            indices = list(range(face.size()[0]))
-            np.random.shuffle(indices)
-            face = face[indices]
-            heatmap = heatmap[indices]
+        # Tensor 변환
+        face = torch.from_numpy(self.data[item]).float()
+        landmark = torch.from_numpy(self.landmark[item]).float()
+        heatmap = torch.from_numpy(self.seg[item]).float()
+
+        # [주의] 학습(Train) 단계에서만 셔플이 필요하면 DataLoader에서 shuffle=True를 씁니다.
+        # 여기서는 데이터 자체를 섞지 않고 그대로 반환하는 것이 일반적입니다.
+        
         return face, landmark, heatmap
 
     def __len__(self):
-        return np.array(self.data).shape[0]
-
-
-
-
+        return self.data.shape[0]

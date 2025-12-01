@@ -1,31 +1,37 @@
 '''
-@Author: Yuan Wang
-@Contact: wangyuan2020@ia.ac.cn
+@Author: Yuan Wang (Modified by Researcher 2)
 @File: init.py
-@Time: 2021/12/02 10:57 AM
+@Description: Initialize checkpoint folders & Backup source code
 '''
 
 import os
+import shutil
 import torch
 
-
 def _init_(args):
-    if not os.path.exists('checkpoints'):
-        os.makedirs('checkpoints')
-    if not os.path.exists(f'checkpoints/{args.exp_name}'):
-        os.makedirs(f'checkpoints/{args.exp_name}')
-    if not os.path.exists(f'checkpoints/{args.exp_name}/models'):
-        os.makedirs(f'checkpoints/{args.exp_name}/models')
+    # args.output_root: ../Result
+    # args.exp_name: Ear_Project (예시)
+    
+    # 1. 체크포인트 폴더 생성
+    ckpt_dir = os.path.join(args.output_root, 'Models', args.exp_name)
+    os.makedirs(ckpt_dir, exist_ok=True)
 
-    os.system(f'copy My_main.py checkpoints\\{args.exp_name}\\My_main.py.backup')
-    os.system(f'copy My_model.py checkpoints\\{args.exp_name}\\My_model.py.backup')
-    os.system(f'copy My_util.py checkpoints\\{args.exp_name}\\My_util.py.backup')
-    os.system(f'copy My_data.py checkpoints\\{args.exp_name}\\My_data.py.backup')
-    os.system(f'copy My_loss.py checkpoints\\{args.exp_name}\\My_loss.py.backup')
-    os.system(f'copy My_args.py checkpoints\\{args.exp_name}\\My_args.py.backup')
+    # 2. 소스코드 백업 (나중에 코드를 어떻게 짰는지 확인용)
+    # 현재 폴더(.)의 주요 파이썬 파일들을 Result/Code_Backup/실험명/ 에 복사
+    code_backup_dir = os.path.join(args.output_root, 'Code_Backup', args.exp_name)
+    os.makedirs(code_backup_dir, exist_ok=True)
+    
+    # 백업할 파일 목록
+    src_files = ['train.py', 'dataset.py', 'PAConv_model.py', 'util.py', 'loss.py', 'My_args.py', 'augmentations.py', 'init.py']
+    
+    for f in src_files:
+        if os.path.exists(f):
+            shutil.copy(f, os.path.join(code_backup_dir, f))
+            
+    print(f">> Initialized Experiment: {args.exp_name}")
+    print(f">> Source Code Backed up to: {code_backup_dir}")
 
-
-
+# weight_init 함수는 수정할 필요 없음 (그대로 사용)
 def weight_init(m):
     if isinstance(m, torch.nn.Linear):
         torch.nn.init.xavier_normal_(m.weight)

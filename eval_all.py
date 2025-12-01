@@ -7,58 +7,67 @@ import os
 import warnings
 import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
-from dataset import FaceLandmarkData
 from PAConv_model import PAConv
 from util import landmark_regression, get_3D_FAN_NME
+from augmentations import normalize_data # 정규화 함수 임포트
 
-#3D 적으로 보기 쉬운 각도 ---> 0709 추가
-def update_view(angle):
-    ax.view_init(elev=35, azim=angle)
-    return fig,
-
-#  창 띄우지 않고 이미지 저장만 가능하게 설정
 matplotlib.use('Agg')
 warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.manifold._mds")
 
-# 파라미터 설정
 args = parser.parse_args()
 args.eval = True
-
-#경로 따라가게 수정 ---> 07/05
-if args.model_path == '':
-    model_subdir = os.path.join(f"{args.dataset}-npy", f"FPS{args.num_points}_sigma{args.sigma}", "models")
-    model_filename = args.model_epoch # 필요한 epoch 번호로 변경 가능
-    args.model_path = os.path.join(model_subdir, model_filename)
-    print(f" model_path 비어 있어 자동 설정됨: {args.model_path}")
-
-#if args.model_path == '':
-#    args.model_path = 'checkpoints/Face_alignment_with_PAConv/Ear296_Korean/models/model_epoch_250.t7'
-#    print(f" model_path가 비어 있어 기본값으로 설정됨: {args.model_path}")
-
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# 모델 불러오기
-model = PAConv(args, args.landmark_num).to(device) #총 랜드마크 갯수 일치시켜야됨
-model.load_state_dict(torch.load(args.model_path))
-model.eval()
+# -----------------------------------------------------------------------------
+# 2. 경로 설정 (Smart Load)
+# -----------------------------------------------------------------------------
+if args.use_split_dataset:
+    target_dataset_folder = args.dataset
+    print_target_name = args.dataset
+else:
+    target_dataset_folder = args.train_dataset_name
+    print_target_name = args.test_dataset_name
 
-regression_point_num = args.regression_point_num
+if args.run_id:
+    folder_prefix = f"FPS{args.num_points}_sigma{args.sigma}"
+    full_folder_name = f"{folder_prefix}_{args.run_id}"
+    backup_root = os.path.join(os.path.dirname(args.output_root), 'backup')
+    run_root = os.path.join(backup_root, target_dataset_folder, full_folder_name)
+    
+    args.model_path = os.path.join(run_root, 'models', args.model_epoch)
+    base_dir = os.path.join(run_root, 'npy_data')
+    
+    if not os.path.exists(args.model_path):
+        print(f"Error: Model not found at {args.model_path}")
+        sys.exit(1)
+else:
+    print("Error: --run_id required.")
+    sys.exit(1)
 
-# 경로 설정
-base_dir = os.path.join(f"{args.dataset}-npy", f"FPS{args.num_points}_sigma{args.sigma}")
-heatmap_dir = os.path.join(base_dir, f"PD_heatmap_{args.Eval_DataType}_regression_{args.regression_point_num}")
-os.makedirs(heatmap_dir, exist_ok=True)
-asc_dir = os.path.join(base_dir, f"PD_heatmap_{args.Eval_DataType}_regression_{args.regression_point_num}", f"PD_landmark_{args.Eval_DataType}_regression_{args.regression_point_num}")
-os.makedirs(asc_dir, exist_ok=True)
-# 데이터 로드
-shape_sample = np.load(os.path.join(base_dir, f"shape_{args.Eval_DataType}.npy"), allow_pickle=True)
-landmark_all = np.load(os.path.join(base_dir, f"landmark_{args.Eval_DataType}.npy"), allow_pickle=True)
-heatmap_sample = np.load(os.path.join(base_dir, f"Heat_data_{args.Eval_DataType}.npy"), allow_pickle=True)
+print(f"Loading Model: {args.model_path}")
+print(f"Loading Data : {base_dir}")
 
+eval_save_dir = os.path.join(run_root, f"Eval_Result_{args.Eval_DataType}_Reg{args.regression_point_num}")
+heatmap_save_dir = os.path.join(eval_save_dir, "Pred_Heatmaps")
+asc_save_dir = os.path.join(eval_save_dir, "Pred_Landmarks_ASC")
+os.makedirs(eval_save_dir, exist_ok=True)
+os.makedirs(heatmap_save_dir, exist_ok=True)
+os.makedirs(asc_save_dir, exist_ok=True)
+
+# -----------------------------------------------------------------------------
+# 3. 데이터 로드
+# -----------------------------------------------------------------------------
+try:
+    shape_sample = np.load(os.path.join(base_dir, f"shape_{args.Eval_DataType}.npy"), allow_pickle=True)
+    landmark_all = np.load(os.path.join(base_dir, f"landmark_{args.Eval_DataType}.npy"), allow_pickle=True)
+    heatmap_sample = np.load(os.path.join(base_dir, f"Heat_data_{args.Eval_DataType}.npy"), allow_pickle=True)
+except FileNotFoundError:
+    print(f"Error: Data files not found.")
+    sys.exit(1)
 
 test_dataset = TensorDataset(
     torch.tensor(shape_sample, dtype=torch.float32),
@@ -67,154 +76,101 @@ test_dataset = TensorDataset(
 )
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-# 추가: ME 계산용 리스트
+model = PAConv(args, args.landmark_num).to(device)
+model.load_state_dict(torch.load(args.model_path, map_location=device))
+model.eval()
+
+# -----------------------------------------------------------------------------
+# 5. 평가 루프 (Normalization -> Inference -> Denormalization)
+# -----------------------------------------------------------------------------
 me_list = []
 per_landmark_me_list = []
-all_dists_list = []          # 모든 샘플 × 랜드마크 거리 펼친 것 (Table III 'All' 용)
 
-# 평가 시작
-total_nme = 0.0
-print("\n Evaluating on test set...")
-for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Evaluation Progress")):
+print("\n>>> Starting Evaluation (With Normalization)...")
+
+for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Evaluating")):
     point = point.to(device)
-    heatmap = heatmap.to(device)
     gt_landmark = gt_landmark.to(device)
-
+    
+    # [1] 정규화 파라미터 계산 (복원용)
+    # augmentations.py의 normalize_data 로직 역추적
+    B, N, C = point.shape
+    centroid = torch.mean(point, axis=1, keepdim=True) # 중심점
+    point_centered = point - centroid
+    m = torch.max(torch.sqrt(torch.sum(point_centered ** 2, axis=2)), axis=1)[0] # 최대 거리(스케일)
+    scale = m.view(-1, 1, 1)
+    
+    # [2] 정규화 수행 (모델 입력용)
+    point_norm = point_centered / scale 
+    
     with torch.no_grad():
-        pred_heatmap_raw = model(point.permute(0, 2, 1))  # [1, N, 2048]
-        pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)  # [1, 2048, N]
+        # [3] 모델 예측 (정규화된 좌표 기반)
+        pred_heatmap_raw = model(point_norm.permute(0, 2, 1))
+        pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)
 
-        # 디버그 출력
-        print(f"\n Sample {idx}")
-        print(f"point[0].shape: {point[0].shape}")
-        print(f"pred_heatmap[0].shape: {pred_heatmap[0].shape}")
-        print(f"gt_landmark[0].shape: {gt_landmark[0].shape}")
+        # [4] 회귀 (Normalized 좌표계에서 예측 좌표 추출)
+        # 중요: Regression할 때 'normalized shape'를 써야 함
+        pred_landmark_norm = landmark_regression(point_norm[0], pred_heatmap[0], args.regression_point_num, idx)
+        
+        # [5] 복원 (Denormalization) -> 원래 mm 단위로 변환
+        # 식: (Pred_Norm * Scale) + Centroid
+        pred_landmark = (pred_landmark_norm * scale) + centroid
 
-        # 예측 히트맵 저장 경로 설정 ---> 07/05
-        #reg_num = args.regression_point_num
-        #heatmap_dir = os.path.join(base_dir, f"PD_heatmap_regression_{reg_num}")
-        #os.makedirs(heatmap_dir, exist_ok=True)
-
-        # 히트맵 시각화 (40개마다)
+        # 시각화 (20개마다)
         if idx % 20 == 0:
             points_np = point[0].cpu().numpy()
             heatmap_np = pred_heatmap[0].cpu().numpy()
-            landmark_num = heatmap_np.shape[1]
-            for landmark_id in range(min(40, landmark_num)):
-                colors = heatmap_np[:, landmark_id]
-                fig = plt.figure()
-                ax = fig.add_subplot(111, projection='3d')
-                sc = ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], c=colors, cmap='jet', s=1)
-                ax.view_init(elev=90, azim=-90) #위에서 내려다보는 각도
-                #ax.view_init(elev=55, azim=235) # tragus 잘보이는 각도
-                plt.colorbar(sc, label=f"Heatmap value for landmark {landmark_id}")
-                plt.title(f"Sample {idx} - Heatmap (Landmark {landmark_id})")
-                #plt.savefig(f"heatmap_visualizations/sample{idx:03d}_landmark{landmark_id}.png")
-                plt.savefig(os.path.join(heatmap_dir, f"sample{idx:03d}_landmark{landmark_id}.png"))
-                plt.close()
+            colors = heatmap_np[:, 0]
+            
+            fig = plt.figure(figsize=(10, 5))
+            ax = fig.add_subplot(1, 2, 1, projection='3d')
+            ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], c=colors, cmap='jet', s=15, alpha=0.8)
+            ax.view_init(elev=90, azim=-90)
+            ax.set_title(f"Sample {idx} LM 0 (Front)")
+            ax.axis('off')
+            plt.savefig(os.path.join(heatmap_save_dir, f"sample{idx:03d}_pred.png"))
+            plt.close()
 
-                # 애니메이션 저장 (샘플 0, 랜드마크 11일 때만)
-                #if idx == 0 and landmark_id == 11:
-                #    fig = plt.figure()
-                #    ax = fig.add_subplot(111, projection='3d')
-                #    sc = ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], c=colors, cmap='jet', s=1)
-                #    plt.colorbar(sc, label=f"Heatmap value for landmark {landmark_id}")
-                #    ax.set_title(f"Rotating Heatmap - Sample {idx}, Landmark {landmark_id}")
-                #    ani = animation.FuncAnimation(fig, update_view, frames=range(0, 360, 3), interval=50)
-                #    ani_save_path = os.path.join(heatmap_dir, f"sample{idx:03d}_landmark{landmark_id}_rotate.gif")
-                #    ani.save(ani_save_path, writer='pillow', fps=20)
-                #    plt.close()
-                #    print(f" 애니메이션 저장 완료: {ani_save_path}")
-   
-        # 후처리 및 평가
-        pred_landmark = landmark_regression(point[0], pred_heatmap[0], args.regression_point_num, idx)
-        nme, _ = get_3D_FAN_NME(pred_landmark, gt_landmark)
-        total_nme += nme.item()
-
-        # ME 계산 추가
+        # ME 계산
         pred_np = pred_landmark.cpu().numpy()
         gt_np = gt_landmark[0].cpu().numpy()
-        dists = np.linalg.norm(pred_np - gt_np, axis=2)
+        if pred_np.ndim == 3: pred_np = pred_np.squeeze(0)
+        if gt_np.ndim == 3: gt_np = gt_np.squeeze(0)
+            
+        dists = np.linalg.norm(pred_np - gt_np, axis=1)
         me = np.mean(dists)
+        
         me_list.append(me)
-        # 추가: 이 샘플의 랜드마크별 거리 저장 (L 길이 1D 배열)
-        per_landmark_me_list.append(dists.squeeze(0)) 
-        # ② 전체 거리 펼친 리스트 (Table III All 용)
-        all_dists_list.append(dists.reshape(-1))        # (L,)
+        per_landmark_me_list.append(dists)
+        
+        # ASC 저장
+        np.savetxt(os.path.join(asc_save_dir, f"pred_{idx:03d}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
-        print(f"[{idx:03d}] NME: {nme.item():.4f} | ME: {me:.4f}")
-        #if idx % 10 == 0:
-        #    print(f"[{idx:03d}] NME: {nme.item():.4f} | ME: {me:.4f}")
-
-        pred_coords = pred_landmark.squeeze(0).cpu().numpy()  # shape: (landmark_num, 3)
-        asc_save_path = os.path.join(asc_dir, f"pred_landmark_{args.Eval_DataType}_{idx:03d}.asc")
-        np.savetxt(asc_save_path, pred_coords, fmt="%.6f", delimiter=",")
-
-#  결과 요약
-average_nme = total_nme / len(test_loader)
 average_me = np.mean(me_list)
 std_me = np.std(me_list)
-sr = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
+sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
+sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
 
-#  최종 출력
-print(f"\n Evaluation Complete!")
-print(f"🔹 Average NME(not normalized yet): {average_nme:.4f}")
-print(f"🔹 Average ME : {average_me:.4f}")
-print(f"🔹 Std of ME  : {std_me:.4f}")
-print(f"🔹 SR@10mm    : {sr:.2f}%")
+print(f"\n==========================================")
+print(f"   Evaluation Result: {args.exp_name}")
+print(f"   (Logic: Normalized Input / Denormalized Pred)")
+print(f"==========================================")
+print(f" Dataset : {print_target_name}")
+print(f" Sigma   : {args.sigma}")
+print(f" Reg Pts : {args.regression_point_num}")
+print(f"------------------------------------------")
+print(f" Average ME : {average_me:.4f} mm")
+print(f" Std of ME  : {std_me:.4f} mm")
+print(f" SR @ 10mm  : {sr_10:.2f} %")
+print(f" SR @ 5mm   : {sr_5:.2f} %")
+print(f"==========================================\n")
 
-#25.11.25
 if len(per_landmark_me_list) > 0:
-    per_landmark_me_array = np.stack(per_landmark_me_list, axis=0).astype(np.float64)  # (N, L)
-
-    # 랜드마크별 평균 / 표준편차
-    per_landmark_mean = np.mean(per_landmark_me_array, axis=0)
-    per_landmark_std  = np.std(per_landmark_me_array, axis=0)
-
-    print("\n🔹 Per-landmark ME (mm):   (형식: Mean ± STD)")
-    for lid in range(len(per_landmark_mean)):
-        print(f"  - Lm {lid:02d}: {per_landmark_mean[lid]:.3f} ± {per_landmark_std[lid]:.3f} mm")
-
-# (2) Table III 'All' 행: 모든 샘플 × 랜드마크 거리 전체에 대한 Mean ± STD
-if len(all_dists_list) > 0:
-    all_dists = np.concatenate(all_dists_list, axis=0).astype(np.float64)  # (N * L,)
-    all_mean = np.mean(all_dists)
-    all_std  = np.std(all_dists)
-    print(f"\n🔹 All (per-point error, SOTA style): {all_mean:.3f} ± {all_std:.3f} mm")
-
-        
-    # 디버깅: 좌표 범위 확인 ---> 06/25 노말라이제이션인지 확인용
-print(f"[{idx}] point range: min={point[0].min().item():.3f}, max={point[0].max().item():.3f}")
-print(f"[{idx}] pred_landmark range: min={pred_landmark.min().item():.3f}, max={pred_landmark.max().item():.3f}")
-
-# 디버깅 ME list 구성 확인용 ---> 07.04 추가
-me_array = np.array(me_list)
-nan_count = np.isnan(me_array).sum()
-zero_count = np.sum(me_array < 1e-6)
-large_count = np.sum(me_array > 100)
-bad_indices = np.where(np.isnan(me_array) | (me_array < 1e-6) | (me_array > 100))[0]
-
-print("\n🔍 ME 값 상태 분석")
-print(f" - 총 샘플 수: {len(me_array)}")
-print(f" - NaN 개수: {nan_count}")
-print(f" - 0 또는 너무 작은 값(<1e-6): {zero_count}")
-print(f" - 이상치(>100mm) 개수: {large_count}")
-print(f" - 문제 있는 인덱스: {bad_indices.tolist()}")
-
-"""
-#  NaN 제거 후 유효한 ME 값 기준으로 다시 계산 
-me_valid = me_array[~np.isnan(me_array)]
-print(f"\n🔹 유효 샘플 기준 평균 ME: {np.mean(me_valid):.4f}")
-print(f"🔹 유효 샘플 기준 표준편차: {np.std(me_valid):.4f}")
-print(f"🔹 유효 SR@10mm: {(np.sum(me_valid < 10.0) / len(me_valid)) * 100:.2f}%")
-"""
-
-"""
-            # NME 방식: bounding box 대각선
-            min_xyz = torch.min(gt_sample, dim=0)[0]
-            max_xyz = torch.max(gt_sample, dim=0)[0]
-            norm_diag = torch.norm(max_xyz - min_xyz)
-            nme_diag = me_tensor / norm_diag
-            total_nme_diag += nme_diag.item()
-            nme_list_diag.append(nme_diag.item())
-"""
+    per_landmark_me_array = np.stack(per_landmark_me_list, axis=0)
+    lm_mean = np.mean(per_landmark_me_array, axis=0)
+    lm_std = np.std(per_landmark_me_array, axis=0)
+    
+    print(">>> Top 5 Hardest Landmarks:")
+    worst_indices = np.argsort(lm_mean)[::-1][:5]
+    for i in worst_indices:
+        print(f"    LM {i:02d}: {lm_mean[i]:.3f} ± {lm_std[i]:.3f} mm")
