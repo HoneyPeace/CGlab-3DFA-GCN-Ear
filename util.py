@@ -144,15 +144,14 @@ def load_landmark_position(dataset, data_root, shape_all=None):
 # Core Processing & Sampling (기존 유지)
 # -----------------------------------------------------------------------------
 def Gaussian_Heatmap(Distance, sigma):
-    D2 = Distance * Distance
-    S2 = 2.0 * sigma * sigma
-    Exponent = D2 / S2
-    heatmap = np.exp(-Exponent)
+    D2 = Distance * Distance                 # (Ni, L)
+    S2 = 2.0 * sigma * sigma                 # scalar
+    Exponent = D2 / S2                       # (Ni, L)
+    heatmap = np.exp(-Exponent)              # (Ni, L)
     return heatmap
 
 def calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma):
-    Heat_data_all = []
-    # 리스트 길이 체크 (Shape 개수 == Landmark 개수여야 함)
+    Heat_data_all = []                       # list of (Ni, L)
     if len(shape_all) != len(landmark_position_sample):
         print(f"[Warning] Mismatch! Shapes: {len(shape_all)}, Landmarks: {len(landmark_position_sample)}")
         min_len = min(len(shape_all), len(landmark_position_sample))
@@ -160,13 +159,15 @@ def calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma):
         landmark_position_sample = landmark_position_sample[:min_len]
 
     for i in range(len(shape_all)):
-        shape_i = shape_all[i]
-        lm_i = landmark_position_sample[i]
-        diff = shape_i[:, np.newaxis, :] - lm_i[np.newaxis, :, :]
-        dists = np.linalg.norm(diff, axis=2)
-        heat = Gaussian_Heatmap(dists, sigma)
-        Heat_data_all.append(heat)
-    return Heat_data_all
+        shape_i = shape_all[i]              # (Ni, 3)
+        lm_i = landmark_position_sample[i]  # (L, 3)
+
+        diff  = shape_i[:, np.newaxis, :] - lm_i[np.newaxis, :, :]  # (Ni, L, 3)
+        dists = np.linalg.norm(diff, axis=2)                        # (Ni, L)
+        heat  = Gaussian_Heatmap(dists, sigma)                      # (Ni, L)
+
+        Heat_data_all.append(heat)          # append (Ni, L)
+    return Heat_data_all                    # list length S, each (Ni, L)
 
 def compute_sample_index(Heat_data, num_points, landmark_index, rand_seed):
     np.random.seed(rand_seed)
@@ -202,16 +203,26 @@ def fps(xyz, M):
 def random_sample(shape_all, Heat_data_all, num_points, rand_seed, sample_way, dataset, data_root):    
     print('   Start sampling...')
     if sample_way == 'FPS':
-        FPS_matrix = [fps(torch.from_numpy(shape_all[i]).float().unsqueeze(0).to(device), num_points) for i in range(len(Heat_data_all))]
-        Heat_data_sample = [np.array(Heat_data_all[j])[FPS_matrix[j].squeeze(0).cpu(), :] for j in range(len(Heat_data_all))]
-        shape_sample = [np.array(shape_all[j])[FPS_matrix[j].squeeze(0).cpu(), :] for j in range(len(shape_all))]
+        FPS_matrix = [fps(torch.from_numpy(shape_all[i]).float().unsqueeze(0).to(device), num_points)
+                      for i in range(len(Heat_data_all))]                         # each: (1, N)
+
+        Heat_data_sample = [np.array(Heat_data_all[j])[FPS_matrix[j].squeeze(0).cpu(), :]
+                            for j in range(len(Heat_data_all))]                   # list of (N, L)
+        shape_sample     = [np.array(shape_all[j])[FPS_matrix[j].squeeze(0).cpu(), :]
+                            for j in range(len(shape_all))]                       # list of (N, 3)
         return Heat_data_sample, shape_sample
+
     elif sample_way == 'Random':
-        landmark_index_select_all = load_landmark_index(dataset, data_root) # Index 필요
+        landmark_index_select_all = load_landmark_index(dataset, data_root)       # list of landmark indices
         np.random.seed(rand_seed)
-        random_matrix = [compute_sample_index(Heat_data_all[i], num_points, landmark_index_select_all[i]-1, rand_seed) for i in range(len(Heat_data_all))]
-        Heat_data_sample = [np.array(Heat_data_all[j])[random_matrix[j], :] for j in range(len(Heat_data_all))]
-        shape_sample = [np.array(shape_all[j])[random_matrix[j], :] for j in range(len(shape_all))]
+        random_matrix = [compute_sample_index(Heat_data_all[i], num_points,
+                                              landmark_index_select_all[i]-1, rand_seed)
+                         for i in range(len(Heat_data_all))]                      # each: (N,)
+
+        Heat_data_sample = [np.array(Heat_data_all[j])[random_matrix[j], :]
+                            for j in range(len(Heat_data_all))]                   # list of (N, L)
+        shape_sample     = [np.array(shape_all[j])[random_matrix[j], :]
+                            for j in range(len(shape_all))]                       # list of (N, 3)
         return Heat_data_sample, shape_sample
     return [], []
 
@@ -226,38 +237,54 @@ def get_rigid(src, dst):
     return np.hstack((R, T[:, np.newaxis]))
 
 def landmark_regression(shape, Heatmap, regression_point_num, idx=None):
-    shape = shape.cpu().numpy()
-    Heatmap = Heatmap.cpu().numpy()
-    sortIdx = np.argsort(Heatmap, 0)
-    shape_sort_select = np.array([shape[sortIdx[-regression_point_num:, ld]] for ld in range(Heatmap.shape[1])]) 
-    Heatmap_sort_select = np.array([Heatmap[sortIdx[-regression_point_num:, ld], ld] for ld in range(Heatmap.shape[1])]).reshape(-1, regression_point_num, 1) 
-    shape_sort_select_rep = np.expand_dims(shape_sort_select, axis=-1).repeat(regression_point_num, axis=-1) 
-    shape2_exp_eer = shape_sort_select_rep.transpose(0, 1, 3, 2) - shape_sort_select_rep.transpose(0, 3, 1, 2)
-    D_Matrix = np.linalg.norm(shape2_exp_eer, axis=3)
+    shape   = shape.cpu().numpy()             # (N, 3)
+    Heatmap = Heatmap.cpu().numpy()           # (N, L)
+
+    sortIdx = np.argsort(Heatmap, 0)          # (N, L)
+
+    shape_sort_select = np.array([shape[sortIdx[-regression_point_num:, ld]]
+                                  for ld in range(Heatmap.shape[1])])              # (L, r, 3)
+    Heatmap_sort_select = np.array([Heatmap[sortIdx[-regression_point_num:, ld], ld]
+                                    for ld in range(Heatmap.shape[1])]).reshape(-1, regression_point_num, 1)  # (L, r, 1)
+
+    shape_sort_select_rep = np.expand_dims(shape_sort_select, axis=-1).repeat(regression_point_num, axis=-1)  # (L, r, 3, r)
+    shape2_exp_eer = shape_sort_select_rep.transpose(0, 1, 3, 2) - shape_sort_select_rep.transpose(0, 3, 1, 2)  # (L, r, r, 3)
+    D_Matrix = np.linalg.norm(shape2_exp_eer, axis=3)                        # (L, r, r)
+
     mds = MDS(n_components=2, dissimilarity='precomputed', random_state=0)
-    shape_MDS = np.array([mds.fit_transform(D_Matrix[i]) for i in range(Heatmap.shape[1])])
-    shape_MDS = np.concatenate((shape_MDS, np.zeros((Heatmap.shape[1], regression_point_num, 1))), axis=2)
-    landmark2D = np.sum(Heatmap_sort_select.repeat(3, axis=2) * shape_MDS, axis=1) / (Heatmap_sort_select.sum(1) + 1e-6)
-    
-    # N neighbors dynamic
+    shape_MDS = np.array([mds.fit_transform(D_Matrix[i]) for i in range(Heatmap.shape[1])])  # (L, r, 2)
+    shape_MDS = np.concatenate((shape_MDS, np.zeros((Heatmap.shape[1], regression_point_num, 1))), axis=2)  # (L, r, 3)
+
+    landmark2D = np.sum(Heatmap_sort_select.repeat(3, axis=2) * shape_MDS, axis=1) / \
+                 (Heatmap_sort_select.sum(1) + 1e-6)                           # (L, 3)
+
     N_neighbors = min(regression_point_num, 6)
     neigh = NearestNeighbors(n_neighbors=N_neighbors)
     IDX = []
     for i in range(Heatmap.shape[1]):
-        neigh.fit(shape_MDS[i])
+        neigh.fit(shape_MDS[i])                                                # (r, 3)
         IDX.append(neigh.kneighbors(landmark2D[i].reshape(1,-1))[1])
-    IDX = np.array(IDX)
-    shape_ext = np.array([shape_MDS[i, IDX[i], :].reshape(-1,3) - landmark2D[i].reshape(1,-1).repeat(N_neighbors, axis=0) for i in range(Heatmap.shape[1])])
-    shape_ext_T = np.array([shape_sort_select[i, IDX[i], :] for i in range(Heatmap.shape[1])]).reshape(-1,N_neighbors,3)
-    w1 = shape_ext - np.repeat(shape_ext.mean(1, keepdims=True), N_neighbors, axis=1)    
-    w2 = shape_ext_T - np.repeat(shape_ext_T.mean(1, keepdims=True), N_neighbors, axis=1)   
-    w1 = np.linalg.norm(w1.reshape(Heatmap.shape[1], -1), axis=1).reshape(-1, 1, 1)  
-    w2 = np.linalg.norm(w2.reshape(Heatmap.shape[1], -1), axis=1).reshape(-1, 1, 1) 
+    IDX = np.array(IDX)                                                        # (L, 1, N_neighbors)
+
+    shape_ext = np.array([shape_MDS[i, IDX[i], :].reshape(-1,3) -
+                          landmark2D[i].reshape(1,-1).repeat(N_neighbors, axis=0)
+                          for i in range(Heatmap.shape[1])])                   # (L, N_neighbors, 3)
+
+    shape_ext_T = np.array([shape_sort_select[i, IDX[i], :]
+                            for i in range(Heatmap.shape[1])]).reshape(-1, N_neighbors, 3)  # (L, N_neighbors, 3)
+
+    w1 = shape_ext - np.repeat(shape_ext.mean(1, keepdims=True), N_neighbors, axis=1)       # (L, N_neighbors, 3)
+    w2 = shape_ext_T - np.repeat(shape_ext_T.mean(1, keepdims=True), N_neighbors, axis=1)   # (L, N_neighbors, 3)
+    w1 = np.linalg.norm(w1.reshape(Heatmap.shape[1], -1), axis=1).reshape(-1, 1, 1)         # (L,1,1)
+    w2 = np.linalg.norm(w2.reshape(Heatmap.shape[1], -1), axis=1).reshape(-1, 1, 1)         # (L,1,1)
     w1[w1 < 1e-6] = 1e-6
     w2[w2 < 1e-6] = 1e-6
-    shape_ext = shape_ext * w2 / w1  
-    landmark3D = np.array([get_rigid(shape_ext[i], shape_ext_T[i])[:, 3] for i in range(Heatmap.shape[1])])
-    return torch.from_numpy(landmark3D).unsqueeze(0).to(device)
+    shape_ext = shape_ext * w2 / w1                                                         # (L, N_neighbors, 3)
+
+    landmark3D = np.array([get_rigid(shape_ext[i], shape_ext_T[i])[:, 3]
+                           for i in range(Heatmap.shape[1])])           # (L, 3)
+
+    return torch.from_numpy(landmark3D).unsqueeze(0).to(device)         # (1, L, 3)
 
 #def get_3D_FAN_NME(pred, gt):
 #    if pred.dim() == 2: pred = pred.unsqueeze(0)
@@ -271,22 +298,23 @@ def get_3D_FAN_NME(pred_landmark, gt_landmark):
 
 def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data'):
     print(f'\n--- Processing: {dataset} ---')
-    # 1. Shape (.ply)
-    shape_all = load_shape_data(dataset, data_root)
+    shape_all = load_shape_data(dataset, data_root)                               # list of (Ni, 3)
     print(f'   Loaded {len(shape_all)} shapes.')
-    # 2. Landmark (.asc)
-    landmark_position_sample = load_landmark_position(dataset, data_root, shape_all)
+
+    landmark_position_sample = load_landmark_position(dataset, data_root, shape_all)  # list of (L, 3)
     print(f'   Loaded {len(landmark_position_sample)} landmarks.')
-    # 3. Heatmap
+
     print('   Calculating Heatmaps...')
-    Heat_data_all = calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma)
-    # 4. Sampling
-    Heat_data_sample, shape_sample = random_sample(shape_all, Heat_data_all, num_points, seed, sample_way, dataset, data_root)
-    # 5. Save
+    Heat_data_all = calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma)  # list of (Ni, L)
+
+    Heat_data_sample, shape_sample = random_sample(shape_all, Heat_data_all,
+                                                   num_points, seed, sample_way, dataset, data_root)
+    # Heat_data_sample: list of (N, L), shape_sample: list of (N, 3)
+
     save_base_dir = os.path.join(data_root, f"{dataset}-npy")
     os.makedirs(save_base_dir, exist_ok=True)
     print(f"   Saving to: {save_base_dir}")
-    np.save(os.path.join(save_base_dir, 'Heat_data_sample.npy'), Heat_data_sample)
-    np.save(os.path.join(save_base_dir, 'shape_sample.npy'), shape_sample)
-    np.save(os.path.join(save_base_dir, 'landmark_sample.npy'), landmark_position_sample)
+    np.save(os.path.join(save_base_dir, 'Heat_data_sample.npy'), Heat_data_sample)       # (S, N, L)
+    np.save(os.path.join(save_base_dir, 'shape_sample.npy'),      shape_sample)          # (S, N, 3)
+    np.save(os.path.join(save_base_dir, 'landmark_sample.npy'),   landmark_position_sample) # (S, L, 3)
     print("--- Done ---\n")

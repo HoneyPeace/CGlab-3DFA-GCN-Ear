@@ -4,76 +4,88 @@ import torch.nn.functional as F
 
 
 def knn(x, k):
-    B, _, N = x.size()
-    inner = -2 * torch.matmul(x.transpose(2, 1), x)
-    xx = torch.sum(x ** 2, dim=1, keepdim=True)
-    pairwise_distance = -xx - inner - xx.transpose(2, 1)
+    B, _, N = x.size()                                   # x: (B, C, N)
+    inner = -2 * torch.matmul(x.transpose(2, 1), x)      # x^T x: (B, N, N)
+    xx = torch.sum(x ** 2, dim=1, keepdim=True)          # (B, 1, N)
+    pairwise_distance = -xx - inner - xx.transpose(2, 1) # (B, N, N)
 
-    _, idx = pairwise_distance.topk(k=k, dim=-1)  # (batch_size, num_points, k)
+    _, idx = pairwise_distance.topk(k=k, dim=-1)         # idx: (B, N, K)
 
-    return idx, pairwise_distance
+    return idx, pairwise_distance                        # idx:(B,N,K), dist:(B,N,N)
 
 
 
 def get_graph_feature(x, k=20, idx=None):
     """
     x: input points (B, C, N)
-    return: edge features (B, 2*C, N, k)
+    return: edge features (B, 2*C, N, K)
     """
-    batch_size, num_dims, num_points = x.size()
+    batch_size, num_dims, num_points = x.size()         # (B, C, N)
     if idx is None:
-        idx, _ = knn(x, k=k)  # (B, N, k)
+        idx, _ = knn(x, k=k)                            # idx: (B, N, K)
 
     device = x.device
+    
+    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points  # (B,1,1)
+    idx = idx + idx_base                                # (B, N, K) + base offset
+    idx = idx.view(-1)                                  # (B*N*K,)
 
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
-    idx = idx + idx_base
-    idx = idx.view(-1)
+    x = x.transpose(2, 1).contiguous()                  # (B, N, C)
+    feature = x.view(batch_size * num_points, -1)[idx, :]   # (B*N*K, C) 인덱싱
+    feature = feature.view(batch_size, num_points, k, num_dims)  # (B, N, K, C) = neighbor
 
-    x = x.transpose(2, 1).contiguous()  # (B, N, C)
-    feature = x.view(batch_size * num_points, -1)[idx, :]
-    feature = feature.view(batch_size, num_points, k, num_dims)
+    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)  # center: (B, N, K, C)
 
-    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
-
-    feature = torch.cat((feature - x, x), dim=3).permute(0, 3, 1, 2)  # (B, 2*C, N, k)
+    feature = torch.cat((feature - x, x), dim=3).permute(0, 3, 1, 2)    # (B, 2*C, N, K)
     return feature
 
 
 def get_scorenet_input(x, idx, k):
     """
     x: [B, C, N]
-    return: [B, 10, N, K]   # 2025.06.06 변경됨 (기존: [B, 6, N, K])
+    return: [B, 10, N, K]   # 주석은 10으로 적혀있지만, 실제 코드는 2*C=6 채널
     """
-    batch_size = x.size(0)
-    num_points = x.size(2)
-    x = x.view(batch_size, -1, num_points)
+    batch_size = x.size(0)                                # B
+    num_points = x.size(2)                                # N
+    x = x.view(batch_size, -1, num_points)                # (B, C, N)
 
-    device = torch.device('cuda')  # 기존 그대로 유지
+    device = torch.device('cuda')  # 기존 코드 유지
 
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
-    idx = idx + idx_base
-    idx = idx.view(-1)
+    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points  # (B,1,1)
+    idx = idx + idx_base                                 # (B, N, K)
+    idx = idx.view(-1)                                   # (B*N*K,)
 
-    _, num_dims, _ = x.size()
+    _, num_dims, _ = x.size()                            # num_dims = C (=3)
 
-    x = x.transpose(2, 1).contiguous()  # (B, N, C)
-    neighbor = x.view(batch_size * num_points, -1)[idx, :].view(batch_size, num_points, k, num_dims)
-    center = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
+    x = x.transpose(2, 1).contiguous()                   # (B, N, C)
+    neighbor = x.view(batch_size * num_points, -1)[idx, :]\
+                .view(batch_size, num_points, k, num_dims)   # (B, N, K, C)
+    center = x.view(batch_size, num_points, 1, num_dims)\
+             .repeat(1, 1, k, 1)                         # (B, N, K, C)
 
-    feature = torch.cat((neighbor - center, neighbor), dim=3)
+    feature = torch.cat((neighbor - center, neighbor), dim=3)  # (B, N, K, 2*C)
 
-    return feature.permute(0, 3, 1, 2).contiguous()  # (B, 6, N, K) 
+    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 2*C, N, K) = (B, 6, N, K)
 
 
 
 def feat_trans_dgcnn(point_input, kernel, m):
     """transforming features using weight matrices"""
     # following get_graph_feature in DGCNN: torch.cat((neighbor - center, neighbor), dim=3)
-    B, _, N = point_input.size()  # b, 2cin, n
-    point_output = torch.matmul(point_input.permute(0, 2, 1).repeat(1, 1, 2), kernel).view(B, N, m, -1)  # b,n,m,cout
-    center_output = torch.matmul(point_input.permute(0, 2, 1), kernel[:point_input.size(1)]).view(B, N, m, -1)  # b,n,m,cout
-    return point_output, center_output
+    B, _, N = point_input.size()                          # point_input: (B, Cin, N)
+    # kernel: (2*Cin, m*Cout)  으로 초기화되어 있음
+
+    point_output = torch.matmul(
+        point_input.permute(0, 2, 1).repeat(1, 1, 2),     # (B, N, 2*Cin)
+        kernel                                            # (2*Cin, m*Cout)
+    ).view(B, N, m, -1)                                   # (B, N, m, Cout)
+
+    center_output = torch.matmul(
+        point_input.permute(0, 2, 1),                     # (B, N, Cin)
+        kernel[:point_input.size(1)]                      # (Cin, m*Cout)
+    ).view(B, N, m, -1)                                   # (B, N, m, Cout)
+
+    return point_output, center_output                    # 둘 다 (B, N, m, Cout)
 
 
 def feat_trans_pointnet(point_input, kernel, m):
@@ -107,36 +119,36 @@ class ScoreNet(nn.Module):
             self.mlp_bns_hidden.append(nn.BatchNorm2d(out_channel))
 
     def forward(self, xyz, calc_scores='softmax', bias=0):
-        B, _, N, K = xyz.size()
-        scores = xyz
+        B, _, N, K = xyz.size()  # (B,in_ch,N,K)
+        scores = xyz             # (B,in_ch,N,K)
 
         if self.hidden_unit is None or len(self.hidden_unit) == 0:
             if self.last_bn:
-                scores = self.mlp_bns_nohidden(self.mlp_convs_nohidden(scores))
+                scores = self.mlp_bns_nohidden(self.mlp_convs_nohidden(scores))  # (B,out_ch,N,K)
             else:
-                scores = self.mlp_convs_nohidden(scores)
+                scores = self.mlp_convs_nohidden(scores)                         # (B,out_ch,N,K)
         else:
             for i, conv in enumerate(self.mlp_convs_hidden):
                 if i == len(self.mlp_convs_hidden)-1:  # if the output layer, no ReLU
                     if self.last_bn:
                         bn = self.mlp_bns_hidden[i]
-                        scores = bn(conv(scores))
+                        scores = bn(conv(scores))      # (B,out_ch,N,K)
                     else:
-                        scores = conv(scores)
+                        scores = conv(scores)          # (B,out_ch,N,K)
                 else:
                     bn = self.mlp_bns_hidden[i]
-                    scores = F.relu(bn(conv(scores)))
+                    scores = F.relu(bn(conv(scores)))  # (B,hidden_ch,N,K)
 
         if calc_scores == 'softmax':
-            scores = F.softmax(scores, dim=1)+bias  # B*m*N*K, where bias may bring larger gradient
+            scores = F.softmax(scores, dim=1)+bias      # (B,out_ch,N,K)
         elif calc_scores == 'sigmoid':
-            scores = torch.sigmoid(scores)+bias  # B*m*N*K
+            scores = torch.sigmoid(scores)+bias         # (B,out_ch,N,K)
         else:
             raise ValueError('Not Implemented!')
 
-        scores = scores.permute(0, 2, 3, 1)  # B*N*K*m
+        scores = scores.permute(0, 2, 3, 1)             # (B,N,K,out_ch)
 
-        return scores
+        return scores                                   # (B,N,K,out_ch)
 
 class Attention_Layer(nn.Module):
     def __init__(self, channels, reduction=4):

@@ -205,21 +205,25 @@ def train(args):
         
         with tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}", unit="batch") as tepoch:
             for point, landmark, seg in tepoch:
-                point = point.to(device)
-                landmark = landmark.to(device)
-                seg = seg.to(device)
+                point    = point.to(device)            # (B, N, 3)
+                landmark = landmark.to(device)         # (B, L, 3)
+                seg      = seg.to(device)              # (B, N, L)
 
                 # 1) 정규화
-                point_normal = normalize_data(point)
-                # 2) 스케일 / 평행이동 증강
-                point_normal = ScaleAndTranslate(point_normal)
+                point_normal = normalize_data(point)    # (B, N, 3)
+                # 2) 랜덤 스케일 / 평행이동 증강
+                point_normal = ScaleAndTranslate(point_normal)  # (B, N, 3)
 
-                # 3) (B, 3, N) 형태로 변환 후 모델 입력
-                point_input = point_normal.permute(0, 2, 1)
+                # 3) 채널 우선 형태로 변환 후 모델 입력
+                point_input = point_normal.permute(0, 2, 1)      # (B, 3, N)
 
                 opt.zero_grad()
-                pred_heatmap = model(point_input)
-                loss = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())   
+                pred_heatmap = model(point_input)                # (B, L, N)
+
+                # 4) GT 히트맵도 (B, L, N)으로 맞추기
+                loss = criterion(pred_heatmap,
+                                 seg.permute(0, 2, 1).contiguous())  # seg^T: (B, L, N)
+
                 loss.backward()
                 opt.step()
                 
@@ -233,8 +237,7 @@ def train(args):
             filename = f'model_epoch_{epoch+1}.t7'
             save_path = os.path.join(backup_models_dir, filename)
             torch.save(model.state_dict(), save_path)
-            print(f"Model Saved: {save_path}")
-        
+
         scheduler.step()
 
 if __name__ == "__main__":
