@@ -24,9 +24,8 @@ from loss import AdaptiveWingLoss
 from util import main_sample
 from PAConv_model import PAConv
 from init import _init_
-
 # [중요] 정규화 함수 임포트
-from augmentations import normalize_data 
+from augmentations import normalize_data, PointcloudScaleAndTranslate
 
 # GPU 설정
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -182,6 +181,7 @@ def train(args):
 
     train_loader = DataLoader(train_dataset, num_workers=4, batch_size=args.batch_size, shuffle=True, drop_last=True)
     
+    ScaleAndTranslate = PointcloudScaleAndTranslate()
     # 6. 모델 설정
     model = PAConv(args, args.landmark_num).to(device)
     model.apply(weight_init)
@@ -192,7 +192,10 @@ def train(args):
     if args.use_sgd: opt = optim.SGD(model.parameters(), lr=args.lr*100, momentum=args.momentum, weight_decay=args.weight_decay)
     else: opt = optim.Adam(model.parameters(), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
     
-    scheduler = StepLR(opt, step_size=40, gamma=0.9)
+    if args.scheduler == 'cos':
+        scheduler = CosineAnnealingLR(opt, T_max=args.epochs)
+    else:
+        scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
     # 7. 학습 루프
     print(f"\n=== [Phase 3] Start Training ===")
@@ -205,14 +208,18 @@ def train(args):
                 point = point.to(device)
                 landmark = landmark.to(device)
                 seg = seg.to(device)
-                
-                # [복구 완료] 정규화 (Normalization) 적용
-                # 데이터를 0~1 단위로 줄여서 학습 효율 극대화
-                point_normalized = normalize_data(point)
-                
+
+                # 1) 정규화
+                point_normal = normalize_data(point)
+                # 2) 스케일 / 평행이동 증강
+                point_normal = ScaleAndTranslate(point_normal)
+
+                # 3) (B, 3, N) 형태로 변환 후 모델 입력
+                point_input = point_normal.permute(0, 2, 1)
+
                 opt.zero_grad()
-                pred_heatmap = model(point_normalized.permute(0, 2, 1))
-                loss = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
+                pred_heatmap = model(point_input)
+                loss = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())   
                 loss.backward()
                 opt.step()
                 

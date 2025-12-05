@@ -259,10 +259,15 @@ def landmark_regression(shape, Heatmap, regression_point_num, idx=None):
     landmark3D = np.array([get_rigid(shape_ext[i], shape_ext_T[i])[:, 3] for i in range(Heatmap.shape[1])])
     return torch.from_numpy(landmark3D).unsqueeze(0).to(device)
 
-def get_3D_FAN_NME(pred, gt):
-    if pred.dim() == 2: pred = pred.unsqueeze(0)
-    if gt.dim() == 2: gt = gt.unsqueeze(0)
-    return torch.mean(torch.norm(pred - gt, dim=2)), torch.norm(pred - gt, dim=2)
+#def get_3D_FAN_NME(pred, gt):
+#    if pred.dim() == 2: pred = pred.unsqueeze(0)
+#    if gt.dim() == 2: gt = gt.unsqueeze(0)
+#    return torch.mean(torch.norm(pred - gt, dim=2)), torch.norm(pred - gt, dim=2)
+
+def get_3D_FAN_NME(pred_landmark, gt_landmark):
+    NME_single = torch.sum(torch.norm(pred_landmark - gt_landmark, dim=2), 0)
+    NME = torch.mean(NME_single)
+    return NME, NME_single
 
 def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data'):
     print(f'\n--- Processing: {dataset} ---')
