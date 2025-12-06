@@ -83,10 +83,10 @@ def get_experiment_paths(args):
 # [기능 2] 3각도 히트맵 저장
 # -----------------------------------------------------------------------------
 def save_multiview_heatmap(points, heatmap, save_dir, sample_idx, landmark_idx, prefix):
-    fig = plt.figure(figsize=(15, 5))
+    fig = plt.figure(figsize=(1, 1))
     views = [
         (131, 90, -90, "Front View"),
-        (132, 45, -45, "Diagonal View"),
+        (132, 45, -90, "Diagonal View"),
         (133, 0, -90,  "Side View")
     ]
     for pos, elev, azim, title in views:

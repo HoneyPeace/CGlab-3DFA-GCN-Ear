@@ -33,7 +33,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # [기능] 3각도 히트맵 저장 (train.py와 동일한 함수 추가)
 # -----------------------------------------------------------------------------
 def save_multiview_heatmap(points, heatmap, save_dir, sample_idx, landmark_idx, prefix):
-    fig = plt.figure(figsize=(15, 5))
+    fig = plt.figure(figsize=(1, 1))
     views = [
         (131, 90, -90, "Front View"),
         (132, 45, -45, "Diagonal View"),

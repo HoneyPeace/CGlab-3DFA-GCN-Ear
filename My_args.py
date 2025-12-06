@@ -36,7 +36,7 @@ parser.add_argument('--output_root', type=str, default='../results', help='Root 
 # [2] 학습 설정 (Train Args)
 # =============================================================================
 parser.add_argument('--eval', type=str2bool, default=False, help='evaluate the model')
-parser.add_argument('--batch_size', type=int, default=64, metavar='batch_size', help='Size of batch')
+parser.add_argument('--batch_size', type=int, default=32, metavar='batch_size', help='Size of batch')
 parser.add_argument('--test_batch_size', type=int, default=1, metavar='batch_size', help='Size of batch')
 parser.add_argument('--epochs', type=int, default=250, metavar='N', help='number of episode to train')
 parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
