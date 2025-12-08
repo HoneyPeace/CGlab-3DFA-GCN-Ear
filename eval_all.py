@@ -175,7 +175,7 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         np.savetxt(os.path.join(asc_save_dir, f"pred_{idx:03d}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
 # -----------------------------------------------------------------------------
-# 5. 결과 집계 및 텍스트 저장 (파일명 변경 적용)
+# 5. 결과 집계 및 텍스트 저장
 # -----------------------------------------------------------------------------
 average_me = np.mean(me_list)
 std_me = np.std(me_list)
@@ -202,13 +202,33 @@ with open(result_txt_path, "w") as f:
     f.write(f"==========================================\n")
     
     if len(per_landmark_me_list) > 0:
+        # (1) 샘플 × 랜드마크 ME 배열로 쌓기 : [num_samples, L]
         per_landmark_me_array = np.stack(per_landmark_me_list, axis=0)
+        # (2) 랜드마크별 평균 / 표준편차 : [L]
         lm_mean = np.mean(per_landmark_me_array, axis=0)
-        lm_std = np.std(per_landmark_me_array, axis=0)
+        lm_std  = np.std(per_landmark_me_array, axis=0)
         
+        # --------------------------------------------------
+        # Top 5 Hardest Landmarks  (평균 ME가 큰 순서)
+        # --------------------------------------------------
         f.write(">>> Top 5 Hardest Landmarks:\n")
         worst_indices = np.argsort(lm_mean)[::-1][:5]
         for i in worst_indices:
+            f.write(f"    LM {i:02d}: {lm_mean[i]:.3f} ± {lm_std[i]:.3f} mm\n")
+        
+        # --------------------------------------------------
+        # Top 5 Easiest Landmarks  (평균 ME가 작은 순서)
+        # --------------------------------------------------
+        f.write("\n>>> Top 5 Easiest Landmarks:\n")
+        best_indices = np.argsort(lm_mean)[:5]
+        for i in best_indices:
+            f.write(f"    LM {i:02d}: {lm_mean[i]:.3f} ± {lm_std[i]:.3f} mm\n")
+        
+        # --------------------------------------------------
+        # All Landmarks: per-landmark ME ± STD
+        # --------------------------------------------------
+        f.write("\n>>> Per-landmark ME (mean ± std):\n")
+        for i in range(lm_mean.shape[0]):
             f.write(f"    LM {i:02d}: {lm_mean[i]:.3f} ± {lm_std[i]:.3f} mm\n")
 
 # 화면 출력
