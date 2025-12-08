@@ -24,7 +24,6 @@ pip install numpy scikit-learn matplotlib
 ``'
 conda activate EarLandMarking_CGLAB
 cd C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN
-
 ```
 
 ---
@@ -41,8 +40,12 @@ matlab에서 make_mat 실행
 
 ### 🔄 실행 (npy전처리까지 함께)
 
-```bash
-python train.py --dataset Ear296_Korean --need_resample True --sigma 10 --num_points 2048 --dataset_seed 1 --sample_way FPS
+```
+현재
+python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear296_Korean --need_resample True --sigma 5 --num_points 2048 --dataset_seed 1 --sample_way FPS --batch_size 4
+
+기존
+python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear296_Korean --need_resample True --sigma 5 --num_points 2048 --dataset_seed 1 --sample_way FPS
 
 ```
 
@@ -53,6 +56,10 @@ python train.py --dataset Ear296_Korean --need_resample True --sigma 10 --num_po
 ### 📊 5. 평가 (Evaluation)
 
 ```
+현재
+python eval_all.py --run_id 6 --sigma 5 --num_points 2048 --Eval_DataType test --regression_point_num 10
+
+기존
 python eval_all.py --dataset Ear296_Korean --sigma 5 --num_points 2048 --regression_point_num 10 --Eval_DataType sample
 ```
 
