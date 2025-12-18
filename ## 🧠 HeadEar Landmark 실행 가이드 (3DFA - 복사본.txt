@@ -42,7 +42,7 @@ matlab에서 make_mat 실행
 
 ```
 현재
-python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear296_Korean --need_resample True --sigma 5 --num_points 2048 --dataset_seed 1 --sample_way FPS --batch_size 4
+python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear296_Korean --need_resample True --sigma 5 --num_points 2048 --dataset_seed 1 --sample_way FPS --batch_size 32
 
 기존
 python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear296_Korean --need_resample True --sigma 5 --num_points 2048 --dataset_seed 1 --sample_way FPS
