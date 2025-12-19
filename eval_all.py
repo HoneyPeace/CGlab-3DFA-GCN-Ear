@@ -149,7 +149,7 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         pred_landmark = (pred_landmark_norm * scale) + centroid
 
         # [Visualization] 30개마다, 모든 랜드마크 히트맵 저장
-        if idx % 30 == 0:
+        if idx % 40 == 0:
             points_np = point[0].cpu().numpy()
             heatmap_np = pred_heatmap[0].cpu().numpy() # (N, L)
             
@@ -173,16 +173,36 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         
         # [ASC 저장]
         np.savetxt(os.path.join(asc_save_dir, f"pred_{idx:03d}.asc"), pred_np, fmt="%.6f", delimiter=",")
+# -----------------------------------------------------------------------------
+# 5. 결과 집계 및 텍스트 저장 (Paper Table III Matching + Top 5 Analysis)
+# -----------------------------------------------------------------------------
+if len(per_landmark_me_list) > 0:
+    # (Samples, Landmarks) 형태로 변환
+    per_landmark_me_array = np.stack(per_landmark_me_list, axis=0)
+    
+    # [1] 각 랜드마크별 평균(Mean)과 표준편차(Std) 계산
+    # shape: (Landmark_num, )
+    lm_means = np.mean(per_landmark_me_array, axis=0) # 랜드마크별 ME
+    lm_stds = np.std(per_landmark_me_array, axis=0)  # 랜드마크별 Std (샘플 간 편차)
+    
+    # [2] Final Evaluation Metric 계산 (논문 Table III 방식)
+    # Average ME: 랜드마크별 평균들의 평균
+    average_me = np.mean(lm_means)
+    
+    # Mean Std: ★ 랜드마크별 표준편차들의 평균 ★ (논문 방식 일치)
+    std_me = np.mean(lm_stds)
 
-# -----------------------------------------------------------------------------
-# 5. 결과 집계 및 텍스트 저장
-# -----------------------------------------------------------------------------
-average_me = np.mean(me_list)
-std_me = np.std(me_list)
+else:
+    average_me = 0.0
+    std_me = 0.0
+    lm_means = np.array([])
+    lm_stds = np.array([])
+
+# Success Rate (SR) 계산
 sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
 sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
 
-# [수정됨] 파일명을 ME수치_std수치.txt 형식으로 생성
+# 파일명 생성
 filename = f"ME{average_me:.4f}_std{std_me:.4f}.txt"
 result_txt_path = os.path.join(run_root, filename)
 
@@ -193,43 +213,40 @@ with open(result_txt_path, "w") as f:
     f.write(f" Run ID     : {target_folder_name}\n")
     f.write(f" Model      : {args.model_epoch}\n")
     f.write(f" Data Type  : {args.Eval_DataType}\n")
-    f.write(f" Reg Points : {args.regression_point_num}\n")
     f.write(f"------------------------------------------\n")
     f.write(f" Average ME : {average_me:.4f} mm\n")
-    f.write(f" Std of ME  : {std_me:.4f} mm\n")
+    f.write(f" Average Std: {std_me:.4f} mm (Mean of Landmark Stds)\n") 
     f.write(f" SR @ 10mm  : {sr_10:.2f} %\n")
     f.write(f" SR @ 5mm   : {sr_5:.2f} %\n")
     f.write(f"==========================================\n")
     
     if len(per_landmark_me_list) > 0:
-        # (1) 샘플 × 랜드마크 ME 배열로 쌓기 : [num_samples, L]
-        per_landmark_me_array = np.stack(per_landmark_me_list, axis=0)
-        # (2) 랜드마크별 평균 / 표준편차 : [L]
-        lm_mean = np.mean(per_landmark_me_array, axis=0)
-        lm_std  = np.std(per_landmark_me_array, axis=0)
-        
         # --------------------------------------------------
-        # Top 5 Hardest Landmarks  (평균 ME가 큰 순서)
+        # Top 5 Hardest Landmarks (평균 Error가 가장 높은 순)
         # --------------------------------------------------
-        f.write(">>> Top 5 Hardest Landmarks:\n")
-        worst_indices = np.argsort(lm_mean)[::-1][:5]
+        f.write("\n>>> Top 5 Hardest Landmarks:\n")
+        worst_indices = np.argsort(lm_means)[::-1][:5]
         for i in worst_indices:
-            f.write(f"    LM {i:02d}: {lm_mean[i]:.3f} ± {lm_std[i]:.3f} mm\n")
+            f.write(f"    LM {i:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
         
         # --------------------------------------------------
-        # Top 5 Easiest Landmarks  (평균 ME가 작은 순서)
+        # Top 5 Easiest Landmarks (평균 Error가 가장 낮은 순)
         # --------------------------------------------------
         f.write("\n>>> Top 5 Easiest Landmarks:\n")
-        best_indices = np.argsort(lm_mean)[:5]
+        best_indices = np.argsort(lm_means)[:5]
         for i in best_indices:
-            f.write(f"    LM {i:02d}: {lm_mean[i]:.3f} ± {lm_std[i]:.3f} mm\n")
+            f.write(f"    LM {i:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
         
         # --------------------------------------------------
-        # All Landmarks: per-landmark ME ± STD
+        # All Landmarks: per-landmark ME ± STD (논문 Table III 형식)
         # --------------------------------------------------
-        f.write("\n>>> Per-landmark ME (mean ± std):\n")
-        for i in range(lm_mean.shape[0]):
-            f.write(f"    LM {i:02d}: {lm_mean[i]:.3f} ± {lm_std[i]:.3f} mm\n")
+        f.write("\n>>> Per-landmark ME (Mean ± Std):\n")
+        for i in range(lm_means.shape[0]):
+            f.write(f"    LM {i:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
+            
+        f.write(f"    ------------------------------------\n")
+        # 논문의 'All' 행과 동일한 계산
+        f.write(f"    All  : {average_me:.3f} ± {std_me:.3f} mm\n")
 
 # 화면 출력
 print(f"\n[Done] Results saved to: {run_root}")
