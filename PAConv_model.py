@@ -24,10 +24,10 @@ class PAConv(nn.Module):
 
         #기존은 10차원에서 6차원으로 변경 <-- 06.07: 차원 수 의심으로 인한 변경
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices
-        self.scorenet2 = ScoreNet(6, self.m2, hidden_unit=self.hidden[0])
-        self.scorenet3 = ScoreNet(6, self.m3, hidden_unit=self.hidden[1])
-        self.scorenet4 = ScoreNet(6, self.m4, hidden_unit=self.hidden[2])
-        self.scorenet5 = ScoreNet(6, self.m5, hidden_unit=self.hidden[3])
+        self.scorenet2 = ScoreNet(10, self.m2, hidden_unit=self.hidden[0])
+        self.scorenet3 = ScoreNet(10, self.m3, hidden_unit=self.hidden[1])
+        self.scorenet4 = ScoreNet(10, self.m4, hidden_unit=self.hidden[2])
+        self.scorenet5 = ScoreNet(10, self.m5, hidden_unit=self.hidden[3])
 
         i2 = 64       # channel dim of input_2nd
         o2 = i3 = 64  # channel dim of output_2st and input_3rd
