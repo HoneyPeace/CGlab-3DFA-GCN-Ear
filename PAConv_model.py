@@ -84,7 +84,7 @@ class PAConv(nn.Module):
         xyz = get_scorenet_input(x, k=self.k, idx=idx)  # ScoreNet input
         # use MLP at the 1st layer, same with DGCNN
         x = get_graph_feature(x, k=self.k, idx=idx)
-        #x = x.permute(0, 3, 1, 2) <-- 06.06: 차원 부풀리기로 임의 제거함
+        x = x.permute(0, 3, 1, 2) #<-- 06.06: 차원 부풀리기로 임의 제거함
         x = F.relu(self.conv1(x))
         x1 = x.max(dim=-1, keepdim=False)[0]
         # replace the last 4 DGCNN-EdgeConv with PAConv:
