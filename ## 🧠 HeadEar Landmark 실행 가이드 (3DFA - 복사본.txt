@@ -41,15 +41,14 @@ matlab에서 make_mat 실행
 ### 🔄 실행 (npy전처리까지 함께)
 
 ```
-현재
-python train.py --need_resample True --sigma 3 --num_points 4096 --tag "증강12" --batch_size 24
+통 배치
+python train.py --need_resample True --sigma 3 --num_points 4096 --tag "증강12" --batch_size 32
 
-기존
-python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear296_Korean --need_resample True --sigma 3 --num_points 4096 --dataset_seed 1 --sample_way FPS
+배치32 나눠서
+python train.py --need_resample True --sigma 3 --num_points 4096 --tag "Final_Stable" --batch_size 16 --accum_iter 2
+
 
 ```
-
-.\checkpoints\Face_alignment_with_PAConv\Ear296_Korean\models\ 경로생성
 
 ---
 
@@ -57,10 +56,8 @@ python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear29
 
 ```
 현재
-python eval_all.py --run_id 6 --sigma 5 --num_points 2048 --Eval_DataType test --regression_point_num 10
+python eval_all.py --run_id 1 --sigma 3 --num_points 4096 --regression_point_num 10 --tag "원본"
 
-기존
-python eval_all.py --dataset Ear296_Korean --sigma 5 --num_points 2048 --regression_point_num 10 --Eval_DataType sample
 ```
 
 sample, train, test 선택
