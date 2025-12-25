@@ -170,10 +170,21 @@ def train(args):
     if args.loss == 'adaptive_wing': criterion = AdaptiveWingLoss()
     else: criterion = torch.nn.MSELoss()
     
-    opt = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = StepLR(opt, step_size=40, gamma=0.9)
+    # 1. SGD vs Adam 선택 기능 부활
+    if args.use_sgd:
+        opt = optim.SGD(model.parameters(), lr=args.lr*100, momentum=args.momentum, weight_decay=args.weight_decay)
+    else:
+        # ★ 중요: eps와 weight_decay를 명시해서 형님의 설정을 반영하게 함
+        opt = optim.Adam(model.parameters(), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
+
+    # 2. 스케줄러 선택 기능 부활 (Cosine vs Step)
+    if args.scheduler == 'cos':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    else:
+        scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
     eff_batch = args.batch_size * args.accum_iter
+    
     print(f"\n=== Start Training (Effective Batch: {eff_batch}) ===")
 
     for epoch in range(args.epochs):
