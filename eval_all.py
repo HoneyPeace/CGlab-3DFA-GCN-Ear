@@ -30,9 +30,9 @@ args.eval = True
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # -----------------------------------------------------------------------------
-# [기능] 3각도 히트맵 저장 (train.py와 동일한 함수 추가)
+# [기능] 3각도 히트맵 저장 (이름 문자열 처리를 위해 소폭 수정)
 # -----------------------------------------------------------------------------
-def save_multiview_heatmap(points, heatmap, save_dir, sample_idx, landmark_idx, prefix):
+def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx, prefix):
     fig = plt.figure(figsize=(30, 10))
     views = [
         (131, 90, -100, "Front"),
@@ -46,7 +46,8 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_idx, landmark_idx, 
         ax.set_title(title)
         ax.axis('off')
 
-    filename = f"{prefix}_S{sample_idx:03d}_L{landmark_idx:02d}.png"
+    # [수정] sample_idx:03d -> sample_name (문자열 그대로 사용)
+    filename = f"{prefix}_{sample_name}_L{landmark_idx:02d}.png"
     plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')
     plt.close()
 
@@ -97,6 +98,26 @@ try:
     shape_sample = np.load(os.path.join(data_dir, f"shape_{args.Eval_DataType}.npy"), allow_pickle=True)
     landmark_all = np.load(os.path.join(data_dir, f"landmark_{args.Eval_DataType}.npy"), allow_pickle=True)
     heatmap_sample = np.load(os.path.join(data_dir, f"Heat_data_{args.Eval_DataType}.npy"), allow_pickle=True)
+    
+    # [추가] 이름 파일 로드 (파일명 매칭용)
+    name_path = os.path.join(data_dir, f"name_{args.Eval_DataType}.npy")
+    if os.path.exists(name_path):
+        name_sample = np.load(name_path, allow_pickle=True)
+        print(f">> Sample names loaded: {len(name_sample)} files.")
+    else:
+        print(">> [Warning] Name file not found. Using Index instead.")
+        name_sample = [f"S{i:03d}" for i in range(len(shape_sample))]
+
+    # [추가] 리포트용 학습 데이터 갯수 확인 (파일이 있을 경우만)
+    try:
+        train_shape_path = os.path.join(data_dir, "shape_train.npy")
+        if os.path.exists(train_shape_path):
+            train_len = len(np.load(train_shape_path, allow_pickle=True))
+        else:
+            train_len = "Unknown (File not found)"
+    except:
+        train_len = "Error checking"
+
 except FileNotFoundError:
     print(f"Error: Backup data files not found in {data_dir}.")
     sys.exit(1)
@@ -127,6 +148,9 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
     point = point.to(device)
     gt_landmark = gt_landmark.to(device)
     
+    # [추가] 현재 샘플의 실제 이름 가져오기
+    real_name = name_sample[idx]
+    
     # [1] 정규화 파라미터 계산 (복원용)
     B, N, C = point.shape
     centroid = torch.mean(point, axis=1, keepdim=True)
@@ -156,8 +180,9 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
             # save_multiview_heatmap은 (N,) 형태의 heatmap intensity를 원함
             # 따라서 랜드마크 갯수(L)만큼 루프를 돌며 각각 저장
             for lm_idx in range(heatmap_np.shape[1]): # L
+                 # [수정] idx 대신 real_name 전달
                  save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], 
-                                        heatmap_save_dir, idx, lm_idx, "pred")
+                                        heatmap_save_dir, real_name, lm_idx, "pred")
 
         # ME 계산
         pred_np = pred_landmark.cpu().numpy()
@@ -171,8 +196,8 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         me_list.append(me)
         per_landmark_me_list.append(dists)
         
-        # [ASC 저장]
-        np.savetxt(os.path.join(asc_save_dir, f"pred_{idx:03d}.asc"), pred_np, fmt="%.6f", delimiter=",")
+        # [ASC 저장] [수정] 파일명에 실제 이름 적용
+        np.savetxt(os.path.join(asc_save_dir, f"pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 # -----------------------------------------------------------------------------
 # 5. 결과 집계 및 텍스트 저장 (Paper Table III Matching + Top 5 Analysis)
 # -----------------------------------------------------------------------------
@@ -210,9 +235,18 @@ with open(result_txt_path, "w") as f:
     f.write(f"==========================================\n")
     f.write(f"   Evaluation Result: {args.exp_name}\n")
     f.write(f"==========================================\n")
-    f.write(f" Run ID     : {target_folder_name}\n")
-    f.write(f" Model      : {args.model_epoch}\n")
-    f.write(f" Data Type  : {args.Eval_DataType}\n")
+    f.write(f" Run ID      : {target_folder_name}\n")
+    f.write(f" Model       : {args.model_epoch}\n")
+    f.write(f" Data Type   : {args.Eval_DataType}\n")
+    
+    # [추가] User Comment (폴더명 태그) 기록 -> 정리용
+    # None일 경우를 대비해 처리
+    user_comment = args.user_tag if args.user_tag else "None"
+    f.write(f" User Comment: {user_comment}\n")
+    
+    f.write(f" Train Data  : {train_len} samples\n")
+    f.write(f" Batch Size  : {args.batch_size}\n")
+    f.write(f" Num Points  : {args.num_points}\n")
     f.write(f"------------------------------------------\n")
     f.write(f" Average ME : {average_me:.4f} mm\n")
     f.write(f" Average Std: {std_me:.4f} mm (Mean of Landmark Stds)\n") 

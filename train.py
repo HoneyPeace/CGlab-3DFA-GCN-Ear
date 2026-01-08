@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2)
 @File: train.py
-@Description: Normalization Fixed + Unified Folder Structure + Save Every 30 Samples
+@Description: Gradient Accumulation + Unified Folder Structure + NO Train Heatmaps
 '''
 
 import os
@@ -41,17 +41,20 @@ def weight_init(m):
 # -----------------------------------------------------------------------------
 # [기능 1] 통합 실험 ID 및 경로 생성
 # -----------------------------------------------------------------------------
-def get_experiment_paths(args):
+def get_experiment_paths(args, train_len):
     """
-    구조: results/{exp_name}/{FPS_Sigma_Count}/
-          ├── models/
-          ├── npy_data/
-          └── GT_Heatmaps/
+    구조: results/{exp_name}/{FPS_Sigma_Batch_Train_[Tag]_Count}/
     """
     project_dir = os.path.join(args.output_root, args.exp_name)
     os.makedirs(project_dir, exist_ok=True)
 
-    setting_str = f"FPS{args.num_points}_sigma{args.sigma}"
+    base_str = f"FPS{args.num_points}_sigma{args.sigma}_batch{args.batch_size}_train{train_len}"
+    
+    # 태그가 있으면 붙이고, 없으면 안 붙임
+    if args.user_tag and args.user_tag != "":
+        setting_str = f"{base_str}_{args.user_tag}"
+    else:
+        setting_str = base_str
     
     count = 1
     while True:
@@ -62,7 +65,6 @@ def get_experiment_paths(args):
             break
         count += 1
     
-    # 하위 폴더 생성
     paths = {
         'root': run_dir,
         'models': os.path.join(run_dir, 'models'),
@@ -101,13 +103,9 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_idx, landmark_idx, 
     plt.close()
 
 # -----------------------------------------------------------------------------
-# [기능 3] 데이터 백업 및 GT 시각화
+# [기능 3] 데이터 백업 및 GT 시각화 (수정됨: Train 히트맵 스킵)
 # -----------------------------------------------------------------------------
 def process_data_storage(dataset, prefix, paths):
-    """
-    dataset의 내용을 numpy로 변환하여 backup 폴더에 저장하고,
-    GT 히트맵 일부를 시각화하여 GT_Heatmaps 폴더에 저장
-    """
     shape_list, landmark_list, heatmap_list = [], [], []
     for i in range(len(dataset)):
         p, l, h = dataset[i]
@@ -119,31 +117,37 @@ def process_data_storage(dataset, prefix, paths):
     landmark_arr = np.stack(landmark_list)
     heatmap_arr = np.stack(heatmap_list)
 
-    # 1. NPY Backup
+    # 1. NPY Backup (이건 무조건 저장해야 나중에 분석 가능)
     np.save(os.path.join(paths['npy_backup'], f"shape_{prefix}.npy"), shape_arr)
     np.save(os.path.join(paths['npy_backup'], f"landmark_{prefix}.npy"), landmark_arr)
     np.save(os.path.join(paths['npy_backup'], f"Heat_data_{prefix}.npy"), heatmap_arr)
     print(f"   [{prefix.upper()}] Backup Saved: {paths['npy_backup']}")
 
     # 2. GT Visualization
-    vis_save_dir = os.path.join(paths['gt_heatmap'], prefix)
-    os.makedirs(vis_save_dir, exist_ok=True)
+    # [수정된 부분] prefix가 'test'일 때만 히트맵 이미지를 저장합니다.
+    if prefix == 'test':
+        vis_save_dir = os.path.join(paths['gt_heatmap'], prefix)
+        os.makedirs(vis_save_dir, exist_ok=True)
 
-    print(f"   [{prefix.upper()}] Saving GT Heatmaps (Every 30th Sample)...")
-    
-    # [수정] 0부터 끝까지 30 간격으로 루프 (0, 30, 60...)
-    for idx in tqdm(range(0, len(shape_arr), 30), desc=f"   Saving GT {prefix}"):
-        points_np = shape_arr[idx]
-        heatmap_np = heatmap_arr[idx].T  # (L, N)
+        print(f"   [{prefix.upper()}] Saving GT Heatmaps (Every 30th Sample)...")
         
-        # 해당 샘플의 모든 랜드마크 저장
-        for lm_idx in range(heatmap_np.shape[0]):
-            save_multiview_heatmap(points_np, heatmap_np[lm_idx], vis_save_dir, idx, lm_idx, prefix)
+        # 30개 간격으로 저장
+        for idx in tqdm(range(0, len(shape_arr), 30), desc=f"   Saving GT {prefix}"):
+            points_np = shape_arr[idx]
+            heatmap_np = heatmap_arr[idx].T
+            
+            for lm_idx in range(heatmap_np.shape[0]):
+                save_multiview_heatmap(points_np, heatmap_np[lm_idx], vis_save_dir, idx, lm_idx, prefix)
+    else:
+        # Train 데이터 등은 저장하지 않음
+        print(f"   [{prefix.upper()}] GT Heatmap generation skipped (Requested).")
 
 # -----------------------------------------------------------------------------
 # [기능 4] 메인 학습 함수
 # -----------------------------------------------------------------------------
 def train(args):
+    accum_steps = args.accumulation_steps
+    
     # 1. 스마트 모드 감지 (Split vs Separate)
     if not args.test_dataset_name or (args.train_dataset_name == args.test_dataset_name):
         MODE = "SPLIT"
@@ -155,19 +159,20 @@ def train(args):
         print(f"\n>>> [MODE] Separate Mode")
         print(f"    Train: {args.train_dataset_name} / Test: {args.test_dataset_name}")
 
-    # 2. 통합 경로 생성 (results/Ear_Project_Final/FPS.../)
-    paths = get_experiment_paths(args)
+    print(f">>> [Gradient Accumulation] Steps: {accum_steps}")
+    if accum_steps == 1:
+        print("    -> Operating in Standard Mode")
+    else:
+        print(f"    -> Effective Batch Size: {args.batch_size * accum_steps}")
 
     # 3. 데이터 생성 (Resample) - util.py의 기능 사용
-    # 주의: util.py는 data_root/{dataset}-npy에 저장함. 이를 로드해서 paths['npy_backup']으로 옮길 것임.
     if args.need_resample:
         print("=== [Phase 1] Data Generation (Initial) ===")
+        # util.py가 Train/test 폴더를 찾아 합쳐서 npy로 만듦
         main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.train_dataset_name, args.data_root)
-        if MODE == "SEPARATE":
-            main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.test_dataset_name, args.data_root)
 
     # 4. 데이터 로드 및 분할
-    print("=== [Phase 2] Loading & Backing up Data ===")
+    print("=== [Phase 2] Loading Data ===")
     
     if MODE == "SPLIT":
         full_dataset = FaceLandmarkData(data_root=args.data_root, partition='trainval', data=args.train_dataset_name)
@@ -179,7 +184,13 @@ def train(args):
         train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name)
         test_dataset = FaceLandmarkData(data_root=args.data_root, partition='test', data=args.test_dataset_name)
 
-    # 5. 데이터 백업 수행 (이때 통합 폴더로 복사됨)
+    # [수정] 데이터 로드 완료 후 폴더 생성
+    print("=== [Phase 2.5] Creating Experiment Paths ===")
+    train_len = len(train_dataset)
+    paths = get_experiment_paths(args, train_len)
+
+    # 5. 데이터 백업 수행 (Train 히트맵 스킵 로직 적용됨)
+    print("=== [Phase 2.6] Backing up Data ===")
     process_data_storage(train_dataset, "train", paths)
     process_data_storage(test_dataset, "test", paths)
 
@@ -203,39 +214,37 @@ def train(args):
 
     # 7. 학습 루프
     print(f"\n=== [Phase 3] Start Training ===")
+    
+    opt.zero_grad() 
+
     for epoch in range(args.epochs):
         model.train()
         loss_epoch = 0.0
         
-        with tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}", unit="batch") as tepoch:
-            for point, landmark, seg in tepoch:
-                point    = point.to(device)            # (B, N, 3)
-                landmark = landmark.to(device)         # (B, L, 3)
-                seg      = seg.to(device)              # (B, N, L)
+        with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{args.epochs}", unit="batch") as tepoch:
+            for i, (point, landmark, seg) in tepoch:
+                point    = point.to(device)
+                landmark = landmark.to(device)
+                seg      = seg.to(device)
 
-                # 1) 정규화
-                point_normal = normalize_data(point)    # (B, N, 3)
-                # 2) 증강 (Scale & Translate)
+                point_normal = normalize_data(point)
                 point_normal = ScaleAndTranslate(point_normal)
+                point_input = point_normal.permute(0, 2, 1)
 
-                # 3) 입력 변환
-                point_input = point_normal.permute(0, 2, 1)      # (B, 3, N)
-
-                opt.zero_grad()
-                pred_heatmap = model(point_input)                # (B, L, N)
+                pred_heatmap = model(point_input)
 
                 loss = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-
+                loss = loss / accum_steps
                 loss.backward()
-                opt.step()
                 
-                loss_epoch += loss.item()
-                tepoch.set_postfix(loss=loss.item())
+                if (i + 1) % accum_steps == 0:
+                    opt.step()
+                    opt.zero_grad() 
 
-        avg_loss = loss_epoch / len(train_loader)
-        # print(f'Epoch: [{epoch+1}/{args.epochs}] Avg Loss: {avg_loss:.6f}') # tqdm에 통합
+                current_loss_val = loss.item() * accum_steps
+                loss_epoch += current_loss_val
+                tepoch.set_postfix(loss=current_loss_val)
 
-        # 모델 저장 (5에폭마다)
         if (epoch + 1) % 5 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
             save_path = os.path.join(paths['models'], filename)
@@ -248,4 +257,5 @@ def train(args):
 if __name__ == "__main__":
     args = parser.parse_args()
     _init_(args)
+    # 태그 입력 받는 부분 삭제됨 (My_args 의존)
     train(args)

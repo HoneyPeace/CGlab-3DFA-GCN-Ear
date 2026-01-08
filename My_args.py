@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2)
 @File: My_args.py
-@Description: Added path arguments while keeping original structure.
+@Description: Added --train_len for explicit folder finding.
 '''
 
 import argparse
@@ -18,7 +18,6 @@ parser = argparse.ArgumentParser(description='3D Ear/Face Landmark Detection')
 # =============================================================================
 # [1] 기본 설정 (Base Args)
 # =============================================================================
-# [수정] 프로젝트 이름 변경
 parser.add_argument('--exp_name', type=str, default='Ear_Project_Final', metavar='N', help='Name of the experiment')
 parser.add_argument('--model', type=str, default='PAConv', metavar='N', choices=['EdgeConv', 'PAConv'], help='Model to use')
 parser.add_argument('--no_cuda', type=str2bool, default=False, help='enables CUDA training')
@@ -28,7 +27,6 @@ parser.add_argument('--dataset', type=str, default='Ear296_Korean', help='Target
 parser.add_argument('--train_dataset_name', type=str, default='Ear296_Korean', help='Train dataset name')
 parser.add_argument('--test_dataset_name', type=str, default='', help='Test dataset name (Optional)')
 
-# [수정] 결과 저장 경로 변경
 parser.add_argument('--data_root', type=str, default='../data', help='Root directory of data')
 parser.add_argument('--output_root', type=str, default='../results', help='Root directory for results')
 
@@ -40,6 +38,7 @@ parser.add_argument('--batch_size', type=int, default=32, metavar='batch_size', 
 parser.add_argument('--test_batch_size', type=int, default=1, metavar='batch_size', help='Size of batch')
 parser.add_argument('--epochs', type=int, default=250, metavar='N', help='number of episode to train')
 parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
+parser.add_argument('--accumulation_steps', type=int, default=1, help='Gradient Accumulation Steps')
 
 # =============================================================================
 # [3] 최적화 설정 (Optimizer Args)
@@ -63,7 +62,6 @@ parser.add_argument('--regression_point_num', type=int, default=10, metavar='RPN
 parser.add_argument('--dataset_seed', type=int, default=1, metavar='S', help='train/test dataset random seed')
 parser.add_argument('--num_points', type=int, default=2048, help='num of points to use')
 
-# [유지] 초기 파라미터값
 parser.add_argument('--sigma', type=float, default=10.0, metavar='Sig', help='Gaussian Variance of heatmap')
 parser.add_argument('--k', type=int, default=30, metavar='N', help='Num of nearest neighbors')
 parser.add_argument('--emb_dims', type=int, default=1024, metavar='N', help='Dimension of embeddings')
@@ -83,3 +81,8 @@ parser.add_argument('--Eval_DataType', type=str, default="test", help='select np
 parser.add_argument('--model_epoch', type=str, default="model_epoch_250.t7", help='load trained model file')
 parser.add_argument('--run_id', type=str, default='', help='Load specific run from backup (e.g., 1, 2)')
 parser.add_argument('--use_split_dataset', type=str2bool, default=True, help='Use split dataset mode')
+parser.add_argument('--user_tag', type=str, default='', help='Custom tag added to the folder name')
+
+# [추가됨] 평가 시 폴더명을 정확히 찾기 위해 사용 (학습 데이터 개수)
+# 예: train.py가 train2290 으로 저장했다면 여기도 2290을 적어야 함
+parser.add_argument('--train_len', type=int, default=2290, help='Number of training samples used in folder name')

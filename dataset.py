@@ -17,18 +17,28 @@ def load_face_data(data_root, data_name):
     Shape_sample = np.load(os.path.join(base_path, 'shape_sample.npy'), allow_pickle=True)
     landmark_position_select_all = np.load(os.path.join(base_path, 'landmark_sample.npy'), allow_pickle=True)
     
-    return Shape_sample, landmark_position_select_all, Heat_data_sample
+    # [수정 포인트 1] 이름 데이터(name_sample.npy) 로드 추가
+    name_path = os.path.join(base_path, 'name_sample.npy')
+    
+    if os.path.exists(name_path):
+        Name_sample = np.load(name_path, allow_pickle=True)
+    else:
+        # 혹시 이름 파일이 아직 안 만들어졌을 경우를 대비한 안전 장치 (인덱스를 이름으로 사용)
+        print("   [Warning] name_sample.npy not found. Using indices as names.")
+        Name_sample = np.array([str(i) for i in range(len(Shape_sample))])
+    
+    return Shape_sample, landmark_position_select_all, Heat_data_sample, Name_sample
 
 
 class FaceLandmarkData(Dataset):
     def __init__(self, data_root, partition='train', data='Ear296_Korean'):
-        # [수정] data_root 인자 추가
         self.data_root = data_root
         self.partition = partition
         self.DATA = data
         
-        # 데이터 로드
-        self.data, self.landmark, self.seg = load_face_data(self.data_root, self.DATA)
+        # [수정 포인트 2] self.names에 이름 리스트 저장
+        # load_face_data가 4개를 반환하도록 바뀌었음
+        self.data, self.landmark, self.seg, self.names = load_face_data(self.data_root, self.DATA)
 
     def __getitem__(self, item):
         # Tensor 변환
@@ -36,9 +46,9 @@ class FaceLandmarkData(Dataset):
         landmark = torch.from_numpy(self.landmark[item]).float()
         heatmap = torch.from_numpy(self.seg[item]).float()
 
-        # [주의] 학습(Train) 단계에서만 셔플이 필요하면 DataLoader에서 shuffle=True를 씁니다.
-        # 여기서는 데이터 자체를 섞지 않고 그대로 반환하는 것이 일반적입니다.
-        
+        # [주의] __getitem__에서는 이름을 반환하지 않습니다.
+        # 이유는 train.py의 학습 루프(for a,b,c in loader) 구조를 깨지 않기 위함입니다.
+        # 이름은 train.py의 저장 함수(process_data_storage)에서 self.names[item]으로 직접 접근해서 씁니다.
         return face, landmark, heatmap
 
     def __len__(self):
