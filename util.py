@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2)
 @File: util.py
-@Description: Includes Partition Logic & Name Saving. Safety Check REMOVED.
+@Description: Includes Partition Logic, Name Saving & FPS Progress Bar.
 '''
 
 import os 
@@ -19,7 +19,7 @@ from functools import reduce
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # -----------------------------------------------------------------------------
-# [Helper] 파일 읽기 함수들 (Name 반환 추가)
+# [Helper] 파일 읽기 함수들 (Name 반환 유지)
 # -----------------------------------------------------------------------------
 def read_ply_files_from_folder(folder_path):
     """ .ply 파일들을 읽어서 (Shape리스트, Name리스트) 튜플로 반환 """
@@ -66,13 +66,9 @@ def read_asc_files_from_folder(folder_path):
     return lm_list
 
 # -----------------------------------------------------------------------------
-# 1. Shape Data Load (partition 인자 추가)
+# 1. Shape Data Load (partition 인자 유지)
 # -----------------------------------------------------------------------------
 def load_shape_data(dataset, data_root, partition=None):
-    """
-    partition: 'train', 'test', or None
-    반환값: (shape_list, name_list)
-    """
     # 1. Partition에 따른 폴더 우선 탐색
     target_folder_name = None
     if partition == 'train':
@@ -88,7 +84,6 @@ def load_shape_data(dataset, data_root, partition=None):
                 return shapes, names
 
     # 2. 기존 데이터셋 이름 하드코딩 처리 (Legacy Support)
-    # (호환성을 위해 shapes 뿐만 아니라 dummy names도 같이 반환해야 함)
     dataset_dir = os.path.join(data_root, dataset)
 
     if dataset == 'Ear296_Korean':
@@ -96,7 +91,6 @@ def load_shape_data(dataset, data_root, partition=None):
         if os.path.exists(ply_path): 
             return read_ply_files_from_folder(ply_path)
         
-        # fallback: mat
         mat_path = os.path.join(dataset_dir, 'template_registered_data_mat', 'Ear296_Korean.mat')
         if os.path.exists(mat_path):
             data = sio.loadmat(mat_path)
@@ -116,11 +110,10 @@ def load_shape_data(dataset, data_root, partition=None):
             names = [f"BU3DFE_{i:03d}" for i in range(len(shapes))]
             return shapes, names
     
-    # 실패 시 빈 리스트 반환
     return [], []
 
 # -----------------------------------------------------------------------------
-# 2. Landmark Position Load (partition 인자 추가)
+# 2. Landmark Position Load (partition 인자 유지)
 # -----------------------------------------------------------------------------
 def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
     # 1. Partition에 따른 폴더 우선 탐색
@@ -138,7 +131,7 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
                 print(f">> Loaded {len(lms)} landmarks from [{target_folder_name}] directly.")
                 return lms
 
-    # 2. 기존 로직 (Ear296_Korean 등)
+    # 2. 기존 로직
     dataset_dir = os.path.join(data_root, dataset)
     
     if 'Ear' in dataset:
@@ -165,12 +158,10 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
             
             landmark_positions = []
             
-            # shape_all이 (shapes, names) 튜플일 경우 처리
             shapes_only = shape_all
             if isinstance(shape_all, tuple):
                  shapes_only = shape_all[0]
             
-            # 만약 shape_all이 None이면 다시 로드
             if shapes_only is None or len(shapes_only) == 0:
                  s_temp, _ = load_shape_data(dataset, data_root, partition)
                  shapes_only = s_temp
@@ -190,7 +181,7 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
     return []
 
 # -----------------------------------------------------------------------------
-# Core Processing (Safety Check 제거됨)
+# Core Processing (Safety Check 없음 - 유지)
 # -----------------------------------------------------------------------------
 def Gaussian_Heatmap(Distance, sigma):
     D2 = Distance * Distance
@@ -201,9 +192,6 @@ def Gaussian_Heatmap(Distance, sigma):
 
 def calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma):
     Heat_data_all = []
-    
-    # [삭제됨] Safety Check (Truncate logic) removed as requested.
-    # 이제 shape 개수와 landmark 개수가 다르면 아래 루프에서 IndexError가 발생할 수 있습니다.
     
     for i in tqdm(range(len(shape_all)), desc="   Calc Heatmaps", unit="shape"):
         shape_i = shape_all[i]
@@ -250,9 +238,10 @@ def fps(xyz, M):
 def random_sample(shape_all, Heat_data_all, num_points, rand_seed, sample_way, dataset, data_root):    
     print('   Start sampling...')
     if sample_way == 'FPS':
-        # [원본 유지] 리스트 컴프리헨션 방식
+        # [수정] tqdm 게이지바 추가
+        # 리스트 컴프리헨션을 tqdm으로 감싸서 진행상황 표시
         FPS_matrix = [fps(torch.from_numpy(shape_all[i]).float().unsqueeze(0).to(device), num_points)
-                      for i in range(len(Heat_data_all))]
+                      for i in tqdm(range(len(Heat_data_all)), desc="   FPS Sampling", unit="shape")]
 
         Heat_data_sample = [np.array(Heat_data_all[j])[FPS_matrix[j].squeeze(0).cpu(), :]
                             for j in range(len(Heat_data_all))]
@@ -261,9 +250,7 @@ def random_sample(shape_all, Heat_data_all, num_points, rand_seed, sample_way, d
         return Heat_data_sample, shape_sample
 
     elif sample_way == 'Random':
-        # load_landmark_index가 필요할 경우 별도 추가 필요 (FPS 사용시 무관)
         try:
-             # 임시: FPS 외 방식 사용시 에러 방지용 pass
              pass 
         except:
             return [], []
@@ -336,7 +323,7 @@ def get_3D_FAN_NME(pred_landmark, gt_landmark):
     return NME, NME_single
 
 # -----------------------------------------------------------------------------
-# Main Sampling Function (partition 처리 및 name 저장 추가)
+# Main Sampling Function (수정 유지: partition 처리 및 name 저장)
 # -----------------------------------------------------------------------------
 def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data', partition=None):
     # 파일명 접미사 설정
@@ -356,7 +343,6 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
     print(f'   Loaded {len(shape_all)} shapes.')
 
     # 2. Landmarks Load
-    # (shape_all 튜플을 넘겨줘서 필요시 index fallback에서 사용)
     landmark_position_sample = load_landmark_position(dataset, data_root, (shape_all, name_all), partition)
     print(f'   Loaded {len(landmark_position_sample)} landmarks.')
 
@@ -364,7 +350,7 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
     print('   Calculating Heatmaps...')
     Heat_data_all = calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma)
 
-    # 4. Sampling
+    # 4. Sampling (Progress bar applied)
     Heat_data_sample, shape_sample = random_sample(shape_all, Heat_data_all,
                                                    num_points, seed, sample_way, dataset, data_root)
     
