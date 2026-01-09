@@ -60,7 +60,13 @@ if not args.run_id:
     sys.exit(1)
 
 project_dir = os.path.join(args.output_root, args.exp_name)
-setting_str = f"FPS{args.num_points}_sigma{args.sigma}"
+base_str = f"FPS{args.num_points}_sigma{args.sigma}_batch{args.batch_size}_train{args.train_len}"
+
+if args.user_tag and args.user_tag != "":
+    setting_str = f"{base_str}_{args.user_tag}"
+else:
+    setting_str = base_str
+
 target_folder_name = f"{setting_str}_{args.run_id}"
 
 # 통합 실행 폴더 경로
