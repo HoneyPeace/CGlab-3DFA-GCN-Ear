@@ -165,11 +165,17 @@ def train(args):
     else:
         print(f"    -> Effective Batch Size: {args.batch_size * accum_steps}")
 
-    # 3. 데이터 생성 (Resample) - util.py의 기능 사용
+ # 3. 데이터 생성 (Resample) - [수정] Train/Test 분리 생성 지시
     if args.need_resample:
         print("=== [Phase 1] Data Generation (Initial) ===")
-        # util.py가 Train/test 폴더를 찾아 합쳐서 npy로 만듦
-        main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.train_dataset_name, args.data_root)
+        
+        # (1) Train 데이터만 읽어서 -> shape_train.npy 로 저장
+        main_sample(args.num_points, args.seed, args.sigma, args.sample_way, 
+                    args.train_dataset_name, args.data_root, partition='train')
+        
+        # (2) Test 데이터만 읽어서 -> shape_test.npy 로 저장
+        main_sample(args.num_points, args.seed, args.sigma, args.sample_way, 
+                    args.test_dataset_name, args.data_root, partition='test')
 
     # 4. 데이터 로드 및 분할
     print("=== [Phase 2] Loading Data ===")

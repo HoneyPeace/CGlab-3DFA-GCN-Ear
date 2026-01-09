@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2)
 @File: util.py
-@Description: Completely Separated Processing for Train and Test + Full Legacy Support.
+@Description: Includes Partition Logic & Name Saving. Safety Check REMOVED.
 '''
 
 import os 
@@ -19,7 +19,7 @@ from functools import reduce
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # -----------------------------------------------------------------------------
-# [Helper] 파일 읽기 함수들 (수정 없음 - 원본 유지)
+# [Helper] 파일 읽기 함수들 (Name 반환 추가)
 # -----------------------------------------------------------------------------
 def read_ply_files_from_folder(folder_path):
     """ .ply 파일들을 읽어서 (Shape리스트, Name리스트) 튜플로 반환 """
@@ -30,9 +30,9 @@ def read_ply_files_from_folder(folder_path):
     if len(files) == 0:
         return [], []
     
-    print(f"   Found {len(files)} shapes in {os.path.basename(folder_path)}. Reading...")
+    print(f"   Found {len(files)} shapes in [{os.path.basename(folder_path)}]. Reading...")
     shape_list = []
-    name_list = [] 
+    name_list = []
 
     for f in tqdm(files, desc="Loading Shapes", unit="file"):
         try:
@@ -46,19 +46,15 @@ def read_ply_files_from_folder(folder_path):
             shape_list.append(points)
         except Exception as e:
             print(f"Error reading {f}: {e}")
-            
     return shape_list, name_list
 
 def read_asc_files_from_folder(folder_path):
     """ .asc 파일들을 읽어서 Landmark(L, 3) 리스트로 반환 """
-    if not os.path.exists(folder_path):
-        return []
-
     files = sorted(glob.glob(os.path.join(folder_path, "*.asc")))
     if len(files) == 0:
         return []
     
-    print(f"   Found {len(files)} ASC files in {os.path.basename(folder_path)}. Reading...")
+    print(f"   Found {len(files)} ASC files in [{os.path.basename(folder_path)}]. Reading...")
     lm_list = []
     for f in tqdm(files, desc="Loading Landmarks", unit="file"):
         try:
@@ -70,48 +66,37 @@ def read_asc_files_from_folder(folder_path):
     return lm_list
 
 # -----------------------------------------------------------------------------
-# 1. Shape Data Load (수정됨: partition 인자 추가로 분리 로딩 지원)
+# 1. Shape Data Load (partition 인자 추가)
 # -----------------------------------------------------------------------------
 def load_shape_data(dataset, data_root, partition=None):
     """
-    partition: 'train', 'test', 또는 None (None이면 둘 다 찾음 - 기존 호환용)
+    partition: 'train', 'test', or None
+    반환값: (shape_list, name_list)
     """
-    # 폴더명 매핑 (대소문자 주의)
-    target_folders = []
+    # 1. Partition에 따른 폴더 우선 탐색
+    target_folder_name = None
     if partition == 'train':
-        target_folders = ['Train'] 
+        target_folder_name = 'train' 
     elif partition == 'test':
-        target_folders = ['test']
-    else:
-        target_folders = ['Train', 'test'] # 기존 로직: 둘 다
+        target_folder_name = 'test'
+        
+    if target_folder_name:
+        target_path = os.path.join(data_root, target_folder_name)
+        if os.path.exists(target_path):
+            shapes, names = read_ply_files_from_folder(target_path)
+            if len(shapes) > 0:
+                return shapes, names
 
-    all_shapes = []
-    all_names = []
-    
-    # 1. 지정된 폴더 탐색
-    found_in_folders = False
-    for folder_name in target_folders:
-        folder_path = os.path.join(data_root, folder_name)
-        if os.path.exists(folder_path):
-            s, n = read_ply_files_from_folder(folder_path)
-            if len(s) > 0:
-                all_shapes.extend(s)
-                all_names.extend(n)
-                found_in_folders = True
-    
-    # 폴더에서 찾았으면 바로 반환 (우선순위 1)
-    if found_in_folders:
-        return all_shapes, all_names
-
-    # 2. [기존 데이터셋별 예외 처리 유지] - 파일이 없을 때만 실행됨
-    # (partition이 명시되었는데 파일을 못 찾으면 여기서도 못 찾을 확률이 높지만, 호환성을 위해 유지)
+    # 2. 기존 데이터셋 이름 하드코딩 처리 (Legacy Support)
+    # (호환성을 위해 shapes 뿐만 아니라 dummy names도 같이 반환해야 함)
     dataset_dir = os.path.join(data_root, dataset)
-    
+
     if dataset == 'Ear296_Korean':
         ply_path = os.path.join(dataset_dir, 'template-registered_data')
         if os.path.exists(ply_path): 
-            return read_ply_files_from_folder(ply_path) 
+            return read_ply_files_from_folder(ply_path)
         
+        # fallback: mat
         mat_path = os.path.join(dataset_dir, 'template_registered_data_mat', 'Ear296_Korean.mat')
         if os.path.exists(mat_path):
             data = sio.loadmat(mat_path)
@@ -131,38 +116,29 @@ def load_shape_data(dataset, data_root, partition=None):
             names = [f"BU3DFE_{i:03d}" for i in range(len(shapes))]
             return shapes, names
     
+    # 실패 시 빈 리스트 반환
     return [], []
 
 # -----------------------------------------------------------------------------
-# 2. Landmark Position Load (수정됨: partition 인자 추가)
+# 2. Landmark Position Load (partition 인자 추가)
 # -----------------------------------------------------------------------------
 def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
-    # 폴더명 매핑
-    target_folders = []
+    # 1. Partition에 따른 폴더 우선 탐색
+    target_folder_name = None
     if partition == 'train':
-        target_folders = ['Train'] 
+        target_folder_name = 'train'
     elif partition == 'test':
-        target_folders = ['test']
-    else:
-        target_folders = ['Train', 'test']
+        target_folder_name = 'test'
 
-    all_landmarks = []
-    found_in_folders = False
-
-    # 1. 지정된 폴더 탐색
-    for folder_name in target_folders:
-        folder_path = os.path.join(data_root, folder_name)
-        if os.path.exists(folder_path):
-            lms = read_asc_files_from_folder(folder_path)
+    if target_folder_name:
+        target_path = os.path.join(data_root, target_folder_name)
+        if os.path.exists(target_path):
+            lms = read_asc_files_from_folder(target_path)
             if len(lms) > 0:
-                all_landmarks.extend(lms)
-                found_in_folders = True
+                print(f">> Loaded {len(lms)} landmarks from [{target_folder_name}] directly.")
+                return lms
 
-    if found_in_folders:
-        print(f">> Total Landmarks Loaded: {len(all_landmarks)}")
-        return all_landmarks
-
-    # 2. [기존 데이터셋별 예외 처리 유지]
+    # 2. 기존 로직 (Ear296_Korean 등)
     dataset_dir = os.path.join(data_root, dataset)
     
     if 'Ear' in dataset:
@@ -176,7 +152,7 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
             landmarks = read_asc_files_from_folder(target_folder)
             if landmarks: return landmarks
 
-        # Index fallback
+        # [Fallback] Index 기반
         print(">> .asc files missing. Falling back to Index-based derivation.")
         index_path = os.path.join(data_root, 'Ear296_Korean', 'template_registered_data_mat', 'Ear296_Korean.mat')
         if not os.path.exists(index_path):
@@ -189,16 +165,21 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
             
             landmark_positions = []
             
-            # shape_all 처리
-            if shape_all is None: 
-                s, _ = load_shape_data(dataset, data_root, partition) # 재귀 호출 시 partition 전달
-                shape_all = s
-            elif isinstance(shape_all, tuple):
-                 shape_all = shape_all[0]
-                
-            for shape in shape_all:
+            # shape_all이 (shapes, names) 튜플일 경우 처리
+            shapes_only = shape_all
+            if isinstance(shape_all, tuple):
+                 shapes_only = shape_all[0]
+            
+            # 만약 shape_all이 None이면 다시 로드
+            if shapes_only is None or len(shapes_only) == 0:
+                 s_temp, _ = load_shape_data(dataset, data_root, partition)
+                 shapes_only = s_temp
+
+            for shape in shapes_only:
                 landmark_positions.append(shape[common_indices, :])
             return landmark_positions
+        else:
+            raise FileNotFoundError("Neither .asc files nor .mat index file found!")
 
     elif dataset == 'BU-3DFE':
         path = os.path.join(data_root, 'BU-3DFE-dataset-mat', 'landmark_select_refine.mat')
@@ -209,7 +190,7 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
     return []
 
 # -----------------------------------------------------------------------------
-# Core Processing & Sampling (수정 없음 - 원본 유지)
+# Core Processing (Safety Check 제거됨)
 # -----------------------------------------------------------------------------
 def Gaussian_Heatmap(Distance, sigma):
     D2 = Distance * Distance
@@ -220,18 +201,18 @@ def Gaussian_Heatmap(Distance, sigma):
 
 def calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma):
     Heat_data_all = []
-    if len(shape_all) != len(landmark_position_sample):
-        print(f"[Warning] Mismatch! Shapes: {len(shape_all)}, Landmarks: {len(landmark_position_sample)}")
-        min_len = min(len(shape_all), len(landmark_position_sample))
-        shape_all = shape_all[:min_len]
-        landmark_position_sample = landmark_position_sample[:min_len]
-
+    
+    # [삭제됨] Safety Check (Truncate logic) removed as requested.
+    # 이제 shape 개수와 landmark 개수가 다르면 아래 루프에서 IndexError가 발생할 수 있습니다.
+    
     for i in tqdm(range(len(shape_all)), desc="   Calc Heatmaps", unit="shape"):
         shape_i = shape_all[i]
         lm_i = landmark_position_sample[i]
+        
         diff  = shape_i[:, np.newaxis, :] - lm_i[np.newaxis, :, :]
         dists = np.linalg.norm(diff, axis=2)
         heat  = Gaussian_Heatmap(dists, sigma)
+        
         Heat_data_all.append(heat)
     return Heat_data_all
 
@@ -268,11 +249,10 @@ def fps(xyz, M):
 
 def random_sample(shape_all, Heat_data_all, num_points, rand_seed, sample_way, dataset, data_root):    
     print('   Start sampling...')
-    
     if sample_way == 'FPS':
-        print(f"   [FPS] Processing {len(Heat_data_all)} shapes... (This may take a while)")
+        # [원본 유지] 리스트 컴프리헨션 방식
         FPS_matrix = [fps(torch.from_numpy(shape_all[i]).float().unsqueeze(0).to(device), num_points)
-                      for i in tqdm(range(len(Heat_data_all)), desc="   FPS Sampling", unit="shape")]
+                      for i in range(len(Heat_data_all))]
 
         Heat_data_sample = [np.array(Heat_data_all[j])[FPS_matrix[j].squeeze(0).cpu(), :]
                             for j in range(len(Heat_data_all))]
@@ -281,7 +261,13 @@ def random_sample(shape_all, Heat_data_all, num_points, rand_seed, sample_way, d
         return Heat_data_sample, shape_sample
 
     elif sample_way == 'Random':
-        pass
+        # load_landmark_index가 필요할 경우 별도 추가 필요 (FPS 사용시 무관)
+        try:
+             # 임시: FPS 외 방식 사용시 에러 방지용 pass
+             pass 
+        except:
+            return [], []
+            
     return [], []
 
 def get_rigid(src, dst):
@@ -294,7 +280,6 @@ def get_rigid(src, dst):
     T = - R.dot(src_mean) + dst_mean
     return np.hstack((R, T[:, np.newaxis]))
 
-# [중요] 기존 코드의 긴 로직 그대로 유지
 def landmark_regression(shape, Heatmap, regression_point_num, idx=None):
     shape   = shape.cpu().numpy()
     Heatmap = Heatmap.cpu().numpy()
@@ -351,22 +336,17 @@ def get_3D_FAN_NME(pred_landmark, gt_landmark):
     return NME, NME_single
 
 # -----------------------------------------------------------------------------
-# Main Sampling Function (수정됨: 분리 로직 적용 및 파일명 저장)
+# Main Sampling Function (partition 처리 및 name 저장 추가)
 # -----------------------------------------------------------------------------
 def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data', partition=None):
-    """
-    partition: 'train' | 'test' | None
-    - 'train'이 들어오면 Train 폴더만 읽고 shape_train.npy로 저장
-    - 'test'가 들어오면 test 폴더만 읽고 shape_test.npy로 저장
-    """
-    # 접미사 결정
-    suffix = "sample" # 기본값 (기존 호환)
+    # 파일명 접미사 설정
+    suffix = "sample" 
     if partition == 'train': suffix = "train"
     elif partition == 'test': suffix = "test"
 
     print(f'\n--- Processing: {dataset} [Partition: {partition if partition else "ALL"}] ---')
     
-    # 1. 데이터 로드 (partition 전달하여 분리)
+    # 1. Load (이름 포함)
     shape_all, name_all = load_shape_data(dataset, data_root, partition)
     
     if len(shape_all) == 0:
@@ -375,24 +355,33 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
 
     print(f'   Loaded {len(shape_all)} shapes.')
 
-    # 2. 랜드마크 로드 (partition 전달)
-    landmark_position_sample = load_landmark_position(dataset, data_root, shape_all, partition)
+    # 2. Landmarks Load
+    # (shape_all 튜플을 넘겨줘서 필요시 index fallback에서 사용)
+    landmark_position_sample = load_landmark_position(dataset, data_root, (shape_all, name_all), partition)
     print(f'   Loaded {len(landmark_position_sample)} landmarks.')
 
+    # 3. Heatmap
     print('   Calculating Heatmaps...')
     Heat_data_all = calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma)
 
+    # 4. Sampling
     Heat_data_sample, shape_sample = random_sample(shape_all, Heat_data_all,
                                                    num_points, seed, sample_way, dataset, data_root)
     
-    # 3. 저장 (접미사 사용)
+    if len(Heat_data_sample) == 0:
+        print("Sampling failed or empty.")
+        return
+
+    # 5. Save
     save_base_dir = os.path.join(data_root, f"{dataset}-npy")
     os.makedirs(save_base_dir, exist_ok=True)
-    print(f"   Saving to: {save_base_dir} (Suffix: _{suffix})")
     
+    print(f"   Saving to: {save_base_dir} (Suffix: _{suffix})")
     np.save(os.path.join(save_base_dir, f'Heat_data_{suffix}.npy'), Heat_data_sample)
     np.save(os.path.join(save_base_dir, f'shape_{suffix}.npy'),      shape_sample)
     np.save(os.path.join(save_base_dir, f'landmark_{suffix}.npy'),   landmark_position_sample)
-    np.save(os.path.join(save_base_dir, f'name_{suffix}.npy'),       np.array(name_all))
     
-    print("--- Done (Memory Cleared) ---\n")
+    # [추가됨] 이름 저장
+    np.save(os.path.join(save_base_dir, f'name_{suffix}.npy'),       np.array(name_all))
+
+    print("--- Done ---\n")
