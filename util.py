@@ -21,192 +21,71 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # -----------------------------------------------------------------------------
 # [Helper] 파일 읽기 함수들 (수정 없음 - 원본 유지)
 # -----------------------------------------------------------------------------
-def read_ply_files_from_folder(folder_path):
-    """ .ply 파일들을 읽어서 (Shape리스트, Name리스트) 튜플로 반환 """
-    files = sorted(glob.glob(os.path.join(folder_path, "*.ply")))
-    if len(files) == 0:
-        files = sorted(glob.glob(os.path.join(folder_path, "*.obj"))) 
+# -----------------------------------------------------------------------------
+# [Core 1] 안전한 데이터 로드 (파일 이름 매칭)
+# -----------------------------------------------------------------------------
+def load_paired_data(mode, data_root):
+    """
+    .ply(Shape)와 .asc(Landmark) 파일의 이름을 비교하여
+    정확히 쌍이 맞는 데이터만 로드하여 반환합니다.
+    Args:
+        mode (str): 'train' or 'test'
+        data_root (str): 데이터 루트 경로 (../Data)
+    Returns:
+        shape_list, lm_list (List of np.array)
+    """
+    folder_path = os.path.join(data_root, mode)
     
-    if len(files) == 0:
+    # 1. 파일 목록 검색
+    ply_files = sorted(glob.glob(os.path.join(folder_path, "*.ply")))
+    # ply가 없으면 obj도 찾아봄 (백업)
+    if len(ply_files) == 0:
+        ply_files = sorted(glob.glob(os.path.join(folder_path, "*.obj")))
+        
+    asc_files = sorted(glob.glob(os.path.join(folder_path, "*.asc")))
+
+    # 2. 파일명(확장자 제외)을 기준으로 딕셔너리 생성
+    ply_dict = {os.path.splitext(os.path.basename(f))[0]: f for f in ply_files}
+    asc_dict = {os.path.splitext(os.path.basename(f))[0]: f for f in asc_files}
+
+    # 3. 교집합(둘 다 존재하는 파일명)만 추출 및 정렬
+    common_names = sorted(list(set(ply_dict.keys()) & set(asc_dict.keys())))
+
+    if len(common_names) == 0:
+        # 폴더가 없거나 파일이 없으면 빈 리스트 반환 (에러 방지)
+        print(f"⚠️ [Warning] No paired data found in {folder_path}")
         return [], []
-    
-    print(f"   Found {len(files)} shapes in {os.path.basename(folder_path)}. Reading...")
+
+    print(f"   Matched {len(common_names)} pairs in '{mode}'. Loading...")
+
     shape_list = []
-    name_list = [] 
+    lm_list = []
 
-    for f in tqdm(files, desc="Loading Shapes", unit="file"):
+    for name in tqdm(common_names, desc=f"Loading {mode}", unit="file"):
         try:
-            # 파일명 추출 (확장자 제거)
-            basename = os.path.splitext(os.path.basename(f))[0]
-            name_list.append(basename)
-
-            plydata = PlyData.read(f)
+            # --- Load Shape ---
+            ply_path = ply_dict[name]
+            plydata = PlyData.read(ply_path)
             vertex = plydata['vertex']
             points = np.column_stack([vertex['x'], vertex['y'], vertex['z']])
+            
+            # --- Load Landmark ---
+            asc_path = asc_dict[name]
+            try: 
+                lm_points = np.loadtxt(asc_path, delimiter=',')
+            except ValueError: 
+                lm_points = np.loadtxt(asc_path)
+            
+            # 둘 다 성공했을 때만 리스트에 추가 (데이터 무결성 보장)
             shape_list.append(points)
+            lm_list.append(lm_points)
+
         except Exception as e:
-            print(f"Error reading {f}: {e}")
-            
-    return shape_list, name_list
+            print(f"Error loading pair for '{name}': {e}")
+            continue
 
-def read_asc_files_from_folder(folder_path):
-    """ .asc 파일들을 읽어서 Landmark(L, 3) 리스트로 반환 """
-    if not os.path.exists(folder_path):
-        return []
+    return shape_list, lm_list
 
-    files = sorted(glob.glob(os.path.join(folder_path, "*.asc")))
-    if len(files) == 0:
-        return []
-    
-    print(f"   Found {len(files)} ASC files in {os.path.basename(folder_path)}. Reading...")
-    lm_list = []
-    for f in tqdm(files, desc="Loading Landmarks", unit="file"):
-        try:
-            try: points = np.loadtxt(f, delimiter=',')
-            except ValueError: points = np.loadtxt(f)
-            lm_list.append(points)
-        except Exception as e:
-            print(f"Error reading {f}: {e}")
-    return lm_list
-
-# -----------------------------------------------------------------------------
-# 1. Shape Data Load (수정됨: partition 인자 추가로 분리 로딩 지원)
-# -----------------------------------------------------------------------------
-def load_shape_data(dataset, data_root, partition=None):
-    """
-    partition: 'train', 'test', 또는 None (None이면 둘 다 찾음 - 기존 호환용)
-    """
-    # 폴더명 매핑 (대소문자 주의)
-    target_folders = []
-    if partition == 'train':
-        target_folders = ['Train'] 
-    elif partition == 'test':
-        target_folders = ['test']
-    else:
-        target_folders = ['Train', 'test'] # 기존 로직: 둘 다
-
-    all_shapes = []
-    all_names = []
-    
-    # 1. 지정된 폴더 탐색
-    found_in_folders = False
-    for folder_name in target_folders:
-        folder_path = os.path.join(data_root, folder_name)
-        if os.path.exists(folder_path):
-            s, n = read_ply_files_from_folder(folder_path)
-            if len(s) > 0:
-                all_shapes.extend(s)
-                all_names.extend(n)
-                found_in_folders = True
-    
-    # 폴더에서 찾았으면 바로 반환 (우선순위 1)
-    if found_in_folders:
-        return all_shapes, all_names
-
-    # 2. [기존 데이터셋별 예외 처리 유지] - 파일이 없을 때만 실행됨
-    # (partition이 명시되었는데 파일을 못 찾으면 여기서도 못 찾을 확률이 높지만, 호환성을 위해 유지)
-    dataset_dir = os.path.join(data_root, dataset)
-    
-    if dataset == 'Ear296_Korean':
-        ply_path = os.path.join(dataset_dir, 'template-registered_data')
-        if os.path.exists(ply_path): 
-            return read_ply_files_from_folder(ply_path) 
-        
-        mat_path = os.path.join(dataset_dir, 'template_registered_data_mat', 'Ear296_Korean.mat')
-        if os.path.exists(mat_path):
-            data = sio.loadmat(mat_path)
-            shapes = [s for s in data['shape_all'][0]]
-            names = [f"mat_{i:03d}" for i in range(len(shapes))]
-            return shapes, names
-
-    elif dataset == 'Ear296_Korean_arg':
-        aug_path = os.path.join(dataset_dir, 'augmented_samples_Random_12_HIGH')
-        if os.path.exists(aug_path): return read_ply_files_from_folder(aug_path)
-
-    elif dataset == 'BU-3DFE':
-        path = os.path.join(data_root, 'BU-3DFE-dataset-mat', 'vertics_landmark_refine_Read.mat')
-        if os.path.exists(path):
-            f = h5py.File(path, 'r')
-            shapes = [np.array(f[f['shape_all'][i][0]][()].transpose()) for i in range(len(f['shape_all']))]
-            names = [f"BU3DFE_{i:03d}" for i in range(len(shapes))]
-            return shapes, names
-    
-    return [], []
-
-# -----------------------------------------------------------------------------
-# 2. Landmark Position Load (수정됨: partition 인자 추가)
-# -----------------------------------------------------------------------------
-def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
-    # 폴더명 매핑
-    target_folders = []
-    if partition == 'train':
-        target_folders = ['Train'] 
-    elif partition == 'test':
-        target_folders = ['test']
-    else:
-        target_folders = ['Train', 'test']
-
-    all_landmarks = []
-    found_in_folders = False
-
-    # 1. 지정된 폴더 탐색
-    for folder_name in target_folders:
-        folder_path = os.path.join(data_root, folder_name)
-        if os.path.exists(folder_path):
-            lms = read_asc_files_from_folder(folder_path)
-            if len(lms) > 0:
-                all_landmarks.extend(lms)
-                found_in_folders = True
-
-    if found_in_folders:
-        print(f">> Total Landmarks Loaded: {len(all_landmarks)}")
-        return all_landmarks
-
-    # 2. [기존 데이터셋별 예외 처리 유지]
-    dataset_dir = os.path.join(data_root, dataset)
-    
-    if 'Ear' in dataset:
-        target_folder = None
-        if dataset == 'Ear296_Korean':
-            target_folder = os.path.join(dataset_dir, 'template-registered_data')
-        elif dataset == 'Ear296_Korean_arg':
-            target_folder = os.path.join(dataset_dir, 'augmented_samples_Random_12_HIGH')
-            
-        if target_folder and os.path.exists(target_folder):
-            landmarks = read_asc_files_from_folder(target_folder)
-            if landmarks: return landmarks
-
-        # Index fallback
-        print(">> .asc files missing. Falling back to Index-based derivation.")
-        index_path = os.path.join(data_root, 'Ear296_Korean', 'template_registered_data_mat', 'Ear296_Korean.mat')
-        if not os.path.exists(index_path):
-             index_path = os.path.join(data_root, dataset, 'template_registered_data_mat', 'Ear296_Korean.mat')
-             
-        if os.path.exists(index_path):
-            data = sio.loadmat(index_path)
-            raw = data['landmark_index_select_all'][0]
-            common_indices = raw[0].flatten() - 1 
-            
-            landmark_positions = []
-            
-            # shape_all 처리
-            if shape_all is None: 
-                s, _ = load_shape_data(dataset, data_root, partition) # 재귀 호출 시 partition 전달
-                shape_all = s
-            elif isinstance(shape_all, tuple):
-                 shape_all = shape_all[0]
-                
-            for shape in shape_all:
-                landmark_positions.append(shape[common_indices, :])
-            return landmark_positions
-
-    elif dataset == 'BU-3DFE':
-        path = os.path.join(data_root, 'BU-3DFE-dataset-mat', 'landmark_select_refine.mat')
-        data = sio.loadmat(path)
-        raw = data['landmark_position_select_all'][0]
-        return [np.array(raw[k]) for k in range(len(raw))]
-        
-    return []
 
 # -----------------------------------------------------------------------------
 # Core Processing & Sampling (수정 없음 - 원본 유지)
