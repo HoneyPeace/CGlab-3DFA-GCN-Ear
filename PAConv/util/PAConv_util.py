@@ -36,8 +36,19 @@ def get_graph_feature(x, k=20, idx=None):
 
     x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)  # center: (B, N, K, C)
 
+    """
     feature = torch.cat((feature - x, x), dim=3).permute(0, 3, 1, 2)    # (B, 2*C, N, K)
     return feature
+    """
+    dist = torch.linalg.vector_norm(feature - x, dim = 3, keepdim=True)
+    feature = torch.cat((
+        feature - x,  # (B, N, K, 3)
+        feature,      # (B, N, K, 3)
+        x,            # (B, N, K, 3)
+        dist          # (B, N, K, 1)
+    ), dim=3)         # 결과: (B, N, K, 10)
+
+    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 10, N, K)
 
 
 def get_scorenet_input(x, idx, k):
@@ -62,8 +73,13 @@ def get_scorenet_input(x, idx, k):
                 .view(batch_size, num_points, k, num_dims)   # (B, N, K, C)
     center = x.view(batch_size, num_points, 1, num_dims)\
              .repeat(1, 1, k, 1)                         # (B, N, K, C)
-
-    feature = torch.cat((neighbor - center, neighbor), dim=3)  # (B, N, K, 2*C)
+    dist = torch.linalg.vector_norm(neighbor - center, dim = 3, keepdim=True)
+    feature = torch.cat((
+        neighbor - center, # (B, N, K, 3)
+        neighbor,          # (B, N, K, 3)
+        center,            # (B, N, K, 3)
+        dist               # (B, N, K, 1)
+    ), dim=3)              # 결과: (B, N, K, 10)
 
     return feature.permute(0, 3, 1, 2).contiguous()     # (B, 2*C, N, K) = (B, 6, N, K)
 
