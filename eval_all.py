@@ -60,7 +60,12 @@ if not args.run_id:
     sys.exit(1)
 
 project_dir = os.path.join(args.output_root, args.exp_name)
-base_str = f"FPS{args.num_points}_sigma{args.sigma}_batch{args.batch_size}_train{args.train_len}"
+if args.accumulation_steps > 1:
+    batch_str = f"{args.batch_size}x{args.accumulation_steps}"
+else:
+    batch_str = f"{args.batch_size}"
+
+base_str = f"FPS{args.num_points}_sigma{args.sigma}_batch{batch_str}_train{args.train_len}"
 
 if args.user_tag and args.user_tag != "":
     setting_str = f"{base_str}_{args.user_tag}"
@@ -237,6 +242,11 @@ sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
 filename = f"ME{average_me:.4f}_std{std_me:.4f}.txt"
 result_txt_path = os.path.join(run_root, filename)
 
+if args.accumulation_steps > 1:
+    batch_str_log = f"{args.batch_size}x{args.accumulation_steps} (Effective: {args.batch_size * args.accumulation_steps})"
+else:
+    batch_str_log = f"{args.batch_size}"
+
 with open(result_txt_path, "w") as f:
     f.write(f"==========================================\n")
     f.write(f"   Evaluation Result: {args.exp_name}\n")
@@ -251,7 +261,7 @@ with open(result_txt_path, "w") as f:
     f.write(f" User Comment: {user_comment}\n")
     
     f.write(f" Train Data  : {train_len} samples\n")
-    f.write(f" Batch Size  : {args.batch_size}\n")
+    f.write(f" Batch Size  : {batch_str_log}\n")
     f.write(f" Num Points  : {args.num_points}\n")
     f.write(f"------------------------------------------\n")
     f.write(f" Average ME : {average_me:.4f} mm\n")

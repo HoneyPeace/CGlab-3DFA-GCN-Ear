@@ -12,8 +12,8 @@ conda init cmd.exe
 conda create -n EarLandMarking_CGLAB python=3.8 -y
 conda activate EarLandMarking_CGLAB
 call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
-conda install pytorch torchvision torchaudio cudatoolkit=11.1 -c pytorch -c nvidia
-pip install numpy scikit-learn matplotlib
+conda install pytorch==1.9.0 torchvision==0.10.0 torchaudio==0.9.0 cudatoolkit=11.1 -c pytorch -c conda-forge
+pip install numpy scikit-learn matplotlib h5py plyfile
 
 ```
 
@@ -41,15 +41,10 @@ matlab에서 make_mat 실행
 ### 🔄 실행 (npy전처리까지 함께)
 
 ```
-현재
-python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear296_Korean --need_resample True --sigma 5 --num_points 2048 --dataset_seed 1 --sample_way FPS --batch_size 32
 
-기존
-python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear296_Korean --need_resample True --sigma 5 --num_points 2048 --dataset_seed 1 --sample_way FPS
+python train.py --train_dataset_name train --test_dataset_name test --sigma 3 --num_points 4096 --batch_size 16 --dataset_seed 1 --sample_way FPS --need_resample True --exp_name Ear_10 --accumulation_steps 2 --user_tag "증강12"
 
 ```
-
-.\checkpoints\Face_alignment_with_PAConv\Ear296_Korean\models\ 경로생성
 
 ---
 
@@ -57,10 +52,8 @@ python train.py --train_dataset_name Ear296_Korean_arg --test_dataset_name Ear29
 
 ```
 현재
-python eval_all.py --run_id 6 --sigma 5 --num_points 2048 --Eval_DataType test --regression_point_num 10
+python eval_all.py --exp_name Ear_10 --run_id 1 --sigma 3 --num_points 4096 --Eval_DataType test --regression_point_num 10 --batch_size 16 --train_len 2300 --user_tag "증강12"
 
-기존
-python eval_all.py --dataset Ear296_Korean --sigma 5 --num_points 2048 --regression_point_num 10 --Eval_DataType sample
 ```
 
 sample, train, test 선택

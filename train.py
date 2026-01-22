@@ -48,7 +48,12 @@ def get_experiment_paths(args, train_len):
     project_dir = os.path.join(args.output_root, args.exp_name)
     os.makedirs(project_dir, exist_ok=True)
 
-    base_str = f"FPS{args.num_points}_sigma{args.sigma}_batch{args.batch_size}_train{train_len}"
+    if args.accumulation_steps > 1:
+        batch_str = f"{args.batch_size}x{args.accumulation_steps}"
+    else:
+        batch_str = f"{args.batch_size}"
+
+    base_str = f"FPS{args.num_points}_sigma{args.sigma}_batch{batch_str}_train{train_len}"
     
     # 태그가 있으면 붙이고, 없으면 안 붙임
     if args.user_tag and args.user_tag != "":
