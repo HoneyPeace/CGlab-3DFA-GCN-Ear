@@ -24,11 +24,17 @@ class PAConv(nn.Module):
 
         #기존은 10차원에서 6차원으로 변경 <-- 06.07: 차원 수 의심으로 인한 변경
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices
-        self.scorenet2 = ScoreNet(10, self.m2, hidden_unit=self.hidden[0])
-        self.scorenet3 = ScoreNet(10, self.m3, hidden_unit=self.hidden[1])
-        self.scorenet4 = ScoreNet(10, self.m4, hidden_unit=self.hidden[2])
-        self.scorenet5 = ScoreNet(10, self.m5, hidden_unit=self.hidden[3])
-
+        
+        #self.scorenet2 = ScoreNet(10, self.m2, hidden_unit=self.hidden[0])
+        #self.scorenet3 = ScoreNet(10, self.m3, hidden_unit=self.hidden[1])
+        #self.scorenet4 = ScoreNet(10, self.m4, hidden_unit=self.hidden[2])
+        #self.scorenet5 = ScoreNet(10, self.m5, hidden_unit=self.hidden[3])
+        
+        self.scorenet2 = ScoreNet(6, self.m2, hidden_unit=self.hidden[0])
+        self.scorenet3 = ScoreNet(6, self.m3, hidden_unit=self.hidden[1])
+        self.scorenet4 = ScoreNet(6, self.m4, hidden_unit=self.hidden[2])
+        self.scorenet5 = ScoreNet(6, self.m5, hidden_unit=self.hidden[3])
+        
         i2 = 64       # channel dim of input_2nd
         o2 = i3 = 64  # channel dim of output_2st and input_3rd
         o3 = i4 = 64  # channel dim of output_3rd and input_4th
@@ -61,9 +67,10 @@ class PAConv(nn.Module):
         self.bn7 = nn.BatchNorm1d(256, momentum=0.1)
         self.bn8 = nn.BatchNorm1d(128, momentum=0.1)
 
-        self.conv1 = nn.Sequential(nn.Conv2d(10, 64, kernel_size=1, bias=True),     # 6 18
+        #self.conv1 = nn.Sequential(nn.Conv2d(10, 64, kernel_size=1, bias=True),     # 10 18
+        #                           nn.BatchNorm2d(64, momentum=0.1))
+        self.conv1 = nn.Sequential(nn.Conv2d(6, 64, kernel_size=1, bias=True),     # 6 18
                                    nn.BatchNorm2d(64, momentum=0.1))
-
         self.convt = nn.Sequential(nn.Conv1d(64*5, 1024, kernel_size=1, bias=False),
                                    self.bnt)
 

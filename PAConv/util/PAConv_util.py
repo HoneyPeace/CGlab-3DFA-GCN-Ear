@@ -41,21 +41,21 @@ def get_graph_feature(x, k=20, idx=None):
     return feature
     """
     dist = torch.linalg.vector_norm(feature - x, dim = 3, keepdim=True)
+    feature = torch.cat((feature - x, x), dim=3)  # (B, N, K, 2*C) 6채널
+    #feature = torch.cat((feature - x, feature, x, dist), dim=3)         # 결과: (B, N, K, 10) # 결과: (B, N, K, 10) 10채널
+    """
     feature = torch.cat((
         feature - x,  # (B, N, K, 3)
         feature,      # (B, N, K, 3)
         x,            # (B, N, K, 3)
         dist          # (B, N, K, 1)
     ), dim=3)         # 결과: (B, N, K, 10)
-
+    """
     return feature.permute(0, 3, 1, 2).contiguous()     # (B, 10, N, K)
 
 
 def get_scorenet_input(x, idx, k):
-    """
-    x: [B, C, N]
-    return: [B, 10, N, K]   # 주석은 10으로 적혀있지만, 실제 코드는 2*C=6 채널
-    """
+
     batch_size = x.size(0)                                # B
     num_points = x.size(2)                                # N
     x = x.view(batch_size, -1, num_points)                # (B, C, N)
@@ -74,13 +74,16 @@ def get_scorenet_input(x, idx, k):
     center = x.view(batch_size, num_points, 1, num_dims)\
              .repeat(1, 1, k, 1)                         # (B, N, K, C)
     dist = torch.linalg.vector_norm(neighbor - center, dim = 3, keepdim=True)
+    feature = torch.cat((neighbor - center, neighbor), dim=3)  # (B, N, K, 2*C) 6채널
+    #feature = torch.cat((neighbor - center, neighbor, center, dist), dim=3)  # 결과: (B, N, K, 10) 10채널
+    """
     feature = torch.cat((
         neighbor - center, # (B, N, K, 3)
         neighbor,          # (B, N, K, 3)
         center,            # (B, N, K, 3)
         dist               # (B, N, K, 1)
     ), dim=3)              # 결과: (B, N, K, 10)
-
+    """
     return feature.permute(0, 3, 1, 2).contiguous()     # (B, 2*C, N, K) = (B, 6, N, K)
 
 
