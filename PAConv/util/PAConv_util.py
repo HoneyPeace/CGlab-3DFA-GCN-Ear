@@ -36,13 +36,9 @@ def get_graph_feature(x, k=20, idx=None):
 
     x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)  # center: (B, N, K, C)
 
-    """
-    feature = torch.cat((feature - x, x), dim=3).permute(0, 3, 1, 2)    # (B, 2*C, N, K)
-    return feature
-    """
     dist = torch.linalg.vector_norm(feature - x, dim = 3, keepdim=True)
-    feature = torch.cat((feature - x, x), dim=3)  # (B, N, K, 2*C) 6채널
-    #feature = torch.cat((feature - x, feature, x, dist), dim=3)         # 결과: (B, N, K, 10) # 결과: (B, N, K, 10) 10채널
+    #feature = torch.cat((feature - x, x), dim=3)  # (B, N, K, 2*C) 6채널
+    feature = torch.cat((feature - x, feature, x, dist), dim=3)  # 결과: (B, N, K, 10) 10채널
     """
     feature = torch.cat((
         feature - x,  # (B, N, K, 3)
@@ -74,8 +70,8 @@ def get_scorenet_input(x, idx, k):
     center = x.view(batch_size, num_points, 1, num_dims)\
              .repeat(1, 1, k, 1)                         # (B, N, K, C)
     dist = torch.linalg.vector_norm(neighbor - center, dim = 3, keepdim=True)
-    feature = torch.cat((neighbor - center, neighbor), dim=3)  # (B, N, K, 2*C) 6채널
-    #feature = torch.cat((neighbor - center, neighbor, center, dist), dim=3)  # 결과: (B, N, K, 10) 10채널
+    #feature = torch.cat((neighbor - center, neighbor), dim=3)  # (B, N, K, 2*C) 6채널
+    feature = torch.cat((neighbor - center, neighbor, center, dist), dim=3)  # 결과: (B, N, K, 10) 10채널
     """
     feature = torch.cat((
         neighbor - center, # (B, N, K, 3)
