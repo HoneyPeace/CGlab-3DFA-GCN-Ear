@@ -22,7 +22,8 @@ from dataset import FaceLandmarkData
 from loss import AdaptiveWingLoss
 from util import main_sample
 from PAConv_model import PAConv
-from augmentations import normalize_data, PointcloudScaleAndTranslate
+from augmentations import normalize_data, PointcloudScaleAndTranslate, PointcloudRotation
+
 
 # GPU 설정
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -108,6 +109,56 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_idx, landmark_idx, 
     plt.close()
 
 # -----------------------------------------------------------------------------
+# [<<<< 수정됨] 법선 벡터 시각화 함수 (Auto-Scaling 적용)
+# -----------------------------------------------------------------------------
+def save_multiview_normal(points, normals, save_dir, sample_idx, prefix):
+    """
+    점(Blue)과 법선벡터(Red Arrow)를 시각화 (데이터 크기에 맞춰 화살표 길이 자동 조절)
+    """
+    fig = plt.figure(figsize=(30, 10))
+    
+    views = [
+        (131, 90, -100, "Front"),
+        (132, 30, 120,  "Side"),
+        (133, 45, -45, "Downside")
+    ]
+    
+    # [핵심 수정 1] 데이터의 스케일(범위)을 계산하여 화살표 길이를 동적으로 설정
+    # 점들이 퍼져있는 전체 크기(Max-Min)의 약 8% 길이로 화살표를 그림
+    # 이렇게 하면 데이터가 mm단위든 m단위든 무조건 눈에 보임
+    coord_range = np.ptp(points, axis=0).max() 
+    arrow_length = coord_range * 0.08          
+
+    # [핵심 수정 2] 너무 빽빽하면 징그러우니 적당히 건너뛰기
+    # 점 개수가 4000개라면 step=15 정도로 해서 약 260개만 그리기
+    step = 15 
+    
+    for pos, elev, azim, title in views:
+        ax = fig.add_subplot(pos, projection='3d')
+        
+        # 1. 점 찍기 (파란색)
+        # alpha를 0.2로 낮춰서 점을 아주 흐리게 만들고, 화살표를 돋보이게 함
+        ax.scatter(points[:, 0], points[:, 1], points[:, 2], s=1, c='b', alpha=0.2)
+        
+        # 2. 법선 벡터 화살표 그리기 (빨간색)
+        ax.quiver(
+            points[::step, 0], points[::step, 1], points[::step, 2],    # 시작점
+            normals[::step, 0], normals[::step, 1], normals[::step, 2], # 방향
+            length=arrow_length,  # [수정됨] 자동 계산된 길이 사용
+            normalize=True,       # 벡터 길이를 1로 맞춘 뒤 length를 곱함
+            color='r', 
+            linewidth=1.5         # [수정됨] 선 두께를 1.5로 키움
+        )
+        
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_title(f"{title} - Normals\n(Len: {arrow_length:.2f})") # 타이틀에 길이 정보 표시
+        ax.axis('off')
+    
+    filename = f"{prefix}_Normal_S{sample_idx:03d}.png"
+    plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')
+    plt.close()
+
+# -----------------------------------------------------------------------------
 # [기능 3] 데이터 백업 및 GT 시각화 (수정됨: Train 히트맵 스킵)
 # -----------------------------------------------------------------------------
 def process_data_storage(dataset, prefix, paths):
@@ -131,10 +182,15 @@ def process_data_storage(dataset, prefix, paths):
     # 2. GT Visualization
     # [수정된 부분] prefix가 'test'일 때만 히트맵 이미지를 저장합니다.
     if prefix == 'test':
+# (1) 히트맵 저장 경로
         vis_save_dir = os.path.join(paths['gt_heatmap'], prefix)
         os.makedirs(vis_save_dir, exist_ok=True)
+        
+        # (2) [<<<< 수정 2] 노말 벡터 저장 경로 생성 (GT_Normals 폴더)
+        normal_save_dir = os.path.join(paths['root'], 'GT_Normals')
+        os.makedirs(normal_save_dir, exist_ok=True)
 
-        print(f"   [{prefix.upper()}] Saving GT Heatmaps (Every 30th Sample)...")
+        print(f"   [{prefix.upper()}] Saving GT Heatmaps & Normals (Every 30th Sample)...")
         
         # 30개 간격으로 저장
         for idx in tqdm(range(0, len(shape_arr), 30), desc=f"   Saving GT {prefix}"):
@@ -143,6 +199,11 @@ def process_data_storage(dataset, prefix, paths):
             
             for lm_idx in range(heatmap_np.shape[0]):
                 save_multiview_heatmap(points_np, heatmap_np[lm_idx], vis_save_dir, idx, lm_idx, prefix)
+# --- [B] [<<<< 수정 2] 3-View 노말 벡터 저장 ---
+            if points_np.shape[1] >= 6:
+                xyz = points_np[:, :3]
+                normals = points_np[:, 3:6]
+                save_multiview_normal(xyz, normals, normal_save_dir, idx, prefix)
     else:
         # Train 데이터 등은 저장하지 않음
         print(f"   [{prefix.upper()}] GT Heatmap generation skipped (Requested).")
@@ -209,7 +270,9 @@ def train(args):
     train_loader = DataLoader(train_dataset, num_workers=0, batch_size=args.batch_size, shuffle=True, drop_last=True)
     
     ScaleAndTranslate = PointcloudScaleAndTranslate()
-
+    # Rotation 추가: 0.26라디안 = 약 15도 (정합된 데이터에 안전한 범위)
+    Rotate = PointcloudRotation(angle_range=0.26)
+    
     # 6. 모델 초기화
     model = PAConv(args, args.landmark_num).to(device)
     model.apply(weight_init)
@@ -240,6 +303,8 @@ def train(args):
 
                 point_normal = normalize_data(point)
                 point_normal = ScaleAndTranslate(point_normal)
+                
+                #point_normal = Rotate(point_normal) # Rotation 적용 (XYZ와 Normal 모두 회전함!)
                 point_input = point_normal.permute(0, 2, 1)
 
                 pred_heatmap = model(point_input)

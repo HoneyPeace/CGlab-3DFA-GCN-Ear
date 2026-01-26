@@ -17,12 +17,14 @@ def knn(x, k):
 
 def get_graph_feature(x, k=20, idx=None):
     """
-    x: input points (B, C, N)
-    return: edge features (B, 2*C, N, K)
+    x: input points (B, C, N) -> C=6 (XYZ+Normal) 대응
+    return: edge features (B, 13, N, K) -> [XYZ Feature(10) + Normal(3)]
     """
     batch_size, num_dims, num_points = x.size()         # (B, C, N)
+    
+    # [수정 1] KNN은 오직 'XYZ 좌표(앞 3채널)'로만 수행 (Normal 제외)
     if idx is None:
-        idx, _ = knn(x, k=k)                            # idx: (B, N, K)
+        idx, _ = knn(x[:, :3, :], k=k)                  # idx: (B, N, K)
 
     device = x.device
     
@@ -36,51 +38,60 @@ def get_graph_feature(x, k=20, idx=None):
 
     x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)  # center: (B, N, K, C)
 
-    dist = torch.linalg.vector_norm(feature - x, dim = 3, keepdim=True)
-    #feature = torch.cat((feature - x, x), dim=3)  # (B, N, K, 2*C) 6채널
-    feature = torch.cat((feature - x, feature, x, dist), dim=3)  # 결과: (B, N, K, 10) 10채널
-    """
+    # [수정 2] 거리(dist) 계산도 'XYZ 좌표(앞 3채널)' 차이로만 수행
+    dist = torch.linalg.vector_norm(feature[..., :3] - x[..., :3], dim=3, keepdim=True)
+    
+    # [수정 3] 13채널 구성으로 변경 (XYZ 10채널 + Normal 3채널)
+    # feature는 Neighbor(6ch), x는 Center(6ch) 정보를 담고 있음
+    # 슬라이싱을 통해 필요한 정보만 추출하여 결합
     feature = torch.cat((
-        feature - x,  # (B, N, K, 3)
-        feature,      # (B, N, K, 3)
-        x,            # (B, N, K, 3)
-        dist          # (B, N, K, 1)
-    ), dim=3)         # 결과: (B, N, K, 10)
-    """
-    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 10, N, K)
+        feature[..., :3] - x[..., :3],  # [3ch] XYZ Diff
+        feature[..., :3],               # [3ch] XYZ Neighbor
+        x[..., :3],                     # [3ch] XYZ Center
+        dist,                           # [1ch] Distance
+        feature[..., 3:]                # [3ch] Normal Neighbor (Normal Diff/Center 제외)
+    ), dim=3) 
+    
+    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 13, N, K)
 
 
 def get_scorenet_input(x, idx, k):
-
+    """
+    x: input points (B, C, N)
+    return: (B, 13, N, K)
+    """
     batch_size = x.size(0)                                # B
     num_points = x.size(2)                                # N
     x = x.view(batch_size, -1, num_points)                # (B, C, N)
 
-    device = torch.device('cuda')  # 기존 코드 유지
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu') # 장치 호환성 유지
 
     idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points  # (B,1,1)
     idx = idx + idx_base                                 # (B, N, K)
     idx = idx.view(-1)                                   # (B*N*K,)
 
-    _, num_dims, _ = x.size()                            # num_dims = C (=3)
+    _, num_dims, _ = x.size()                            # num_dims = C (=6)
 
     x = x.transpose(2, 1).contiguous()                   # (B, N, C)
     neighbor = x.view(batch_size * num_points, -1)[idx, :]\
                 .view(batch_size, num_points, k, num_dims)   # (B, N, K, C)
     center = x.view(batch_size, num_points, 1, num_dims)\
              .repeat(1, 1, k, 1)                         # (B, N, K, C)
-    dist = torch.linalg.vector_norm(neighbor - center, dim = 3, keepdim=True)
-    #feature = torch.cat((neighbor - center, neighbor), dim=3)  # (B, N, K, 2*C) 6채널
-    feature = torch.cat((neighbor - center, neighbor, center, dist), dim=3)  # 결과: (B, N, K, 10) 10채널
-    """
+    
+    # [수정 4] 거리 계산 시 XYZ(앞 3채널)만 사용
+    dist = torch.linalg.vector_norm(neighbor[..., :3] - center[..., :3], dim=3, keepdim=True)
+
+    # [수정 5] 13채널 구성으로 변경 (위 함수와 동일한 로직)
+    # neighbor와 center 변수를 활용하여 슬라이싱
     feature = torch.cat((
-        neighbor - center, # (B, N, K, 3)
-        neighbor,          # (B, N, K, 3)
-        center,            # (B, N, K, 3)
-        dist               # (B, N, K, 1)
-    ), dim=3)              # 결과: (B, N, K, 10)
-    """
-    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 2*C, N, K) = (B, 6, N, K)
+        neighbor[..., :3] - center[..., :3], # [3ch] XYZ Diff
+        neighbor[..., :3],                   # [3ch] XYZ Neighbor
+        center[..., :3],                     # [3ch] XYZ Center
+        dist,                                # [1ch] Distance
+        neighbor[..., 3:]                    # [3ch] Normal Neighbor Only
+    ), dim=3) 
+    
+    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 13, N, K)
 
 
 

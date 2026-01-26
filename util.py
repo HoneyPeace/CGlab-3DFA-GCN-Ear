@@ -10,6 +10,8 @@ import numpy as np
 import scipy.io as sio
 import torch
 import h5py
+import open3d as o3d
+
 from plyfile import PlyData
 from sklearn.manifold import MDS
 from sklearn.neighbors import NearestNeighbors
@@ -17,6 +19,67 @@ from tqdm import tqdm
 from functools import reduce
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+
+'''
+@Author: Yuan Wang (Modified by Researcher 2)
+@File: util.py
+@Description: Includes Partition Logic, Name Saving & FPS Progress Bar + [NEW] MST Normal Estimation
+'''
+
+import os 
+import glob
+import numpy as np
+import scipy.io as sio
+import torch
+import h5py
+import open3d as o3d  # [필수] Open3D 추가
+
+from plyfile import PlyData
+from sklearn.manifold import MDS
+from sklearn.neighbors import NearestNeighbors
+from tqdm import tqdm
+from functools import reduce
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# -----------------------------------------------------------------------------
+# [NEW] Normal Vector Calculation (MST + Centroid Check)
+# -----------------------------------------------------------------------------
+def compute_normals_consistent(points, k_neighbors=15):
+    """
+    Open3D를 이용하여 MST 기반으로 법선 벡터를 계산하고, 
+    중심점(Centroid)을 기준으로 전체 방향을 바깥으로 정렬합니다.
+    Input: (N, 3) numpy array
+    Output: (N, 6) numpy array (XYZ + Normal)
+    """
+    # 1. Open3D PointCloud 객체 생성
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    # 2. 로컬 노말 추정
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
+    )
+    
+    # 3. MST(Minimum Spanning Tree)를 이용한 방향성 전파 (Consistency 확보)
+    pcd.orient_normals_consistent_tangent_plane(k=k_neighbors)
+    
+    # 4. 전체 방향성 교정 (Centroid 기준)
+    points_np = np.asarray(pcd.points)
+    normals_np = np.asarray(pcd.normals)
+    center = np.mean(points_np, axis=0)
+    
+    # (P - C) 벡터와 Normal의 내적 계산
+    vec_from_center = points_np - center
+    dot_products = np.sum(vec_from_center * normals_np, axis=1)
+    
+    # 내적이 음수인 비율이 절반 이상이면 전체를 뒤집음 (일관성 유지한 채 방향만 반전)
+    if np.mean(dot_products < 0) > 0.5:
+        normals_np *= -1
+        
+    return np.concatenate([points_np, normals_np], axis=-1)
 
 # -----------------------------------------------------------------------------
 # [Helper] 파일 읽기 함수들 (Name 반환 유지)
@@ -323,10 +386,9 @@ def get_3D_FAN_NME(pred_landmark, gt_landmark):
     return NME, NME_single
 
 # -----------------------------------------------------------------------------
-# Main Sampling Function (수정 유지: partition 처리 및 name 저장)
+# Main Sampling Function (수정: Normal 계산 적용)
 # -----------------------------------------------------------------------------
 def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data', partition=None):
-    # 파일명 접미사 설정
     suffix = "sample" 
     if partition == 'train': suffix = "train"
     elif partition == 'test': suffix = "test"
@@ -335,7 +397,6 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
     
     # 1. Load (이름 포함)
     shape_all, name_all = load_shape_data(dataset, data_root, partition)
-    
     if len(shape_all) == 0:
         print(f"   [Warning] No data found for partition '{partition}'. Skipping.")
         return
@@ -350,24 +411,40 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
     print('   Calculating Heatmaps...')
     Heat_data_all = calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma)
 
-    # 4. Sampling (Progress bar applied)
+    # 4. Sampling (XYZ only)
     Heat_data_sample, shape_sample = random_sample(shape_all, Heat_data_all,
                                                    num_points, seed, sample_way, dataset, data_root)
-    
     if len(Heat_data_sample) == 0:
         print("Sampling failed or empty.")
         return
+
+    # -------------------------------------------------------------------------
+    # [NEW] Normal Vector Computing Loop
+    # -------------------------------------------------------------------------
+    print('   Computing Normals with MST & Centroid Alignment...')
+    shape_with_normals = []
+    
+    # tqdm으로 진행상황 표시
+    for s in tqdm(shape_sample, desc="   Normals", unit="shape"):
+        # 여기서 (N, 3) -> (N, 6) 변환
+        sn = compute_normals_consistent(s, k_neighbors=15)
+        shape_with_normals.append(sn)
+    
+    # 저장할 변수 교체
+    final_shape_data = shape_with_normals 
 
     # 5. Save
     save_base_dir = os.path.join(data_root, f"{dataset}-npy")
     os.makedirs(save_base_dir, exist_ok=True)
     
     print(f"   Saving to: {save_base_dir} (Suffix: _{suffix})")
-    np.save(os.path.join(save_base_dir, f'Heat_data_{suffix}.npy'), Heat_data_sample)
-    np.save(os.path.join(save_base_dir, f'shape_{suffix}.npy'),      shape_sample)
-    np.save(os.path.join(save_base_dir, f'landmark_{suffix}.npy'),   landmark_position_sample)
     
-    # [추가됨] 이름 저장
+    np.save(os.path.join(save_base_dir, f'Heat_data_{suffix}.npy'), Heat_data_sample)
+    
+    # [변경] Normal이 포함된 (N, 6) 데이터 저장
+    np.save(os.path.join(save_base_dir, f'shape_{suffix}.npy'),      final_shape_data)
+    
+    np.save(os.path.join(save_base_dir, f'landmark_{suffix}.npy'),   landmark_position_sample)
     np.save(os.path.join(save_base_dir, f'name_{suffix}.npy'),       np.array(name_all))
 
     print("--- Done ---\n")

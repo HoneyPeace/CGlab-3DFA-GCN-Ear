@@ -22,13 +22,16 @@ class PAConv(nn.Module):
         self.calc_scores = args.calc_scores
         self.hidden = args.hidden
 
+        # 구성: (Neighbor-Center 6) + (Neighbor 6) + (Center 6) + (Dist 1) = 19
+        input_feature_dim = 13
+
         #기존은 10차원에서 6차원으로 변경 <-- 06.07: 차원 수 의심으로 인한 변경
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices
         
-        self.scorenet2 = ScoreNet(10, self.m2, hidden_unit=self.hidden[0])
-        self.scorenet3 = ScoreNet(10, self.m3, hidden_unit=self.hidden[1])
-        self.scorenet4 = ScoreNet(10, self.m4, hidden_unit=self.hidden[2])
-        self.scorenet5 = ScoreNet(10, self.m5, hidden_unit=self.hidden[3])
+        self.scorenet2 = ScoreNet(input_feature_dim, self.m2, hidden_unit=self.hidden[0])
+        self.scorenet3 = ScoreNet(input_feature_dim, self.m3, hidden_unit=self.hidden[1])
+        self.scorenet4 = ScoreNet(input_feature_dim, self.m4, hidden_unit=self.hidden[2])
+        self.scorenet5 = ScoreNet(input_feature_dim, self.m5, hidden_unit=self.hidden[3])
         
         #self.scorenet2 = ScoreNet(6, self.m2, hidden_unit=self.hidden[0])
         #self.scorenet3 = ScoreNet(6, self.m3, hidden_unit=self.hidden[1])
@@ -67,7 +70,7 @@ class PAConv(nn.Module):
         self.bn7 = nn.BatchNorm1d(256, momentum=0.1)
         self.bn8 = nn.BatchNorm1d(128, momentum=0.1)
 
-        self.conv1 = nn.Sequential(nn.Conv2d(10, 64, kernel_size=1, bias=True),     # 10 18
+        self.conv1 = nn.Sequential(nn.Conv2d(input_feature_dim, 64, kernel_size=1, bias=True),     # 10 18
                                    nn.BatchNorm2d(64, momentum=0.1))
         #self.conv1 = nn.Sequential(nn.Conv2d(6, 64, kernel_size=1, bias=True),     # 6 18
         #                           nn.BatchNorm2d(64, momentum=0.1))

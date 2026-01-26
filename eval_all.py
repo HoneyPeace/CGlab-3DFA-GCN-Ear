@@ -41,6 +41,7 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
     ]
     for pos, elev, azim, title in views:
         ax = fig.add_subplot(pos, projection='3d')
+        # [수정 1] points가 6채널(XYZ+NxNyNz)이어도 앞 3개(XYZ)만 사용하여 시각화
         ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=heatmap, cmap='jet', s=15, alpha=0.8)
         ax.view_init(elev=elev, azim=azim)
         ax.set_title(title)
@@ -148,7 +149,7 @@ model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval()
 
 # -----------------------------------------------------------------------------
-# 4. 평가 루프
+# 4. 평가 루프 (XYZ + Normal 분리 처리 핵심 수정 구간)
 # -----------------------------------------------------------------------------
 me_list = []
 per_landmark_me_list = []
@@ -156,33 +157,45 @@ per_landmark_me_list = []
 print(f"\n>>> Starting Evaluation ({args.Eval_DataType})...")
 
 for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Evaluating")):
-    point = point.to(device)
+    point = point.to(device) # point shape: (1, N, C) -> C는 3 또는 6
     gt_landmark = gt_landmark.to(device)
     
-    # [추가] 현재 샘플의 실제 이름 가져오기
     real_name = name_sample[idx]
     
-    # [1] 정규화 파라미터 계산 (복원용)
+    # [수정 2] 정규화를 위해 XYZ와 Normal 데이터를 분리
     B, N, C = point.shape
-    centroid = torch.mean(point, axis=1, keepdim=True)
-    point_centered = point - centroid
-    m = torch.max(torch.sqrt(torch.sum(point_centered ** 2, axis=2)), axis=1)[0]
+    xyz = point[:, :, :3]              # 앞 3채널: XYZ 좌표
+    normals = point[:, :, 3:] if C > 3 else None  # 뒤 채널: Normal 벡터 (있을 경우)
+    
+    # [수정 3] XYZ 좌표만 사용하여 중심(Centroid)과 크기(Scale) 계산
+    # (Normal은 방향 벡터이므로 위치 정규화에 포함되면 안 됨)
+    centroid = torch.mean(xyz, axis=1, keepdim=True)
+    xyz_centered = xyz - centroid
+    m = torch.max(torch.sqrt(torch.sum(xyz_centered ** 2, axis=2)), axis=1)[0]
     scale = m.view(-1, 1, 1)
     
-    # [2] 정규화 수행
-    point_norm = point_centered / scale 
+    # [수정 4] XYZ만 정규화 수행
+    xyz_norm = xyz_centered / scale 
     
+    # [수정 5] 모델 입력 재조립 (XYZ 정규화본 + Normal 원본)
+    # 정규화된 좌표 뒤에 원래 Normal을 다시 붙여서 6채널로 만듦
+    if normals is not None:
+        point_input = torch.cat([xyz_norm, normals], dim=2) # (1, N, 6)
+    else:
+        point_input = xyz_norm # (1, N, 3)
+
     with torch.no_grad():
-        # [3] 모델 예측
-        pred_heatmap_raw = model(point_norm.permute(0, 2, 1))
-        pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)
+        # [수정 6] 모델에는 6채널(point_input)을 입력
+        pred_heatmap_raw = model(point_input.permute(0, 2, 1))
+        pred_heatmap = pred_heatmap_raw.permute(0, 2, 1) # (B, N, L)
 
-        # [4] 회귀 (Normalized Space)
-        pred_landmark_norm = landmark_regression(point_norm[0], pred_heatmap[0], args.regression_point_num, idx)
+        # [수정 7] 좌표 회귀(Soft Argmax) 함수에는 'XYZ 좌표(3채널)'만 전달
+        # 6채널을 넣으면 좌표 계산 차원이 꼬이므로 xyz_norm만 사용해야 함
+        pred_landmark_norm = landmark_regression(xyz_norm[0], pred_heatmap[0], args.regression_point_num, idx)
         
-        # [5] 복원 (Denormalization)
+        # [수정 8] 복원 (Denormalization)
+        # 정규화된 예측 좌표를 다시 원래 스케일로 복구
         pred_landmark = (pred_landmark_norm * scale) + centroid
-
         # [Visualization] 30개마다, 모든 랜드마크 히트맵 저장
         if idx % 40 == 0:
             points_np = point[0].cpu().numpy()
@@ -192,7 +205,7 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
             # 따라서 랜드마크 갯수(L)만큼 루프를 돌며 각각 저장
             for lm_idx in range(heatmap_np.shape[1]): # L
                  # [수정] idx 대신 real_name 전달
-                 save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], 
+                save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], 
                                         heatmap_save_dir, real_name, lm_idx, "pred")
 
         # ME 계산
