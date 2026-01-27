@@ -271,7 +271,7 @@ def train(args):
     
     ScaleAndTranslate = PointcloudScaleAndTranslate()
     # Rotation 추가: 0.26라디안 = 약 15도 (정합된 데이터에 안전한 범위)
-    Rotate = PointcloudRotation(angle_range=0.26)
+    #Rotate = PointcloudRotation(angle_range=0.26)
     
     # 6. 모델 초기화
     model = PAConv(args, args.landmark_num).to(device)

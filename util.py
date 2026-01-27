@@ -44,23 +44,20 @@ from functools import reduce
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+"""
 # -----------------------------------------------------------------------------
 # [NEW] Normal Vector Calculation (MST + Centroid Check)
 # -----------------------------------------------------------------------------
 def compute_normals_consistent(points, k_neighbors=15):
-    """
-    Open3D를 이용하여 MST 기반으로 법선 벡터를 계산하고, 
-    중심점(Centroid)을 기준으로 전체 방향을 바깥으로 정렬합니다.
-    Input: (N, 3) numpy array
-    Output: (N, 6) numpy array (XYZ + Normal)
-    """
+    
+    
     # 1. Open3D PointCloud 객체 생성
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
     
     # 2. 로컬 노말 추정
     pcd.estimate_normals(
-        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30)
+        search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=1, max_nn=30)
     )
     
     # 3. MST(Minimum Spanning Tree)를 이용한 방향성 전파 (Consistency 확보)
@@ -76,6 +73,40 @@ def compute_normals_consistent(points, k_neighbors=15):
     dot_products = np.sum(vec_from_center * normals_np, axis=1)
     
     # 내적이 음수인 비율이 절반 이상이면 전체를 뒤집음 (일관성 유지한 채 방향만 반전)
+    if np.mean(dot_products < 0) > 0.5:
+        normals_np *= -1
+        
+    return np.concatenate([points_np, normals_np], axis=-1)
+"""
+# -----------------------------------------------------------------------------
+# [수정됨] Normal Vector Calculation (Scale-Invariant KNN)
+# -----------------------------------------------------------------------------
+def compute_normals_consistent(points, k_neighbors=15):
+
+    # 1. Open3D PointCloud 객체 생성
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    
+    # 2. [핵심 수정] 로컬 노말 추정 방식을 'Hybrid' -> 'KNN'으로 변경
+    # radius=0.1 제한을 없애고, 무조건 주변 30개 점을 찾아서 평면을 계산함
+    pcd.estimate_normals(
+        search_param=o3d.geometry.KDTreeSearchParamKNN(knn=15) 
+    )
+    
+    # 3. MST(Minimum Spanning Tree)를 이용한 방향성 전파
+    # (이웃끼리 방향을 비슷하게 맞춤)
+    pcd.orient_normals_consistent_tangent_plane(k=k_neighbors)
+    
+    # 4. 전체 방향성 교정 (Centroid 기준)
+    points_np = np.asarray(pcd.points)
+    normals_np = np.asarray(pcd.normals)
+    center = np.mean(points_np, axis=0)
+    
+    # (P - C) 벡터와 Normal의 내적 계산
+    vec_from_center = points_np - center
+    dot_products = np.sum(vec_from_center * normals_np, axis=1)
+    
+    # 내적이 음수인(안쪽을 보는) 비율이 절반 이상이면 전체를 뒤집음 (바깥쪽을 보게)
     if np.mean(dot_products < 0) > 0.5:
         normals_np *= -1
         
