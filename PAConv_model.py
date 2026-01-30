@@ -23,7 +23,7 @@ class PAConv(nn.Module):
         self.hidden = args.hidden
 
         # 구성: (Neighbor-Center 6) + (Neighbor 6) + (Center 6) + (Dist 1) = 19
-        input_feature_dim = 13
+        input_feature_dim = 19
 
         #기존은 10차원에서 6차원으로 변경 <-- 06.07: 차원 수 의심으로 인한 변경
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices

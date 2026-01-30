@@ -15,83 +15,106 @@ def knn(x, k):
 
 
 
-def get_graph_feature(x, k=20, idx=None):
+def get_graph_feature(x, k=30, idx=None):
     """
-    x: input points (B, C, N) -> C=6 (XYZ+Normal) 대응
-    return: edge features (B, 13, N, K) -> [XYZ Feature(10) + Normal(3)]
+    x: input points (B, C, N) -> C=6 (XYZ+Normal)
+    return: edge features (B, 19, N, K) 
+    Structure: [XYZ_Feat(10)] + [Normal_Feat(9)]
     """
-    batch_size, num_dims, num_points = x.size()         # (B, C, N)
+    batch_size, num_dims, num_points = x.size()         
     
-    # [수정 1] KNN은 오직 'XYZ 좌표(앞 3채널)'로만 수행 (Normal 제외)
+    # [1] 데이터 분리
+    xyz = x[:, :3, :]      # (B, 3, N)
+    normals = x[:, 3:, :]  # (B, 3, N)
+
+    # [2] KNN은 오직 'XYZ 좌표'로만 수행 (공간적 이웃 찾기)
     if idx is None:
-        idx, _ = knn(x[:, :3, :], k=k)                  # idx: (B, N, K)
+        idx, _ = knn(xyz, k=k)                  # idx: (B, N, K)
 
     device = x.device
-    
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points  # (B,1,1)
-    idx = idx + idx_base                                # (B, N, K) + base offset
-    idx = idx.view(-1)                                  # (B*N*K,)
+    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
+    idx = idx + idx_base
+    idx = idx.view(-1)
 
-    x = x.transpose(2, 1).contiguous()                  # (B, N, C)
-    feature = x.view(batch_size * num_points, -1)[idx, :]   # (B*N*K, C) 인덱싱
-    feature = feature.view(batch_size, num_points, k, num_dims)  # (B, N, K, C) = neighbor
-
-    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)  # center: (B, N, K, C)
-
-    # [수정 2] 거리(dist) 계산도 'XYZ 좌표(앞 3채널)' 차이로만 수행
-    dist = torch.linalg.vector_norm(feature[..., :3] - x[..., :3], dim=3, keepdim=True)
+    # -----------------------------------------------------------------
+    # [Part A] XYZ Geometric Features (10채널)
+    # -----------------------------------------------------------------
+    xyz_t = xyz.transpose(2, 1).contiguous()   # (B, N, 3)
     
-    # [수정 3] 13채널 구성으로 변경 (XYZ 10채널 + Normal 3채널)
-    # feature는 Neighbor(6ch), x는 Center(6ch) 정보를 담고 있음
-    # 슬라이싱을 통해 필요한 정보만 추출하여 결합
-    feature = torch.cat((
-        feature[..., :3] - x[..., :3],  # [3ch] XYZ Diff
-        feature[..., :3],               # [3ch] XYZ Neighbor
-        x[..., :3],                     # [3ch] XYZ Center
-        dist,                           # [1ch] Distance
-        feature[..., 3:]                # [3ch] Normal Neighbor (Normal Diff/Center 제외)
-    ), dim=3) 
+    neighbor_xyz = xyz_t.view(batch_size * num_points, -1)[idx, :]
+    neighbor_xyz = neighbor_xyz.view(batch_size, num_points, k, 3) 
     
-    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 13, N, K)
+    center_xyz = xyz_t.view(batch_size, num_points, 1, 3).repeat(1, 1, k, 1) 
+    
+    dist = torch.linalg.vector_norm(neighbor_xyz - center_xyz, dim=3, keepdim=True)
+    
+    # XYZ 10ch: [Diff(3), Neighbor(3), Center(3), Dist(1)]
+    feat_xyz = torch.cat((neighbor_xyz - center_xyz, neighbor_xyz, center_xyz, dist), dim=3)
+
+    # -----------------------------------------------------------------
+    # [Part B] Normal Geometric Features (9채널) - 복구됨!
+    # -----------------------------------------------------------------
+    norm_t = normals.transpose(2, 1).contiguous() # (B, N, 3)
+    
+    # 1. Neighbor Normal
+    neighbor_norm = norm_t.view(batch_size * num_points, -1)[idx, :]
+    neighbor_norm = neighbor_norm.view(batch_size, num_points, k, 3) 
+
+    # 2. Center Normal
+    center_norm = norm_t.view(batch_size, num_points, 1, 3).repeat(1, 1, k, 1)
+    
+    # 3. Normal Diff (곡률 정보 반영)
+    diff_norm = neighbor_norm - center_norm
+    
+    # Normal 9ch: [Diff(3), Neighbor(3), Center(3)]
+    feat_norm = torch.cat((diff_norm, neighbor_norm, center_norm), dim=3)
+
+    # -----------------------------------------------------------------
+    # [Part C] 최종 결합 (10 + 9 = 19채널)
+    # -----------------------------------------------------------------
+    feature = torch.cat((feat_xyz, feat_norm), dim=3) 
+    
+    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 19, N, K)
 
 
 def get_scorenet_input(x, idx, k):
     """
     x: input points (B, C, N)
-    return: (B, 13, N, K)
+    return: (B, 19, N, K)
     """
-    batch_size = x.size(0)                                # B
-    num_points = x.size(2)                                # N
-    x = x.view(batch_size, -1, num_points)                # (B, C, N)
+    batch_size = x.size(0)
+    num_points = x.size(2)
+    x = x.view(batch_size, -1, num_points)
 
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu') # 장치 호환성 유지
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu') 
 
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points  # (B,1,1)
-    idx = idx + idx_base                                 # (B, N, K)
-    idx = idx.view(-1)                                   # (B*N*K,)
+    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
+    idx = idx + idx_base
+    idx = idx.view(-1)
 
-    _, num_dims, _ = x.size()                            # num_dims = C (=6)
+    # [1] 데이터 분리
+    xyz = x[:, :3, :]
+    normals = x[:, 3:, :]
 
-    x = x.transpose(2, 1).contiguous()                   # (B, N, C)
-    neighbor = x.view(batch_size * num_points, -1)[idx, :]\
-                .view(batch_size, num_points, k, num_dims)   # (B, N, K, C)
-    center = x.view(batch_size, num_points, 1, num_dims)\
-             .repeat(1, 1, k, 1)                         # (B, N, K, C)
+    # [Part A] XYZ Features (10ch)
+    xyz_t = xyz.transpose(2, 1).contiguous()
+    neighbor_xyz = xyz_t.view(batch_size * num_points, -1)[idx, :].view(batch_size, num_points, k, 3)
+    center_xyz = xyz_t.view(batch_size, num_points, 1, 3).repeat(1, 1, k, 1)
     
-    # [수정 4] 거리 계산 시 XYZ(앞 3채널)만 사용
-    dist = torch.linalg.vector_norm(neighbor[..., :3] - center[..., :3], dim=3, keepdim=True)
+    dist = torch.linalg.vector_norm(neighbor_xyz - center_xyz, dim=3, keepdim=True)
+    feat_xyz = torch.cat((neighbor_xyz - center_xyz, neighbor_xyz, center_xyz, dist), dim=3)
 
-    # [수정 5] 13채널 구성으로 변경 (위 함수와 동일한 로직)
-    # neighbor와 center 변수를 활용하여 슬라이싱
-    feature = torch.cat((
-        neighbor[..., :3] - center[..., :3], # [3ch] XYZ Diff
-        neighbor[..., :3],                   # [3ch] XYZ Neighbor
-        center[..., :3],                     # [3ch] XYZ Center
-        dist,                                # [1ch] Distance
-        neighbor[..., 3:]                    # [3ch] Normal Neighbor Only
-    ), dim=3) 
+    # [Part B] Normal Features (9ch)
+    norm_t = normals.transpose(2, 1).contiguous()
+    neighbor_norm = norm_t.view(batch_size * num_points, -1)[idx, :].view(batch_size, num_points, k, 3)
+    center_norm = norm_t.view(batch_size, num_points, 1, 3).repeat(1, 1, k, 1)
     
-    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 13, N, K)
+    feat_norm = torch.cat((neighbor_norm - center_norm, neighbor_norm, center_norm), dim=3)
+
+    # [Part C] Combine (19ch)
+    feature = torch.cat((feat_xyz, feat_norm), dim=3)
+    
+    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 19, N, K)
 
 
 
