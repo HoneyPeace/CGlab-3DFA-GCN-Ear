@@ -1,25 +1,25 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2)
 @File: eval_all.py
-@Description: Evaluation script with 'Every 30 samples, All Landmarks' Visualization.
+@Description: Evaluation script with Quantitative Heatmap Metrics (Per-Landmark) & Inference Time.
 '''
 
 from __future__ import print_function, division
 import sys
 import torch
+import torch.nn.functional as F
 import numpy as np
 import os
+import time
 import warnings
 import matplotlib
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D # [추가] 3D Plot용
+from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
 from PAConv_model import PAConv
 from util import landmark_regression
-# 정규화 함수 필요
-from augmentations import normalize_data
 
 matplotlib.use('Agg')
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -30,7 +30,7 @@ args.eval = True
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # -----------------------------------------------------------------------------
-# [기능] 3각도 히트맵 저장 (이름 문자열 처리를 위해 소폭 수정)
+# [기능] 3각도 히트맵 저장
 # -----------------------------------------------------------------------------
 def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx, prefix):
     fig = plt.figure(figsize=(30, 10))
@@ -46,15 +46,13 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
         ax.set_title(title)
         ax.axis('off')
 
-    # [수정] sample_idx:03d -> sample_name (문자열 그대로 사용)
     filename = f"{prefix}_{sample_name}_L{landmark_idx:02d}.png"
     plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')
     plt.close()
 
 # -----------------------------------------------------------------------------
-# 1. 경로 설정 (Unified Structure)
+# 1. 경로 설정
 # -----------------------------------------------------------------------------
-# 사용자가 --run_id 1 처럼 숫자만 입력하면 해당 폴더를 찾아서 설정
 if not args.run_id:
     print("Error: --run_id required (e.g., '1' for the first experiment).")
     sys.exit(1)
@@ -73,15 +71,12 @@ else:
     setting_str = base_str
 
 target_folder_name = f"{setting_str}_{args.run_id}"
-
-# 통합 실행 폴더 경로
 run_root = os.path.join(project_dir, target_folder_name)
 
 if not os.path.exists(run_root):
     print(f"Error: Experiment folder not found: {run_root}")
     sys.exit(1)
 
-# 하위 경로 설정
 model_path = os.path.join(run_root, 'models', args.model_epoch)
 data_dir = os.path.join(run_root, 'npy_data')
 
@@ -89,10 +84,7 @@ if not os.path.exists(model_path):
     print(f"Error: Model not found at {model_path}")
     sys.exit(1)
 
-# 결과 저장용 폴더 생성
-# 1. Prediction Visualization
 heatmap_save_dir = os.path.join(run_root, "Pred_Heatmaps")
-# 2. Predicted Landmarks (ASC)
 asc_save_dir = os.path.join(run_root, "Pred_Landmarks")
 
 os.makedirs(heatmap_save_dir, exist_ok=True)
@@ -103,14 +95,13 @@ print(f"Loading Model: {args.model_epoch}")
 print(f"Loading Data : {data_dir}")
 
 # -----------------------------------------------------------------------------
-# 2. 데이터 로드 (Backup된 NPY 사용)
+# 2. 데이터 로드
 # -----------------------------------------------------------------------------
 try:
     shape_sample = np.load(os.path.join(data_dir, f"shape_{args.Eval_DataType}.npy"), allow_pickle=True)
     landmark_all = np.load(os.path.join(data_dir, f"landmark_{args.Eval_DataType}.npy"), allow_pickle=True)
     heatmap_sample = np.load(os.path.join(data_dir, f"Heat_data_{args.Eval_DataType}.npy"), allow_pickle=True)
     
-    # [추가] 이름 파일 로드 (파일명 매칭용)
     name_path = os.path.join(data_dir, f"name_{args.Eval_DataType}.npy")
     if os.path.exists(name_path):
         name_sample = np.load(name_path, allow_pickle=True)
@@ -119,7 +110,6 @@ try:
         print(">> [Warning] Name file not found. Using Index instead.")
         name_sample = [f"S{i:03d}" for i in range(len(shape_sample))]
 
-    # [추가] 리포트용 학습 데이터 갯수 확인 (파일이 있을 경우만)
     try:
         train_shape_path = os.path.join(data_dir, "shape_train.npy")
         if os.path.exists(train_shape_path):
@@ -148,50 +138,95 @@ model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval()
 
 # -----------------------------------------------------------------------------
-# 4. 평가 루프
+# 4. 평가 루프 (시간 측정 및 정량 평가)
 # -----------------------------------------------------------------------------
 me_list = []
 per_landmark_me_list = []
+
+# [Global Average Lists]
+cos_sim_list = []  
+iou_list = []
+time_list = []
+
+# [Per-Landmark Lists] - (Sample, K) 형태로 저장
+per_landmark_cos_sim_list = []
+per_landmark_iou_list = []
 
 print(f"\n>>> Starting Evaluation ({args.Eval_DataType})...")
 
 for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Evaluating")):
     point = point.to(device)
     gt_landmark = gt_landmark.to(device)
+    gt_heatmap = heatmap.to(device) 
     
-    # [추가] 현재 샘플의 실제 이름 가져오기
     real_name = name_sample[idx]
     
-    # [1] 정규화 파라미터 계산 (복원용)
+    # [1] 정규화
     B, N, C = point.shape
     centroid = torch.mean(point, axis=1, keepdim=True)
     point_centered = point - centroid
     m = torch.max(torch.sqrt(torch.sum(point_centered ** 2, axis=2)), axis=1)[0]
     scale = m.view(-1, 1, 1)
-    
-    # [2] 정규화 수행
     point_norm = point_centered / scale 
     
     with torch.no_grad():
-        # [3] 모델 예측
-        pred_heatmap_raw = model(point_norm.permute(0, 2, 1))
-        pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)
+        # --- [추가] 시간 측정 시작 ---
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        start_time = time.time()
 
-        # [4] 회귀 (Normalized Space)
+        # [2] 모델 예측
+        pred_heatmap_raw = model(point_norm.permute(0, 2, 1)) # (B, K, N)
+        pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)      # (B, N, K)
+
+        # [3] 회귀 (Normalized Space)
         pred_landmark_norm = landmark_regression(point_norm[0], pred_heatmap[0], args.regression_point_num, idx)
         
-        # [5] 복원 (Denormalization)
+        # [4] 복원 (Denormalization)
         pred_landmark = (pred_landmark_norm * scale) + centroid
 
-        # [Visualization] 30개마다, 모든 랜드마크 히트맵 저장
+        # --- [추가] 시간 측정 종료 ---
+        if device.type == 'cuda':
+            torch.cuda.synchronize()
+        end_time = time.time()
+        time_list.append(end_time - start_time)
+
+        # -----------------------------------------------------------
+        # 히트맵 정량 평가 (Per-Landmark Calculation)
+        # -----------------------------------------------------------
+        
+        # 1. Cosine Similarity per Landmark
+        pred_vec = pred_heatmap.permute(0, 2, 1) # (B, K, N)
+        gt_vec = gt_heatmap.permute(0, 2, 1)     # (B, K, N)
+        
+        # Calculate along dim=2 (Points)
+        cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
+        
+        # Store
+        cos_sim_list.append(cos_sim_k.mean().item()) # Global Mean for this sample
+        per_landmark_cos_sim_list.append(cos_sim_k.cpu().numpy()) # (1, K)
+
+        # 2. IoU per Landmark (Threshold 0.1)
+        threshold = 0.1
+        pred_mask = (pred_heatmap > threshold).float() # (B, N, K)
+        gt_mask = (gt_heatmap > threshold).float()     # (B, N, K)
+        
+        # Sum along dim=1 (Points)
+        intersection_k = (pred_mask * gt_mask).sum(dim=1) 
+        union_k = (pred_mask + gt_mask).clamp(0, 1).sum(dim=1)
+        
+        iou_k = ((intersection_k + 1e-6) / (union_k + 1e-6)) * 100.0
+        
+        # Store
+        iou_list.append(iou_k.mean().item()) # Global Mean for this sample
+        per_landmark_iou_list.append(iou_k.cpu().numpy()) # (1, K)
+        # -----------------------------------------------------------
+
+        # [Visualization] 40개마다 저장
         if idx % 40 == 0:
             points_np = point[0].cpu().numpy()
-            heatmap_np = pred_heatmap[0].cpu().numpy() # (N, L)
-            
-            # save_multiview_heatmap은 (N,) 형태의 heatmap intensity를 원함
-            # 따라서 랜드마크 갯수(L)만큼 루프를 돌며 각각 저장
-            for lm_idx in range(heatmap_np.shape[1]): # L
-                 # [수정] idx 대신 real_name 전달
+            heatmap_np = pred_heatmap[0].cpu().numpy()
+            for lm_idx in range(heatmap_np.shape[1]):
                  save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], 
                                         heatmap_save_dir, real_name, lm_idx, "pred")
 
@@ -207,43 +242,47 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         me_list.append(me)
         per_landmark_me_list.append(dists)
         
-        # [ASC 저장] [수정] 파일명에 실제 이름 적용
         np.savetxt(os.path.join(asc_save_dir, f"pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
+
 # -----------------------------------------------------------------------------
-# 5. 결과 집계 및 텍스트 저장 (Paper Table III Matching + Top 5 Analysis)
+# 5. 결과 집계 및 저장
 # -----------------------------------------------------------------------------
 if len(per_landmark_me_list) > 0:
-    # (Samples, Landmarks) 형태로 변환
-    per_landmark_me_array = np.stack(per_landmark_me_list, axis=0)
-    
-    # [1] 각 랜드마크별 평균(Mean)과 표준편차(Std) 계산
-    # shape: (Landmark_num, )
-    lm_means = np.mean(per_landmark_me_array, axis=0) # 랜드마크별 ME
-    lm_stds = np.std(per_landmark_me_array, axis=0)  # 랜드마크별 Std (샘플 간 편차)
-    
-    # [2] Final Evaluation Metric 계산 (논문 Table III 방식)
-    # Average ME: 랜드마크별 평균들의 평균
+    # 1. ME Stats
+    per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) # (N_samples, K)
+    lm_means = np.mean(per_landmark_me_array, axis=0)
+    lm_stds = np.std(per_landmark_me_array, axis=0)
     average_me = np.mean(lm_means)
-    
-    # Mean Std: ★ 랜드마크별 표준편차들의 평균 ★ (논문 방식 일치)
     std_me = np.mean(lm_stds)
-
+    
+    # 2. Cosine Sim Stats
+    per_landmark_cos_array = np.vstack(per_landmark_cos_sim_list) # (N_samples, K)
+    lm_cos_means = np.mean(per_landmark_cos_array, axis=0)
+    lm_cos_stds = np.std(per_landmark_cos_array, axis=0)
+    
+    # 3. IoU Stats
+    per_landmark_iou_array = np.vstack(per_landmark_iou_list) # (N_samples, K)
+    lm_iou_means = np.mean(per_landmark_iou_array, axis=0)
+    lm_iou_stds = np.std(per_landmark_iou_array, axis=0)
+    
 else:
-    average_me = 0.0
-    std_me = 0.0
-    lm_means = np.array([])
-    lm_stds = np.array([])
+    average_me, std_me = 0.0, 0.0
+    lm_means, lm_stds = np.array([]), np.array([])
+    lm_cos_means, lm_cos_stds = np.array([]), np.array([])
+    lm_iou_means, lm_iou_stds = np.array([]), np.array([])
 
-# Success Rate (SR) 계산
 sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
 sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
 
-# 파일명 생성
+avg_cos_sim = np.mean(cos_sim_list) if len(cos_sim_list) > 0 else 0.0
+avg_iou = np.mean(iou_list) if len(iou_list) > 0 else 0.0
+avg_time = np.mean(time_list) * 1000.0 if len(time_list) > 0 else 0.0
+
 filename = f"ME{average_me:.4f}_std{std_me:.4f}.txt"
 result_txt_path = os.path.join(run_root, filename)
 
 if args.accumulation_steps > 1:
-    batch_str_log = f"{args.batch_size}x{args.accumulation_steps} (Effective: {args.batch_size * args.accumulation_steps})"
+    batch_str_log = f"{args.batch_size}x{args.accumulation_steps}"
 else:
     batch_str_log = f"{args.batch_size}"
 
@@ -254,51 +293,49 @@ with open(result_txt_path, "w") as f:
     f.write(f" Run ID      : {target_folder_name}\n")
     f.write(f" Model       : {args.model_epoch}\n")
     f.write(f" Data Type   : {args.Eval_DataType}\n")
-    
-    # [추가] User Comment (폴더명 태그) 기록 -> 정리용
-    # None일 경우를 대비해 처리
     user_comment = args.user_tag if args.user_tag else "None"
     f.write(f" User Comment: {user_comment}\n")
-    
     f.write(f" Train Data  : {train_len} samples\n")
     f.write(f" Batch Size  : {batch_str_log}\n")
     f.write(f" Num Points  : {args.num_points}\n")
     f.write(f"------------------------------------------\n")
     f.write(f" Average ME : {average_me:.4f} mm\n")
-    f.write(f" Average Std: {std_me:.4f} mm (Mean of Landmark Stds)\n") 
+    f.write(f" Average Std: {std_me:.4f} mm\n")
     f.write(f" SR @ 10mm  : {sr_10:.2f} %\n")
     f.write(f" SR @ 5mm   : {sr_5:.2f} %\n")
+    f.write(f" Avg Time   : {avg_time:.2f} ms/sample\n")
+    f.write(f"------------------------------------------\n")
+    f.write(f" [Heatmap Quantitative Evaluation (Global)]\n")
+    f.write(f" Cosine Sim : {avg_cos_sim:.2f} % (Distribution Match)\n")
+    f.write(f" mIoU       : {avg_iou:.2f} % (Region Overlap @ 0.1)\n") # [수정됨] IoU Score -> mIoU
     f.write(f"==========================================\n")
     
     if len(per_landmark_me_list) > 0:
-        # --------------------------------------------------
-        # Top 5 Hardest Landmarks (평균 Error가 가장 높은 순)
-        # --------------------------------------------------
-        f.write("\n>>> Top 5 Hardest Landmarks:\n")
+        f.write("\n>>> Top 5 Hardest Landmarks (by ME):\n")
         worst_indices = np.argsort(lm_means)[::-1][:5]
         for i in worst_indices:
             f.write(f"    LM {i:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
         
-        # --------------------------------------------------
-        # Top 5 Easiest Landmarks (평균 Error가 가장 낮은 순)
-        # --------------------------------------------------
-        f.write("\n>>> Top 5 Easiest Landmarks:\n")
-        best_indices = np.argsort(lm_means)[:5]
-        for i in best_indices:
-            f.write(f"    LM {i:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
-        
-        # --------------------------------------------------
-        # All Landmarks: per-landmark ME ± STD (논문 Table III 형식)
-        # --------------------------------------------------
+        # 1. Per-landmark ME
         f.write("\n>>> Per-landmark ME (Mean ± Std):\n")
         for i in range(lm_means.shape[0]):
             f.write(f"    LM {i:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
-            
-        f.write(f"    ------------------------------------\n")
-        # 논문의 'All' 행과 동일한 계산
-        f.write(f"    All  : {average_me:.3f} ± {std_me:.3f} mm\n")
+        
+        # 2. Per-landmark Cosine Sim
+        f.write("\n>>> Per-landmark Cosine Sim (Mean ± Std):\n")
+        for i in range(lm_cos_means.shape[0]):
+            f.write(f"    LM {i:02d}: {lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f} %\n")
 
-# 화면 출력
+        # 3. Per-landmark mIoU
+        f.write("\n>>> Per-landmark mIoU (Mean ± Std) @ Th=0.1:\n") # [수정됨] IoU -> mIoU
+        for i in range(lm_iou_means.shape[0]):
+            f.write(f"    LM {i:02d}: {lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f} %\n")
+
+        f.write(f"    ------------------------------------\n")
+        f.write(f"    All (ME) : {average_me:.3f} ± {std_me:.3f} mm\n")
+
 print(f"\n[Done] Results saved to: {run_root}")
 print(f"      Filename: {filename}")
 print(f"Average ME: {average_me:.4f} ± {std_me:.4f}")
+print(f"Cosine Sim: {avg_cos_sim:.2f}% | mIoU: {avg_iou:.2f}%") # [수정됨] IoU -> mIoU
+print(f"Avg Time  : {avg_time:.2f} ms")
