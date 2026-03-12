@@ -31,12 +31,20 @@ class PointcloudScaleAndTranslate(object):
         self.scale_high = scale_high
         self.translate_range = translate_range
 
-    def __call__(self, pc):
-        bsize = pc.size()[0]
-        for i in range(bsize):
-            xyz1 = np.random.uniform(low=self.scale_low, high=self.scale_high, size=[3])
-            xyz2 = np.random.uniform(low=-self.translate_range, high=self.translate_range, size=[3])
-            pc[i, :, 0:3] = torch.mul(pc[i, :, 0:3], torch.from_numpy(xyz1).float().to(device)) + torch.from_numpy(xyz2).float().to(device)
+    # [수정] landmark를 추가로 받습니다. (기본값 None)
+    def __call__(self, pc, landmark=None): 
+        B, N, C = pc.shape
+        xyz1 = np.random.uniform(low=self.scale_low, high=self.scale_high, size=[B, 1, 3])
+        xyz2 = np.random.uniform(low=-self.translate_range, high=self.translate_range, size=[B, 1, 3])
+        
+        scale = torch.from_numpy(xyz1).float().to(device)
+        translate = torch.from_numpy(xyz2).float().to(device)
+        
+        pc = torch.mul(pc, scale) + translate
+        
+        # [추가] landmark가 들어왔다면 똑같이 이동시킵니다!
+        if landmark is not None:
+            landmark = torch.mul(landmark, scale) + translate
+            return pc, landmark
+            
         return pc
-
-

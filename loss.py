@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 '''
 Adaptive Wing Loss from 
@@ -24,8 +25,65 @@ class AdaptiveWingLoss(nn.Module):
         y2 = y[delta_y >= self.theta]
         loss1 = self.omega * torch.log(1 + torch.pow(delta_y1 / self.omega, self.alpha - y1))
         A = self.omega * (1 / (1 + torch.pow(self.theta / self.epsilon, self.alpha - y2))) * (self.alpha - y2) * (
-            torch.pow(self.theta / self.epsilon, self.alpha - y2 - 1)) * (1 / self.epsilon)
-        C = self.theta * A - self.omega * torch.log(1 + torch.pow(self.theta / self.epsilon, self.alpha - y2))
+            torch.pow(self.theta / self.epsilon, self.alpha - y2 - 1)
+        )
+        C = self.theta * A - self.omega * torch.log(1 + torch.pow(self.theta / self.omega, self.alpha - y2))
         loss2 = A * delta_y2 - C
         return (loss1.sum() + loss2.sum()) / (len(loss1) + len(loss2))
 
+# =====================================================================
+# [신규 추가] 미분 가능한 3D 좌표 추출 및 Point-to-Plane Loss
+# =====================================================================
+
+def get_differentiable_coords(points, heatmap, k=10):
+    """ 예측된 히트맵에서 상위 K개의 확률을 이용해 3D 무게중심 좌표(Soft-argmax)를 추출 """
+    # points: (B, N, 3), heatmap: (B, K_lm, N)
+    B, K_lm, N = heatmap.shape
+    pred_coords = []
+    
+    for i in range(K_lm):
+        heat = heatmap[:, i, :] 
+        topk_weights, topk_indices = torch.topk(heat, k, dim=1) 
+        topk_weights_norm = F.softmax(topk_weights, dim=1) 
+        
+        idx_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, 3)
+        topk_points = torch.gather(points, 1, idx_expanded) 
+        
+        coord = torch.sum(topk_points * topk_weights_norm.unsqueeze(-1), dim=1) 
+        pred_coords.append(coord)
+        
+    return torch.stack(pred_coords, dim=1) # (B, K_lm, 3)
+
+def find_knn_points(pred_coords, points, k=10):
+    """ 예측된 좌표와 가장 가까운 표면의 점 K개를 찾음 """
+    # pred_coords: (B, K_lm, 3), points: (B, N, 3)
+    dist_matrix = torch.cdist(pred_coords, points) # (B, K_lm, N)
+    _, knn_indices = torch.topk(dist_matrix, k, dim=2, largest=False) 
+    
+    idx_expanded = knn_indices.unsqueeze(-1).expand(-1, -1, -1, 3)
+    points_expanded = points.unsqueeze(1).expand(-1, pred_coords.size(1), -1, -1)
+    knn_points = torch.gather(points_expanded, 2, idx_expanded) # (B, K_lm, k, 3)
+    
+    return knn_points
+
+def compute_point_to_plane_loss(pred_coords, points, k=5):
+    """ 예측된 좌표를 로컬 가상 평면에 수직 투영(Projection)시키는 거리 반환 """
+    # 1. 주변 표면 점 5개 찾기
+    knn_points = find_knn_points(pred_coords, points, k) # (B, K_lm, k, 3)
+    
+    # 2. 로컬 평면의 중심점
+    local_center = knn_points.mean(dim=2) # (B, K_lm, 3)
+    
+    # 3. 공분산 행렬(Covariance Matrix) 계산
+    centered_knn = knn_points - local_center.unsqueeze(2)
+    cov_matrix = torch.matmul(centered_knn.transpose(2, 3), centered_knn) 
+    
+    # 4. 고윳값 분해 (eigh) -> 법선 벡터 추출
+    eigenvalues, eigenvectors = torch.linalg.eigh(cov_matrix)
+    normal_vector = eigenvectors[..., 0] # (B, K_lm, 3)
+    
+    # 5. Point-to-Plane 거리 계산
+    vector_to_plane = pred_coords - local_center
+    distance = torch.abs(torch.sum(vector_to_plane * normal_vector, dim=-1)) # (B, K_lm)
+    
+    return distance.mean()

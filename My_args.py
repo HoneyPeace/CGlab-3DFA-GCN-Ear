@@ -86,3 +86,11 @@ parser.add_argument('--user_tag', type=str, default='', help='Custom tag added t
 # [추가됨] 평가 시 폴더명을 정확히 찾기 위해 사용 (학습 데이터 개수)
 # 예: train.py가 train2290 으로 저장했다면 여기도 2290을 적어야 함
 parser.add_argument('--train_len', type=int, default=2290, help='Number of training samples used in folder name')
+
+# =============================================================================
+# [새로 추가] 하이브리드 로스 & 3D 투영 하이퍼파라미터
+# =============================================================================
+parser.add_argument('--alpha_init', type=float, default=0.5, help='Initial weight for Coordinate L1 Loss')
+parser.add_argument('--beta_init', type=float, default=0.1, help='Initial weight for Point-to-Plane Surface Loss')
+parser.add_argument('--k_softargmax', type=int, default=10, help='Top-K points used for Soft-argmax')
+parser.add_argument('--k_knn', type=int, default=10, help='K points for Local Tangent Plane estimation')

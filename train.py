@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2)
 @File: train.py
-@Description: Gradient Accumulation + Unified Folder Structure + NO Train Heatmaps
+@Description: Gradient Accumulation + Unified Folder Structure + Hybrid Loss (Point-to-Plane)
 '''
 
 import os
@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 import torch
+import torch.nn.functional as F # [추가] 좌표 L1 Loss 연산을 위한 모듈
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
@@ -19,7 +20,8 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-from loss import AdaptiveWingLoss
+# [수정] 새로 만든 미분 가능한 3D 추출 및 표면 투영 로스 임포트
+from loss import AdaptiveWingLoss, get_differentiable_coords, compute_point_to_plane_loss
 from util import main_sample
 from PAConv_model import PAConv
 from augmentations import normalize_data, PointcloudScaleAndTranslate
@@ -129,7 +131,7 @@ def process_data_storage(dataset, prefix, paths):
     print(f"   [{prefix.upper()}] Backup Saved: {paths['npy_backup']}")
 
     # 2. GT Visualization
-    # [수정된 부분] prefix가 'test'일 때만 히트맵 이미지를 저장합니다.
+    # prefix가 'test'일 때만 히트맵 이미지를 저장합니다.
     if prefix == 'test':
         vis_save_dir = os.path.join(paths['gt_heatmap'], prefix)
         os.makedirs(vis_save_dir, exist_ok=True)
@@ -170,7 +172,7 @@ def train(args):
     else:
         print(f"    -> Effective Batch Size: {args.batch_size * accum_steps}")
 
- # 3. 데이터 생성 (Resample) - [수정] Train/Test 분리 생성 지시
+    # 3. 데이터 생성 (Resample) - Train/Test 분리 생성 지시
     if args.need_resample:
         print("=== [Phase 1] Data Generation (Initial) ===")
         
@@ -195,12 +197,12 @@ def train(args):
         train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name)
         test_dataset = FaceLandmarkData(data_root=args.data_root, partition='test', data=args.test_dataset_name)
 
-    # [수정] 데이터 로드 완료 후 폴더 생성
+    # 데이터 로드 완료 후 폴더 생성
     print("=== [Phase 2.5] Creating Experiment Paths ===")
     train_len = len(train_dataset)
     paths = get_experiment_paths(args, train_len)
 
-    # 5. 데이터 백업 수행 (Train 히트맵 스킵 로직 적용됨)
+    # 5. 데이터 백업 수행
     print("=== [Phase 2.6] Backing up Data ===")
     process_data_storage(train_dataset, "train", paths)
     process_data_storage(test_dataset, "test", paths)
@@ -224,13 +226,20 @@ def train(args):
     else: scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
     # 7. 학습 루프
-    print(f"\n=== [Phase 3] Start Training ===")
+    print(f"\n=== [Phase 3] Start Training with Hybrid Loss ===")
     
     opt.zero_grad() 
 
     for epoch in range(args.epochs):
         model.train()
         loss_epoch = 0.0
+        
+        # --------------------------------------------------------------------
+        # [신규] DeepLA-Net 기반 에포크 비례 동적 가중치 감쇠 (Exponential Decay)
+        # --------------------------------------------------------------------
+        decay_factor = (1.0 - (epoch / args.epochs)) ** 2
+        alpha = 0.5 * decay_factor  # 좌표 직접 로스 가중치 (초반 0.5 -> 후반 0)
+        beta  = 0.1 * decay_factor  # 표면 투영 로스 가중치 (초반 0.1 -> 후반 0)
         
         with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{args.epochs}", unit="batch") as tepoch:
             for i, (point, landmark, seg) in tepoch:
@@ -239,22 +248,51 @@ def train(args):
                 seg      = seg.to(device)
 
                 point_normal = normalize_data(point)
-                point_normal = ScaleAndTranslate(point_normal)
-                point_input = point_normal.permute(0, 2, 1)
+                
+                # [수정] 증강 시 landmark도 함께 넘겨서 똑같이 이동시킴 (버그 해결 핵심!)
+                point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark)
+                
+                point_input = point_normal.permute(0, 2, 1) # (B, 3, N)
 
-                pred_heatmap = model(point_input)
+                # 1. 모델 순전파 (히트맵 예측)
+                pred_heatmap = model(point_input) # (B, K_lm, N)
 
-                loss = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                loss = loss / accum_steps
+                # -------------------------------------------------------------
+                # 2. 미분 가능한 3D 공간 좌표 추출 (Soft-argmax, 상위 10개 점)
+                # -------------------------------------------------------------
+                points_for_coords = point_input.permute(0, 2, 1) # (B, N, 3)
+                pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=10)
+
+                # -------------------------------------------------------------
+                # 3. 다중 로스 계산 (Hybrid Loss)
+                # -------------------------------------------------------------
+                # ① 기존 메인 히트맵 로스 (AWing Loss)
+                loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
+                
+                # ② 좌표 직접 로스 (L1) -> '증강된 정답 랜드마크'와 비교!
+                loss_coord = F.l1_loss(pred_coords, augmented_landmark)
+                
+                # ③ 표면 투영 로스 (Point-to-Plane) -> Sub-vertex 정밀도 확보
+                loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=5)
+                
+                # 최종 로스 합산
+                total_loss = loss_heatmap + (alpha * loss_coord) + (beta * loss_surface)
+                
+                loss = total_loss / accum_steps
                 loss.backward()
                 
                 if (i + 1) % accum_steps == 0:
                     opt.step()
                     opt.zero_grad() 
 
-                current_loss_val = loss.item() * accum_steps
+                current_loss_val = total_loss.item() 
                 loss_epoch += current_loss_val
-                tepoch.set_postfix(loss=current_loss_val)
+                
+                # [수정] 프로그레스 바에 현재 로스들의 개별 수치를 실시간으로 띄워줌
+                tepoch.set_postfix(Loss=f"{current_loss_val:.4f}", 
+                                   HM=f"{loss_heatmap.item():.4f}", 
+                                   Crd=f"{loss_coord.item():.4f}", 
+                                   Srf=f"{loss_surface.item():.4f}")
 
         if (epoch + 1) % 5 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
@@ -268,5 +306,4 @@ def train(args):
 if __name__ == "__main__":
     args = parser.parse_args()
     _init_(args)
-    # 태그 입력 받는 부분 삭제됨 (My_args 의존)
     train(args)
