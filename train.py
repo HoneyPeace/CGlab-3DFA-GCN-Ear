@@ -247,10 +247,10 @@ def train(args):
                 landmark = landmark.to(device)
                 seg      = seg.to(device)
 
-                point_normal = normalize_data(point)
+                point_normal, landmark_normal = normalize_data(point, landmark)
                 
                 # [수정] 증강 시 landmark도 함께 넘겨서 똑같이 이동시킴 (버그 해결 핵심!)
-                point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark)
+                point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                 
                 point_input = point_normal.permute(0, 2, 1) # (B, 3, N)
 
