@@ -46,7 +46,7 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
         ax.set_title(title)
         ax.axis('off')
 
-    filename = f"{prefix}_{sample_name}_L{landmark_idx:02d}.png"
+    filename = f"{prefix}_{sample_name}_L{landmark_idx + 1:02d}.png"
     plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')
     plt.close()
 
@@ -314,22 +314,22 @@ with open(result_txt_path, "w") as f:
         f.write("\n>>> Top 5 Hardest Landmarks (by ME):\n")
         worst_indices = np.argsort(lm_means)[::-1][:5]
         for i in worst_indices:
-            f.write(f"    LM {i:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
+            f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
         
         # 1. Per-landmark ME
         f.write("\n>>> Per-landmark ME (Mean ± Std):\n")
         for i in range(lm_means.shape[0]):
-            f.write(f"    LM {i:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
+            f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
         
         # 2. Per-landmark Cosine Sim
         f.write("\n>>> Per-landmark Cosine Sim (Mean ± Std):\n")
         for i in range(lm_cos_means.shape[0]):
-            f.write(f"    LM {i:02d}: {lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f} %\n")
+            f.write(f"    LM {i+1:02d}: {lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f} %\n")
 
         # 3. Per-landmark mIoU
         f.write("\n>>> Per-landmark mIoU (Mean ± Std) @ Th=0.1:\n") # [수정됨] IoU -> mIoU
         for i in range(lm_iou_means.shape[0]):
-            f.write(f"    LM {i:02d}: {lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f} %\n")
+            f.write(f"    LM {i+1:02d}: {lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f} %\n")
 
         f.write(f"    ------------------------------------\n")
         f.write(f"    All (ME) : {average_me:.3f} ± {std_me:.3f} mm\n")

@@ -93,4 +93,4 @@ parser.add_argument('--train_len', type=int, default=2290, help='Number of train
 parser.add_argument('--alpha_init', type=float, default=0.5, help='Initial weight for Coordinate L1 Loss')
 parser.add_argument('--beta_init', type=float, default=0.1, help='Initial weight for Point-to-Plane Surface Loss')
 parser.add_argument('--k_softargmax', type=int, default=10, help='Top-K points used for Soft-argmax')
-parser.add_argument('--k_knn', type=int, default=10, help='K points for Local Tangent Plane estimation')
+parser.add_argument('--plane_knn', type=int, default=10, help='K points for Local Tangent Plane estimation')
