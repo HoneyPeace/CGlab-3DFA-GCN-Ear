@@ -241,12 +241,18 @@ def train(args):
         train_loss, train_hm, train_crd, train_srf, train_mm = 0.0, 0.0, 0.0, 0.0, 0.0
         
         decay_factor = (1.0 - (epoch / args.epochs)) ** 2
-        alpha = max(0.5 * decay_factor, 0.05) # 0.05 최소값 유지 (정밀도 개선 팁 반영)
-        beta  = max(0.1 * decay_factor, 0.01) # 0.01 최소값 유지
+        alpha = max(0.5 * decay_factor, 0.05) 
+        beta  = max(0.1 * decay_factor, 0.01) 
         
         with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Train]", unit="batch") as tepoch:
             for i, (point, landmark, seg) in tepoch:
                 point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
+
+                # [복구 완료!] 정규화 전, mm 오차 계산을 위해 배율(avg_m)을 구합니다.
+                with torch.no_grad():
+                    centroid_tmp = torch.mean(point, axis=1, keepdim=True)
+                    batch_m = torch.max(torch.sqrt(torch.sum((point - centroid_tmp) ** 2, axis=2)), axis=1)[0]
+                    avg_m = torch.mean(batch_m).item()
 
                 point_normal, landmark_normal = normalize_data(point, landmark)
                 point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
@@ -261,6 +267,9 @@ def train(args):
                 loss_coord = F.l1_loss(pred_coords, augmented_landmark)
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=5)
                 
+                # 이제 avg_m이 정상적으로 곱해집니다!
+                mm_error = loss_coord.item() * avg_m
+
                 total_loss = loss_heatmap + (alpha * loss_coord) + (beta * loss_surface)
                 
                 loss = total_loss / accum_steps
@@ -270,17 +279,14 @@ def train(args):
                     opt.step()
                     opt.zero_grad() 
 
-                # [수정] 항목별로 전부 누적
                 train_loss += total_loss.item()
                 train_hm   += loss_heatmap.item()
                 train_crd  += loss_coord.item()
                 train_srf  += loss_surface.item()
                 train_mm   += mm_error
                 
-                # [수정] 프로그레스 바에 Crd, Srf, mm 모두 띄우기
                 tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", HM=f"{loss_heatmap.item():.4f}", Crd=f"{loss_coord.item():.4f}", Srf=f"{loss_surface.item():.4f}", mm=f"{mm_error:.2f}")
 
-        # [수정] 에포크 평균 계산 확장
         t_loss = train_loss / len(train_loader)
         t_hm   = train_hm / len(train_loader)
         t_crd  = train_crd / len(train_loader)
@@ -291,14 +297,19 @@ def train(args):
         # [VALIDATION] 평가 루프
         # -------------------------------------------------------------
         model.eval()
-        val_loss, val_hm, val_crd = 0.0, 0.0, 0.0
+        # [복구 완료!] 변수 5개로 제대로 초기화합니다.
+        val_loss, val_hm, val_crd, val_srf, val_mm = 0.0, 0.0, 0.0, 0.0, 0.0
         
         with torch.no_grad():
             with tqdm(enumerate(test_loader), total=len(test_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Valid]", unit="batch", leave=False) as vepoch:
                 for i, (point, landmark, seg) in vepoch:
                     point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
-                    # [중요] 평가는 데이터 증강(ScaleAndTranslate)을 하지 않습니다! 정규화만 수행.
+                    # [복구 완료!] 검증 시에도 배율(avg_m)을 구합니다.
+                    centroid_tmp = torch.mean(point, axis=1, keepdim=True)
+                    batch_m = torch.max(torch.sqrt(torch.sum((point - centroid_tmp) ** 2, axis=2)), axis=1)[0]
+                    avg_m = torch.mean(batch_m).item()
+
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     
                     point_input = point_normal.permute(0, 2, 1)
@@ -311,24 +322,27 @@ def train(args):
                     loss_coord = F.l1_loss(pred_coords, landmark_normal)
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=5)
                     
+                    mm_error = loss_coord.item() * avg_m
                     total_loss = loss_heatmap + (alpha * loss_coord) + (beta * loss_surface)
 
                     val_loss += total_loss.item()
                     val_hm   += loss_heatmap.item()
                     val_crd  += loss_coord.item()
+                    val_srf  += loss_surface.item()
+                    val_mm   += mm_error
 
-        # 에포크 평균 계산
         v_loss = val_loss / len(test_loader)
         v_hm   = val_hm / len(test_loader)
         v_crd  = val_crd / len(test_loader)
+        v_srf  = val_srf / len(test_loader)
+        v_mm   = val_mm / len(test_loader)
 
         # -------------------------------------------------------------
-        # [PRINT] 결과 출력 (요청하신 포맷 적용)
+        # [PRINT] 결과 출력 
         # -------------------------------------------------------------
-        print(f" [Train] Loss: {t_loss:.4f} | HM 로스: {t_hm:.4f} | Crd 오차: {t_crd:.4f}")
-        print(f" [Val]   Loss: {v_loss:.4f} | HM 로스: {v_hm:.4f} | Crd 오차: {v_crd:.4f}\n")
+        print(f" [Train] 전체 Loss: {t_loss:.4f} | HM Loss: {t_hm:.4f} | Crd Loss: {t_crd:.4f} | Srf Loss: {t_srf:.4f} | mm 오차: {t_mm:.2f} mm")
+        print(f" [Val]   전체 Loss: {v_loss:.4f} | HM Loss: {v_hm:.4f} | Crd Loss: {v_crd:.4f} | Srf Loss: {v_srf:.4f} | mm 오차: {v_mm:.2f} mm\n")
 
-        # [기존 로직 유지] 모델 저장
         if (epoch + 1) % 5 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
             save_path = os.path.join(paths['models'], filename)
