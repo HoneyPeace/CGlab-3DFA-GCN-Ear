@@ -19,7 +19,7 @@ from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
 from PAConv_model import PAConv
-from util import landmark_regression
+from loss import get_differentiable_coords
 
 matplotlib.use('Agg')
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -177,10 +177,10 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
 
         # [2] 모델 예측
         pred_heatmap_raw = model(point_norm.permute(0, 2, 1)) # (B, K, N)
-        pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)      # (B, N, K)
+        pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)      # 시각화 및 IoU용 (B, N, K)
 
-        # [3] 회귀 (Normalized Space)
-        pred_landmark_norm = landmark_regression(point_norm[0], pred_heatmap[0], args.regression_point_num, idx)
+        # [3] Soft-argmax 회귀 (MDS 없이 즉시 Sub-vertex 좌표 추출!)
+        pred_landmark_norm = get_differentiable_coords(point_norm, pred_heatmap_raw, k=10)
         
         # [4] 복원 (Denormalization)
         pred_landmark = (pred_landmark_norm * scale) + centroid

@@ -210,6 +210,9 @@ def train(args):
     # DataLoader 설정
     train_loader = DataLoader(train_dataset, num_workers=0, batch_size=args.batch_size, shuffle=True, drop_last=True)
     
+    # [추가] 검증을 위한 test_loader 설정
+    test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.test_batch_size, shuffle=False, drop_last=False)
+    
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
     # 6. 모델 초기화
@@ -231,51 +234,33 @@ def train(args):
     opt.zero_grad() 
 
     for epoch in range(args.epochs):
+        # -------------------------------------------------------------
+        # [TRAIN] 학습 루프
+        # -------------------------------------------------------------
         model.train()
-        loss_epoch = 0.0
+        train_loss, train_hm, train_crd, train_srf, train_mm = 0.0, 0.0, 0.0, 0.0, 0.0
         
-        # --------------------------------------------------------------------
-        # [신규] DeepLA-Net 기반 에포크 비례 동적 가중치 감쇠 (Exponential Decay)
-        # --------------------------------------------------------------------
         decay_factor = (1.0 - (epoch / args.epochs)) ** 2
-        alpha = 0.5 * decay_factor  # 좌표 직접 로스 가중치 (초반 0.5 -> 후반 0)
-        beta  = 0.1 * decay_factor  # 표면 투영 로스 가중치 (초반 0.1 -> 후반 0)
+        alpha = max(0.5 * decay_factor, 0.05) # 0.05 최소값 유지 (정밀도 개선 팁 반영)
+        beta  = max(0.1 * decay_factor, 0.01) # 0.01 최소값 유지
         
-        with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{args.epochs}", unit="batch") as tepoch:
+        with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Train]", unit="batch") as tepoch:
             for i, (point, landmark, seg) in tepoch:
-                point    = point.to(device)
-                landmark = landmark.to(device)
-                seg      = seg.to(device)
+                point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
                 point_normal, landmark_normal = normalize_data(point, landmark)
-                
-                # [수정] 증강 시 landmark도 함께 넘겨서 똑같이 이동시킴 (버그 해결 핵심!)
                 point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                 
-                point_input = point_normal.permute(0, 2, 1) # (B, 3, N)
-
-                # 1. 모델 순전파 (히트맵 예측)
-                pred_heatmap = model(point_input) # (B, K_lm, N)
-
-                # -------------------------------------------------------------
-                # 2. 미분 가능한 3D 공간 좌표 추출 (Soft-argmax, 상위 10개 점)
-                # -------------------------------------------------------------
-                points_for_coords = point_input.permute(0, 2, 1) # (B, N, 3)
+                point_input = point_normal.permute(0, 2, 1)
+                pred_heatmap = model(point_input)
+                
+                points_for_coords = point_input.permute(0, 2, 1)
                 pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=10)
 
-                # -------------------------------------------------------------
-                # 3. 다중 로스 계산 (Hybrid Loss)
-                # -------------------------------------------------------------
-                # ① 기존 메인 히트맵 로스 (AWing Loss)
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                
-                # ② 좌표 직접 로스 (L1) -> '증강된 정답 랜드마크'와 비교!
                 loss_coord = F.l1_loss(pred_coords, augmented_landmark)
-                
-                # ③ 표면 투영 로스 (Point-to-Plane) -> Sub-vertex 정밀도 확보
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=5)
                 
-                # 최종 로스 합산
                 total_loss = loss_heatmap + (alpha * loss_coord) + (beta * loss_surface)
                 
                 loss = total_loss / accum_steps
@@ -285,15 +270,65 @@ def train(args):
                     opt.step()
                     opt.zero_grad() 
 
-                current_loss_val = total_loss.item() 
-                loss_epoch += current_loss_val
+                # [수정] 항목별로 전부 누적
+                train_loss += total_loss.item()
+                train_hm   += loss_heatmap.item()
+                train_crd  += loss_coord.item()
+                train_srf  += loss_surface.item()
+                train_mm   += mm_error
                 
-                # [수정] 프로그레스 바에 현재 로스들의 개별 수치를 실시간으로 띄워줌
-                tepoch.set_postfix(Loss=f"{current_loss_val:.4f}", 
-                                   HM=f"{loss_heatmap.item():.4f}", 
-                                   Crd=f"{loss_coord.item():.4f}", 
-                                   Srf=f"{loss_surface.item():.4f}")
+                # [수정] 프로그레스 바에 Crd, Srf, mm 모두 띄우기
+                tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", HM=f"{loss_heatmap.item():.4f}", Crd=f"{loss_coord.item():.4f}", Srf=f"{loss_surface.item():.4f}", mm=f"{mm_error:.2f}")
 
+        # [수정] 에포크 평균 계산 확장
+        t_loss = train_loss / len(train_loader)
+        t_hm   = train_hm / len(train_loader)
+        t_crd  = train_crd / len(train_loader)
+        t_srf  = train_srf / len(train_loader)
+        t_mm   = train_mm / len(train_loader)
+
+        # -------------------------------------------------------------
+        # [VALIDATION] 평가 루프
+        # -------------------------------------------------------------
+        model.eval()
+        val_loss, val_hm, val_crd = 0.0, 0.0, 0.0
+        
+        with torch.no_grad():
+            with tqdm(enumerate(test_loader), total=len(test_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Valid]", unit="batch", leave=False) as vepoch:
+                for i, (point, landmark, seg) in vepoch:
+                    point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
+
+                    # [중요] 평가는 데이터 증강(ScaleAndTranslate)을 하지 않습니다! 정규화만 수행.
+                    point_normal, landmark_normal = normalize_data(point, landmark)
+                    
+                    point_input = point_normal.permute(0, 2, 1)
+                    pred_heatmap = model(point_input)
+                    
+                    points_for_coords = point_input.permute(0, 2, 1)
+                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=10)
+
+                    loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
+                    loss_coord = F.l1_loss(pred_coords, landmark_normal)
+                    loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=5)
+                    
+                    total_loss = loss_heatmap + (alpha * loss_coord) + (beta * loss_surface)
+
+                    val_loss += total_loss.item()
+                    val_hm   += loss_heatmap.item()
+                    val_crd  += loss_coord.item()
+
+        # 에포크 평균 계산
+        v_loss = val_loss / len(test_loader)
+        v_hm   = val_hm / len(test_loader)
+        v_crd  = val_crd / len(test_loader)
+
+        # -------------------------------------------------------------
+        # [PRINT] 결과 출력 (요청하신 포맷 적용)
+        # -------------------------------------------------------------
+        print(f" [Train] Loss: {t_loss:.4f} | HM 로스: {t_hm:.4f} | Crd 오차: {t_crd:.4f}")
+        print(f" [Val]   Loss: {v_loss:.4f} | HM 로스: {v_hm:.4f} | Crd 오차: {v_crd:.4f}\n")
+
+        # [기존 로직 유지] 모델 저장
         if (epoch + 1) % 5 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
             save_path = os.path.join(paths['models'], filename)
