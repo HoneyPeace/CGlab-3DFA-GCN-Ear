@@ -28,13 +28,6 @@ cd C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN
 
 ---
 
-### 🧹 3. 데이터 전처리
-
-### ✅ 처음 실행 시 (mat 파일 생성)
-
-matlab에서 make_mat 실행
-
----
 
 ### 🧪 4. 학습 (Training)
 
@@ -42,7 +35,7 @@ matlab에서 make_mat 실행
 
 ```
 
-python train.py --train_dataset_name train --test_dataset_name test --sigma 3 --num_points 4096 --batch_size 16 --dataset_seed 1 --sample_way FPS --need_resample True --exp_name Ear_10 --accumulation_steps 2 --user_tag "증강12"
+python train.py --train_dataset_name train --test_dataset_name test --sigma 2.5 --num_points 4096 --batch_size 16 --accumulation_steps 2 --dataset_seed 1 --sample_way FPS --need_resample False --k_softargmax 10 --plane_knn 5 --exp_name Ear_3loss --user_tag "argmax10_plane5" 
 
 ```
 
@@ -52,7 +45,7 @@ python train.py --train_dataset_name train --test_dataset_name test --sigma 3 --
 
 ```
 현재
-python eval_all.py --exp_name Ear_10 --run_id 1 --sigma 3 --num_points 4096 --Eval_DataType test --regression_point_num 10 --batch_size 16 --train_len 2300 --user_tag "증강12"
+python eval_all.py --exp_name Ear_3loss --run_id 1 --sigma 2.5 --num_points 4096 --Eval_DataType test --regression_point_num 10 --batch_size 16 --accumulation_steps 2 --train_len 229 --k_softargmax 10 --user_tag "argmax10_plane5" 
 
 ```
 
