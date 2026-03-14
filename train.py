@@ -240,10 +240,15 @@ def train(args):
         model.train()
         train_loss, train_hm, train_crd, train_srf, train_mm = 0.0, 0.0, 0.0, 0.0, 0.0
         
-        decay_factor = (1.0 - (epoch / args.epochs)) ** 2
-        alpha = max(0.5 * decay_factor, 0.05) 
-        beta  = max(0.1 * decay_factor, 0.01) 
+        #decay_factor = (1.0 - (epoch / args.epochs)) ** 2
         
+        #alpha = max(0.5 * decay_factor, 0.05) 
+        #beta  = max(0.1 * decay_factor, 0.01) 
+        alpha = args.alpha_init  # Crd Loss 가중치 (고정)
+        beta  = args.beta_init  # Srf Loss 가중치 (고정)
+        #warmup_factor = epoch / args.epochs
+        #alpha = args.alpha_init * warmup_factor
+        #beta  = args.beta_init * warmup_factor      
         with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Train]", unit="batch") as tepoch:
             for i, (point, landmark, seg) in tepoch:
                 point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
@@ -261,11 +266,11 @@ def train(args):
                 pred_heatmap = model(point_input)
                 
                 points_for_coords = point_input.permute(0, 2, 1)
-                pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=10)
+                pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                 loss_coord = F.l1_loss(pred_coords, augmented_landmark)
-                loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=5)
+                loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 
                 # 이제 avg_m이 정상적으로 곱해집니다!
                 mm_error = loss_coord.item() * avg_m

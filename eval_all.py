@@ -180,7 +180,7 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)      # 시각화 및 IoU용 (B, N, K)
 
         # [3] Soft-argmax 회귀 (MDS 없이 즉시 Sub-vertex 좌표 추출!)
-        pred_landmark_norm = get_differentiable_coords(point_norm, pred_heatmap_raw, k=10)
+        pred_landmark_norm = get_differentiable_coords(point_norm, pred_heatmap_raw, k=args.k_softargmax)
         
         # [4] 복원 (Denormalization)
         pred_landmark = (pred_landmark_norm * scale) + centroid
