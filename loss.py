@@ -87,3 +87,23 @@ def compute_point_to_plane_loss(pred_coords, points, k=5):
     distance = torch.abs(torch.sum(vector_to_plane * normal_vector, dim=-1)) # (B, K_lm)
     
     return distance.mean()
+
+# =====================================================================
+# [신규 추가] 구조적 위상 로스 (Structural / Pairwise Distance Loss)
+# =====================================================================
+def compute_structural_loss(pred_coords, gt_coords):
+    """
+    랜드마크 간의 상대적 거리(뼈대 비율) 오차를 계산하는 로스
+    pred_coords: (B, K_lm, 3)
+    gt_coords: (B, K_lm, 3)
+    """
+    # 1. 예측된 랜드마크들 사이의 모든 쌍(Pairwise) 거리 계산 -> (B, K_lm, K_lm)
+    pred_dist_matrix = torch.cdist(pred_coords, pred_coords)
+    
+    # 2. 실제 정답 랜드마크들 사이의 모든 쌍 거리 계산 -> (B, K_lm, K_lm)
+    gt_dist_matrix = torch.cdist(gt_coords, gt_coords)
+    
+    # 3. 예측 거리와 실제 거리의 차이(절댓값) 평균 반환
+    loss_struct = F.l1_loss(pred_dist_matrix, gt_dist_matrix)
+    
+    return loss_struct
