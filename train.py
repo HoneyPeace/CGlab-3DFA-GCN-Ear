@@ -1,7 +1,7 @@
 '''
-@Author: Yuan Wang (Modified by Researcher 2)
+@Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + Unified Folder Structure + Hybrid Loss (Point-to-Plane)
+@Description: Gradient Accumulation + Unified Folder Structure + Automatic Weighted Loss (Uncertainty)
 '''
 
 import os
@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 import torch
-import torch.nn.functional as F # [추가] 좌표 L1 Loss 연산을 위한 모듈
+import torch.nn.functional as F 
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
@@ -20,7 +20,6 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-# [수정] 새로 만든 미분 가능한 3D 추출 및 표면 투영 로스 임포트
 from loss import AdaptiveWingLoss, get_differentiable_coords, compute_point_to_plane_loss
 from util import main_sample
 from PAConv_model import PAConv
@@ -29,6 +28,23 @@ from augmentations import normalize_data, PointcloudScaleAndTranslate
 # GPU 설정
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# =============================================================================
+# [추가] 불확실성 기반 자동 가중치 조절 모듈 (Kendall et al., CVPR 2018)
+# =============================================================================
+class AutomaticWeightedLoss(torch.nn.Module):
+    def __init__(self, num_losses=3):
+        super(AutomaticWeightedLoss, self).__init__()
+        # 가중치 파라미터를 0으로 초기화 (exp(0) = 1 이므로 1:1:1로 시작)
+        self.params = torch.nn.Parameter(torch.zeros(num_losses, requires_grad=True))
+
+    def forward(self, losses):
+        total_loss = 0
+        for i, loss in enumerate(losses):
+            # 수식: exp(-s) * Loss + s
+            total_loss += torch.exp(-self.params[i]) * loss + self.params[i]
+        return total_loss
+# =============================================================================
 
 def weight_init(m):
     if isinstance(m, torch.nn.Linear):
@@ -40,13 +56,7 @@ def weight_init(m):
     elif isinstance(m, torch.nn.Conv1d):
         torch.nn.init.kaiming_normal_(m.weight)
 
-# -----------------------------------------------------------------------------
-# [기능 1] 통합 실험 ID 및 경로 생성
-# -----------------------------------------------------------------------------
 def get_experiment_paths(args, train_len):
-    """
-    구조: results/{exp_name}/{FPS_Sigma_Batch_Train_[Tag]_Count}/
-    """
     project_dir = os.path.join(args.output_root, args.exp_name)
     os.makedirs(project_dir, exist_ok=True)
 
@@ -57,7 +67,6 @@ def get_experiment_paths(args, train_len):
 
     base_str = f"FPS{args.num_points}_sigma{args.sigma}_batch{batch_str}_train{train_len}"
     
-    # 태그가 있으면 붙이고, 없으면 안 붙임
     if args.user_tag and args.user_tag != "":
         setting_str = f"{base_str}_{args.user_tag}"
     else:
@@ -88,9 +97,6 @@ def get_experiment_paths(args, train_len):
     
     return paths
 
-# -----------------------------------------------------------------------------
-# [기능 2] 3각도 히트맵 저장
-# -----------------------------------------------------------------------------
 def save_multiview_heatmap(points, heatmap, save_dir, sample_idx, landmark_idx, prefix):
     fig = plt.figure(figsize=(30, 10))
     views = [
@@ -109,9 +115,6 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_idx, landmark_idx, 
     plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')
     plt.close()
 
-# -----------------------------------------------------------------------------
-# [기능 3] 데이터 백업 및 GT 시각화 (수정됨: Train 히트맵 스킵)
-# -----------------------------------------------------------------------------
 def process_data_storage(dataset, prefix, paths):
     shape_list, landmark_list, heatmap_list = [], [], []
     for i in range(len(dataset)):
@@ -124,38 +127,26 @@ def process_data_storage(dataset, prefix, paths):
     landmark_arr = np.stack(landmark_list)
     heatmap_arr = np.stack(heatmap_list)
 
-    # 1. NPY Backup (이건 무조건 저장해야 나중에 분석 가능)
     np.save(os.path.join(paths['npy_backup'], f"shape_{prefix}.npy"), shape_arr)
     np.save(os.path.join(paths['npy_backup'], f"landmark_{prefix}.npy"), landmark_arr)
     np.save(os.path.join(paths['npy_backup'], f"Heat_data_{prefix}.npy"), heatmap_arr)
     print(f"   [{prefix.upper()}] Backup Saved: {paths['npy_backup']}")
 
-    # 2. GT Visualization
-    # prefix가 'test'일 때만 히트맵 이미지를 저장합니다.
     if prefix == 'test':
         vis_save_dir = os.path.join(paths['gt_heatmap'], prefix)
         os.makedirs(vis_save_dir, exist_ok=True)
-
         print(f"   [{prefix.upper()}] Saving GT Heatmaps (Every 30th Sample)...")
-        
-        # 30개 간격으로 저장
         for idx in tqdm(range(0, len(shape_arr), 30), desc=f"   Saving GT {prefix}"):
             points_np = shape_arr[idx]
             heatmap_np = heatmap_arr[idx].T
-            
             for lm_idx in range(heatmap_np.shape[0]):
                 save_multiview_heatmap(points_np, heatmap_np[lm_idx], vis_save_dir, idx, lm_idx, prefix)
     else:
-        # Train 데이터 등은 저장하지 않음
         print(f"   [{prefix.upper()}] GT Heatmap generation skipped (Requested).")
 
-# -----------------------------------------------------------------------------
-# [기능 4] 메인 학습 함수
-# -----------------------------------------------------------------------------
 def train(args):
     accum_steps = args.accumulation_steps
     
-    # 1. 스마트 모드 감지 (Split vs Separate)
     if not args.test_dataset_name or (args.train_dataset_name == args.test_dataset_name):
         MODE = "SPLIT"
         target_dataset = args.train_dataset_name
@@ -172,19 +163,13 @@ def train(args):
     else:
         print(f"    -> Effective Batch Size: {args.batch_size * accum_steps}")
 
-    # 3. 데이터 생성 (Resample) - Train/Test 분리 생성 지시
     if args.need_resample:
         print("=== [Phase 1] Data Generation (Initial) ===")
-        
-        # (1) Train 데이터만 읽어서 -> shape_train.npy 로 저장
         main_sample(args.num_points, args.seed, args.sigma, args.sample_way, 
                     args.train_dataset_name, args.data_root, partition='train')
-        
-        # (2) Test 데이터만 읽어서 -> shape_test.npy 로 저장
         main_sample(args.num_points, args.seed, args.sigma, args.sample_way, 
                     args.test_dataset_name, args.data_root, partition='test')
 
-    # 4. 데이터 로드 및 분할
     print("=== [Phase 2] Loading Data ===")
     
     if MODE == "SPLIT":
@@ -197,39 +182,45 @@ def train(args):
         train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name)
         test_dataset = FaceLandmarkData(data_root=args.data_root, partition='test', data=args.test_dataset_name)
 
-    # 데이터 로드 완료 후 폴더 생성
     print("=== [Phase 2.5] Creating Experiment Paths ===")
     train_len = len(train_dataset)
     paths = get_experiment_paths(args, train_len)
 
-    # 5. 데이터 백업 수행
     print("=== [Phase 2.6] Backing up Data ===")
     process_data_storage(train_dataset, "train", paths)
     process_data_storage(test_dataset, "test", paths)
 
-    # DataLoader 설정
     train_loader = DataLoader(train_dataset, num_workers=0, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    
-    # [추가] 검증을 위한 test_loader 설정
     test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.test_batch_size, shuffle=False, drop_last=False)
     
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
-    # 6. 모델 초기화
+    # 6. 모델 및 가중치 모듈 초기화
     model = PAConv(args, args.landmark_num).to(device)
     model.apply(weight_init)
+    
+    # [추가] 자동 가중치 모듈 초기화 (GPU 할당)
+    awl = AutomaticWeightedLoss(num_losses=3).to(device)
     
     if args.loss == 'adaptive_wing': criterion = AdaptiveWingLoss()
     else: criterion = torch.nn.MSELoss()
         
-    if args.use_sgd: opt = optim.SGD(model.parameters(), lr=args.lr*100, momentum=args.momentum, weight_decay=args.weight_decay)
-    else: opt = optim.Adam(model.parameters(), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
+    # [수정] 옵티마이저에 model 파라미터와 awl 파라미터를 함께 등록 (awl에는 weight_decay 미적용)
+    if args.use_sgd: 
+        opt = optim.SGD([
+            {'params': model.parameters()},
+            {'params': awl.parameters(), 'weight_decay': 0}
+        ], lr=args.lr*100, momentum=args.momentum, weight_decay=args.weight_decay)
+    else: 
+        opt = optim.Adam([
+            {'params': model.parameters()},
+            {'params': awl.parameters(), 'weight_decay': 0}
+        ], lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
     
     if args.scheduler == 'cos': scheduler = CosineAnnealingLR(opt, T_max=args.epochs)
     else: scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
-    # 7. 학습 루프
-    print(f"\n=== [Phase 3] Start Training with Hybrid Loss ===")
+    print(f"\n=== [Phase 3] Start Training with Automatic Weighted Loss ===")
     
     opt.zero_grad() 
 
@@ -240,20 +231,12 @@ def train(args):
         model.train()
         train_loss, train_hm, train_crd, train_srf, train_mm = 0.0, 0.0, 0.0, 0.0, 0.0
         
-        #decay_factor = (1.0 - (epoch / args.epochs)) ** 2
+        # 수동 가중치 관련 코드는 모두 삭제되었습니다! (awl이 알아서 합니다)
         
-        #alpha = max(0.5 * decay_factor, 0.05) 
-        #beta  = max(0.1 * decay_factor, 0.01) 
-        alpha = args.alpha_init  # Crd Loss 가중치 (고정)
-        beta  = args.beta_init  # Srf Loss 가중치 (고정)
-        #warmup_factor = epoch / args.epochs
-        #alpha = args.alpha_init * warmup_factor
-        #beta  = args.beta_init * warmup_factor      
         with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Train]", unit="batch") as tepoch:
             for i, (point, landmark, seg) in tepoch:
                 point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
-                # [복구 완료!] 정규화 전, mm 오차 계산을 위해 배율(avg_m)을 구합니다.
                 with torch.no_grad():
                     centroid_tmp = torch.mean(point, axis=1, keepdim=True)
                     batch_m = torch.max(torch.sqrt(torch.sum((point - centroid_tmp) ** 2, axis=2)), axis=1)[0]
@@ -272,10 +255,10 @@ def train(args):
                 loss_coord = F.l1_loss(pred_coords, augmented_landmark)
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 
-                # 이제 avg_m이 정상적으로 곱해집니다!
                 mm_error = loss_coord.item() * avg_m
 
-                total_loss = loss_heatmap + (alpha * loss_coord) + (beta * loss_surface)
+                # [수정] Automatic Weighted Loss를 통과시킵니다.
+                total_loss = awl([loss_heatmap, loss_coord, loss_surface])
                 
                 loss = total_loss / accum_steps
                 loss.backward()
@@ -302,7 +285,6 @@ def train(args):
         # [VALIDATION] 평가 루프
         # -------------------------------------------------------------
         model.eval()
-        # [복구 완료!] 변수 5개로 제대로 초기화합니다.
         val_loss, val_hm, val_crd, val_srf, val_mm = 0.0, 0.0, 0.0, 0.0, 0.0
         
         with torch.no_grad():
@@ -310,7 +292,6 @@ def train(args):
                 for i, (point, landmark, seg) in vepoch:
                     point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
-                    # [복구 완료!] 검증 시에도 배율(avg_m)을 구합니다.
                     centroid_tmp = torch.mean(point, axis=1, keepdim=True)
                     batch_m = torch.max(torch.sqrt(torch.sum((point - centroid_tmp) ** 2, axis=2)), axis=1)[0]
                     avg_m = torch.mean(batch_m).item()
@@ -321,14 +302,20 @@ def train(args):
                     pred_heatmap = model(point_input)
                     
                     points_for_coords = point_input.permute(0, 2, 1)
-                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=10)
+                    
+                    # [버그 수정] Val 루프에도 하드코딩된 10 대신 args.k_softargmax 연결
+                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                     loss_coord = F.l1_loss(pred_coords, landmark_normal)
-                    loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=5)
+                    
+                    # [버그 수정] Val 루프에도 하드코딩된 5 대신 args.plane_knn 연결
+                    loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                     
                     mm_error = loss_coord.item() * avg_m
-                    total_loss = loss_heatmap + (alpha * loss_coord) + (beta * loss_surface)
+                    
+                    # [수정] 검증 시에도 동일하게 AWL 통과
+                    total_loss = awl([loss_heatmap, loss_coord, loss_surface])
 
                     val_loss += total_loss.item()
                     val_hm   += loss_heatmap.item()
@@ -343,10 +330,15 @@ def train(args):
         v_mm   = val_mm / len(test_loader)
 
         # -------------------------------------------------------------
-        # [PRINT] 결과 출력 
+        # [PRINT] 결과 및 가중치 출력 
         # -------------------------------------------------------------
         print(f" [Train] 전체 Loss: {t_loss:.4f} | HM Loss: {t_hm:.4f} | Crd Loss: {t_crd:.4f} | Srf Loss: {t_srf:.4f} | mm 오차: {t_mm:.2f} mm")
-        print(f" [Val]   전체 Loss: {v_loss:.4f} | HM Loss: {v_hm:.4f} | Crd Loss: {v_crd:.4f} | Srf Loss: {v_srf:.4f} | mm 오차: {v_mm:.2f} mm\n")
+        print(f" [Val]   전체 Loss: {v_loss:.4f} | HM Loss: {v_hm:.4f} | Crd Loss: {v_crd:.4f} | Srf Loss: {v_srf:.4f} | mm 오차: {v_mm:.2f} mm")
+        
+        # [추가] 모델이 스스로 찾아낸 현재 가중치(Effective Weight) 출력
+        # exp(-s) 값이 각 로스에 실제로 곱해지는 유효 가중치입니다.
+        effective_weights = torch.exp(-awl.params).detach().cpu().numpy()
+        print(f" [AWL Weights] HM 가중치: {effective_weights[0]:.4f} | Crd 가중치: {effective_weights[1]:.4f} | Srf 가중치: {effective_weights[2]:.4f}\n")
 
         if (epoch + 1) % 5 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
