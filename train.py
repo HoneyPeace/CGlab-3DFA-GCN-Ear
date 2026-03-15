@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + AWL (4-Loss Hybrid: HM + Crd + Srf + Struct)
+@Description: Gradient Accumulation + RLW (Random Loss Weighting, CVPR 2022) 4-Loss Hybrid
 '''
 
 import os
@@ -20,7 +20,6 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-# [수정] compute_structural_loss 임포트 추가
 from loss import AdaptiveWingLoss, get_differentiable_coords, compute_point_to_plane_loss, compute_structural_loss
 from util import main_sample
 from PAConv_model import PAConv
@@ -29,21 +28,6 @@ from augmentations import normalize_data, PointcloudScaleAndTranslate
 # GPU 설정
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# =============================================================================
-# [추가] 불확실성 기반 자동 가중치 조절 모듈 (Kendall et al., CVPR 2018)
-# =============================================================================
-class AutomaticWeightedLoss(torch.nn.Module):
-    def __init__(self, num_losses=4): # [수정] 4개의 로스로 변경
-        super(AutomaticWeightedLoss, self).__init__()
-        self.params = torch.nn.Parameter(torch.zeros(num_losses, requires_grad=True))
-
-    def forward(self, losses):
-        total_loss = 0
-        for i, loss in enumerate(losses):
-            total_loss += torch.exp(-self.params[i]) * loss + self.params[i]
-        return total_loss
-# =============================================================================
 
 def weight_init(m):
     if isinstance(m, torch.nn.Linear):
@@ -194,31 +178,22 @@ def train(args):
     
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
-    # 6. 모델 및 가중치 모듈 초기화
+    # 6. 모델 및 옵티마이저 초기화 (AWL 제거됨)
     model = PAConv(args, args.landmark_num).to(device)
     model.apply(weight_init)
-    
-    # [수정] 4개의 로스를 담당하도록 초기화
-    awl = AutomaticWeightedLoss(num_losses=4).to(device)
     
     if args.loss == 'adaptive_wing': criterion = AdaptiveWingLoss()
     else: criterion = torch.nn.MSELoss()
         
     if args.use_sgd: 
-        opt = optim.SGD([
-            {'params': model.parameters()},
-            {'params': awl.parameters(), 'weight_decay': 0}
-        ], lr=args.lr*100, momentum=args.momentum, weight_decay=args.weight_decay)
+        opt = optim.SGD(model.parameters(), lr=args.lr*100, momentum=args.momentum, weight_decay=args.weight_decay)
     else: 
-        opt = optim.Adam([
-            {'params': model.parameters()},
-            {'params': awl.parameters(), 'weight_decay': 0}
-        ], lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
+        opt = optim.Adam(model.parameters(), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
     
     if args.scheduler == 'cos': scheduler = CosineAnnealingLR(opt, T_max=args.epochs)
     else: scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
-    print(f"\n=== [Phase 3] Start Training with 4-Loss AWL ===")
+    print(f"\n=== [Phase 3] Start Training with RLW (Random Loss Weighting) ===")
     
     opt.zero_grad() 
 
@@ -227,7 +202,6 @@ def train(args):
         # [TRAIN] 학습 루프
         # -------------------------------------------------------------
         model.train()
-        # [수정] 구조적 로스(train_str) 변수 추가
         train_loss, train_hm, train_crd, train_srf, train_str, train_mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         
         with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Train]", unit="batch") as tepoch:
@@ -251,14 +225,21 @@ def train(args):
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                 loss_coord = F.l1_loss(pred_coords, augmented_landmark)
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
-                
-                # [신규 추가] 구조적 위상 로스 계산 (학습 시에는 augmentation된 정답 좌표 사용)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
                 mm_error = loss_coord.item() * avg_m
 
-                # [수정] 4개의 로스를 AWL에 전달
-                total_loss = awl([loss_heatmap, loss_coord, loss_surface, loss_struct])
+                # =========================================================
+                # [신규 추가] RLW: 매 배치마다 4개의 랜덤 가중치 생성 (합 = 1)
+                # =========================================================
+                weights = torch.rand(4).to(device)
+                weights = weights / weights.sum()
+                
+                total_loss = (weights[0] * loss_heatmap + 
+                              weights[1] * loss_coord + 
+                              weights[2] * loss_surface + 
+                              weights[3] * loss_struct)
+                # =========================================================
                 
                 loss = total_loss / accum_steps
                 loss.backward()
@@ -271,7 +252,7 @@ def train(args):
                 train_hm   += loss_heatmap.item()
                 train_crd  += loss_coord.item()
                 train_srf  += loss_surface.item()
-                train_str  += loss_struct.item() # [추가]
+                train_str  += loss_struct.item()
                 train_mm   += mm_error
                 
                 tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", HM=f"{loss_heatmap.item():.4f}", Crd=f"{loss_coord.item():.4f}", Srf=f"{loss_surface.item():.4f}", Str=f"{loss_struct.item():.4f}", mm=f"{mm_error:.2f}")
@@ -280,7 +261,7 @@ def train(args):
         t_hm   = train_hm / len(train_loader)
         t_crd  = train_crd / len(train_loader)
         t_srf  = train_srf / len(train_loader)
-        t_str  = train_str / len(train_loader) # [추가]
+        t_str  = train_str / len(train_loader) 
         t_mm   = train_mm / len(train_loader)
 
         # -------------------------------------------------------------
@@ -309,27 +290,25 @@ def train(args):
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                     loss_coord = F.l1_loss(pred_coords, landmark_normal)
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
-                    
-                    # [신규 추가] 평가 시 구조적 로스 계산 (정규화된 정답 좌표 사용)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     
                     mm_error = loss_coord.item() * avg_m
                     
-                    # [수정] 4개의 로스 전달
-                    total_loss = awl([loss_heatmap, loss_coord, loss_surface, loss_struct])
+                    # [수정] 검증 시에는 모델 성능을 일관되게 평가하기 위해 4개 로스를 0.25 비율로 고정
+                    total_loss = 0.25 * (loss_heatmap + loss_coord + loss_surface + loss_struct)
 
                     val_loss += total_loss.item()
                     val_hm   += loss_heatmap.item()
                     val_crd  += loss_coord.item()
                     val_srf  += loss_surface.item()
-                    val_str  += loss_struct.item() # [추가]
+                    val_str  += loss_struct.item()
                     val_mm   += mm_error
 
         v_loss = val_loss / len(test_loader)
         v_hm   = val_hm / len(test_loader)
         v_crd  = val_crd / len(test_loader)
         v_srf  = val_srf / len(test_loader)
-        v_str  = val_str / len(test_loader) # [추가]
+        v_str  = val_str / len(test_loader) 
         v_mm   = val_mm / len(test_loader)
 
         # -------------------------------------------------------------
@@ -338,9 +317,9 @@ def train(args):
         print(f" [Train] 전체 Loss: {t_loss:.4f} | HM: {t_hm:.4f} | Crd: {t_crd:.4f} | Srf: {t_srf:.4f} | Struct: {t_str:.4f} | mm: {t_mm:.2f}")
         print(f" [Val]   전체 Loss: {v_loss:.4f} | HM: {v_hm:.4f} | Crd: {v_crd:.4f} | Srf: {v_srf:.4f} | Struct: {v_str:.4f} | mm: {v_mm:.2f}")
         
-        # [수정] 4개의 가중치 출력
-        effective_weights = torch.exp(-awl.params).detach().cpu().numpy()
-        print(f" [AWL Weights] HM: {effective_weights[0]:.4f} | Crd: {effective_weights[1]:.4f} | Srf: {effective_weights[2]:.4f} | Struct: {effective_weights[3]:.4f}\n")
+        # 마지막 배치에서 사용된 랜덤 가중치 출력 (참고용)
+        w_np = weights.detach().cpu().numpy()
+        print(f" [RLW Weights (Last Batch)] HM: {w_np[0]:.4f} | Crd: {w_np[1]:.4f} | Srf: {w_np[2]:.4f} | Struct: {w_np[3]:.4f}\n")
 
         if (epoch + 1) % 5 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
