@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + RLW (Random Loss Weighting, CVPR 2022) 4-Loss Hybrid
+@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss
 '''
 
 import os
@@ -20,7 +20,8 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-from loss import AdaptiveWingLoss, get_differentiable_coords, compute_point_to_plane_loss, compute_structural_loss
+# [수정] loss.py에서 dynamic_focal_l1_loss를 임포트합니다.
+from loss import AdaptiveWingLoss, get_differentiable_coords, compute_point_to_plane_loss, compute_structural_loss, dynamic_focal_l1_loss
 from util import main_sample
 from PAConv_model import PAConv
 from augmentations import normalize_data, PointcloudScaleAndTranslate
@@ -141,10 +142,6 @@ def train(args):
         print(f"    Train: {args.train_dataset_name} / Test: {args.test_dataset_name}")
 
     print(f">>> [Gradient Accumulation] Steps: {accum_steps}")
-    if accum_steps == 1:
-        print("    -> Operating in Standard Mode")
-    else:
-        print(f"    -> Effective Batch Size: {args.batch_size * accum_steps}")
 
     if args.need_resample:
         print("=== [Phase 1] Data Generation (Initial) ===")
@@ -178,7 +175,7 @@ def train(args):
     
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
-    # 6. 모델 및 옵티마이저 초기화 (AWL 제거됨)
+    # 6. 모델 및 옵티마이저 초기화 (FAMO 제거됨)
     model = PAConv(args, args.landmark_num).to(device)
     model.apply(weight_init)
     
@@ -193,14 +190,11 @@ def train(args):
     if args.scheduler == 'cos': scheduler = CosineAnnealingLR(opt, T_max=args.epochs)
     else: scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
-    print(f"\n=== [Phase 3] Start Training with RLW (Random Loss Weighting) ===")
+    print(f"\n=== [Phase 3] Start Training with RLW + Dynamic Focal-L1 Loss ===")
     
     opt.zero_grad() 
 
     for epoch in range(args.epochs):
-        # -------------------------------------------------------------
-        # [TRAIN] 학습 루프
-        # -------------------------------------------------------------
         model.train()
         train_loss, train_hm, train_crd, train_srf, train_str, train_mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         
@@ -223,14 +217,18 @@ def train(args):
                 pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                loss_coord = F.l1_loss(pred_coords, augmented_landmark)
+                
+                # =========================================================
+                # [수정] F.l1_loss를 Dynamic Focal-L1 Loss로 완벽 교체
+                # =========================================================
+                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=2.0)
+                # =========================================================
+                
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
-                mm_error = loss_coord.item() * avg_m
-
                 # =========================================================
-                # [신규 추가] RLW: 매 배치마다 4개의 랜덤 가중치 생성 (합 = 1)
+                # [적용] 거시적 밸런스 매니저: RLW (Random Loss Weighting)
                 # =========================================================
                 weights = torch.rand(4).to(device)
                 weights = weights / weights.sum()
@@ -247,6 +245,11 @@ def train(args):
                 if (i + 1) % accum_steps == 0:
                     opt.step()
                     opt.zero_grad() 
+
+                # mm 변환 시, 로스값 자체는 왜곡되어 있으므로 별도의 L1 거리로 mm 오차를 추적합니다.
+                with torch.no_grad():
+                    true_l1 = F.l1_loss(pred_coords, augmented_landmark).item()
+                    mm_error = true_l1 * avg_m
 
                 train_loss += total_loss.item()
                 train_hm   += loss_heatmap.item()
@@ -288,13 +291,18 @@ def train(args):
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                    loss_coord = F.l1_loss(pred_coords, landmark_normal)
+                    
+                    # [수정] 검증 루프에서도 Dynamic Focal-L1 적용
+                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=2.0)
+                    
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     
-                    mm_error = loss_coord.item() * avg_m
+                    # mm 오차는 순수 L1 거리로 계산 (지표 왜곡 방지)
+                    true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
+                    mm_error = true_l1 * avg_m
                     
-                    # [수정] 검증 시에는 모델 성능을 일관되게 평가하기 위해 4개 로스를 0.25 비율로 고정
+                    # 검증 시 4개 로스 균등 비율 고정
                     total_loss = 0.25 * (loss_heatmap + loss_coord + loss_surface + loss_struct)
 
                     val_loss += total_loss.item()
@@ -317,7 +325,7 @@ def train(args):
         print(f" [Train] 전체 Loss: {t_loss:.4f} | HM: {t_hm:.4f} | Crd: {t_crd:.4f} | Srf: {t_srf:.4f} | Struct: {t_str:.4f} | mm: {t_mm:.2f}")
         print(f" [Val]   전체 Loss: {v_loss:.4f} | HM: {v_hm:.4f} | Crd: {v_crd:.4f} | Srf: {v_srf:.4f} | Struct: {v_str:.4f} | mm: {v_mm:.2f}")
         
-        # 마지막 배치에서 사용된 랜덤 가중치 출력 (참고용)
+        # RLW 마지막 배치 가중치 확인
         w_np = weights.detach().cpu().numpy()
         print(f" [RLW Weights (Last Batch)] HM: {w_np[0]:.4f} | Crd: {w_np[1]:.4f} | Srf: {w_np[2]:.4f} | Struct: {w_np[3]:.4f}\n")
 
