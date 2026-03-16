@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss
+@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss + Optuna Pruning
 '''
 
 import os
@@ -9,6 +9,7 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt 
 from mpl_toolkits.mplot3d import Axes3D
+import optuna # [추가] Optuna 라이브러리 임포트
 
 import torch
 import torch.nn.functional as F 
@@ -20,7 +21,6 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-# [수정] loss.py에서 dynamic_focal_l1_loss를 임포트합니다.
 from loss import AdaptiveWingLoss, get_differentiable_coords, compute_point_to_plane_loss, compute_structural_loss, dynamic_focal_l1_loss
 from util import main_sample
 from PAConv_model import PAConv
@@ -128,7 +128,8 @@ def process_data_storage(dataset, prefix, paths):
     else:
         print(f"   [{prefix.upper()}] GT Heatmap generation skipped (Requested).")
 
-def train(args):
+# [수정] Optuna를 위해 trial 객체를 받을 수 있도록 수정
+def train(args, trial=None):
     accum_steps = args.accumulation_steps
     
     if not args.test_dataset_name or (args.train_dataset_name == args.test_dataset_name):
@@ -175,7 +176,6 @@ def train(args):
     
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
-    # 6. 모델 및 옵티마이저 초기화 (FAMO 제거됨)
     model = PAConv(args, args.landmark_num).to(device)
     model.apply(weight_init)
     
@@ -190,9 +190,16 @@ def train(args):
     if args.scheduler == 'cos': scheduler = CosineAnnealingLR(opt, T_max=args.epochs)
     else: scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
-    print(f"\n=== [Phase 3] Start Training with RLW + Dynamic Focal-L1 Loss ===")
+    # 파라미터가 없으면 기본값 2.0과 5.0으로 세팅되도록 안전장치
+    focal_gamma = getattr(args, 'focal_gamma', 2.0)
+    focal_max = getattr(args, 'focal_max', 5.0)
+
+    print(f"\n=== [Phase 3] Start Training [RLW + Focal (Gamma:{focal_gamma:.2f}, Max:{focal_max:.2f})] ===")
     
     opt.zero_grad() 
+
+    # 최저 오차를 추적할 변수
+    best_v_mm = float('inf')
 
     for epoch in range(args.epochs):
         model.train()
@@ -218,18 +225,12 @@ def train(args):
 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                 
-                # =========================================================
-                # [수정] F.l1_loss를 Dynamic Focal-L1 Loss로 완벽 교체
-                # =========================================================
-                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=2.0)
-                # =========================================================
+                # [수정] 하드코딩된 값을 변수로 대체
+                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=focal_gamma, max_weight=focal_max)
                 
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
-                # =========================================================
-                # [적용] 거시적 밸런스 매니저: RLW (Random Loss Weighting)
-                # =========================================================
                 weights = torch.rand(4).to(device)
                 weights = weights / weights.sum()
                 
@@ -237,7 +238,6 @@ def train(args):
                               weights[1] * loss_coord + 
                               weights[2] * loss_surface + 
                               weights[3] * loss_struct)
-                # =========================================================
                 
                 loss = total_loss / accum_steps
                 loss.backward()
@@ -246,7 +246,6 @@ def train(args):
                     opt.step()
                     opt.zero_grad() 
 
-                # mm 변환 시, 로스값 자체는 왜곡되어 있으므로 별도의 L1 거리로 mm 오차를 추적합니다.
                 with torch.no_grad():
                     true_l1 = F.l1_loss(pred_coords, augmented_landmark).item()
                     mm_error = true_l1 * avg_m
@@ -258,7 +257,7 @@ def train(args):
                 train_str  += loss_struct.item()
                 train_mm   += mm_error
                 
-                tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", HM=f"{loss_heatmap.item():.4f}", Crd=f"{loss_coord.item():.4f}", Srf=f"{loss_surface.item():.4f}", Str=f"{loss_struct.item():.4f}", mm=f"{mm_error:.2f}")
+                tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", HM=f"{loss_heatmap.item():.4f}", Crd=f"{loss_coord.item():.4f}", mm=f"{mm_error:.2f}")
 
         t_loss = train_loss / len(train_loader)
         t_hm   = train_hm / len(train_loader)
@@ -291,18 +290,13 @@ def train(args):
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                    
-                    # [수정] 검증 루프에서도 Dynamic Focal-L1 적용
-                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=2.0)
-                    
+                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=focal_gamma, max_weight=focal_max)
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     
-                    # mm 오차는 순수 L1 거리로 계산 (지표 왜곡 방지)
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
-                    # 검증 시 4개 로스 균등 비율 고정
                     total_loss = 0.25 * (loss_heatmap + loss_coord + loss_surface + loss_struct)
 
                     val_loss += total_loss.item()
@@ -318,16 +312,22 @@ def train(args):
         v_srf  = val_srf / len(test_loader)
         v_str  = val_str / len(test_loader) 
         v_mm   = val_mm / len(test_loader)
+        
+        if v_mm < best_v_mm:
+            best_v_mm = v_mm
 
-        # -------------------------------------------------------------
-        # [PRINT] 결과 및 가중치 출력 
-        # -------------------------------------------------------------
         print(f" [Train] 전체 Loss: {t_loss:.4f} | HM: {t_hm:.4f} | Crd: {t_crd:.4f} | Srf: {t_srf:.4f} | Struct: {t_str:.4f} | mm: {t_mm:.2f}")
         print(f" [Val]   전체 Loss: {v_loss:.4f} | HM: {v_hm:.4f} | Crd: {v_crd:.4f} | Srf: {v_srf:.4f} | Struct: {v_str:.4f} | mm: {v_mm:.2f}")
         
-        # RLW 마지막 배치 가중치 확인
-        w_np = weights.detach().cpu().numpy()
-        print(f" [RLW Weights (Last Batch)] HM: {w_np[0]:.4f} | Crd: {w_np[1]:.4f} | Srf: {w_np[2]:.4f} | Struct: {w_np[3]:.4f}\n")
+        # ==========================================
+        # 🚨 [Optuna Pruning (조기 종료) 로직] 🚨
+        # ==========================================
+        if trial is not None:
+            trial.report(v_mm, epoch)
+            if trial.should_prune():
+                print(f"✂️ [Trial Pruned] Optuna: 이 파라미터 조합은 가망이 없어 조기 종료합니다. (Epoch {epoch})")
+                raise optuna.TrialPruned()
+        # ==========================================
 
         if (epoch + 1) % 5 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
@@ -337,6 +337,7 @@ def train(args):
         scheduler.step()
     
     print(f"\n=== Training Finished. Results at: {paths['root']} ===\n")
+    return best_v_mm # [추가] Optuna를 위해 최종/최저 오차 반환
 
 if __name__ == "__main__":
     args = parser.parse_args()
