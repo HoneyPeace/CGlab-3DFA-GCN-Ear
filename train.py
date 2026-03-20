@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss
+@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss + NaN Tracker
 '''
 
 import os
@@ -202,6 +202,15 @@ def train(args):
             for i, (point, landmark, seg) in tepoch:
                 point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
+                # ====================================================================
+                # 🚨 [DEBUG LOGGING 1] 입력 데이터 결측치 검사
+                # ====================================================================
+                if torch.isnan(point).any() or torch.isnan(landmark).any() or torch.isnan(seg).any():
+                    print("\n⚠️ [디버그] 입력 데이터(point, landmark, seg)에 NaN이 포함되어 있습니다. (데이터 문제)")
+                    torch.save({'points': point.cpu(), 'landmark': landmark.cpu(), 'seg': seg.cpu()}, 'debug_01_input_nan.pt')
+                    print("   -> 'debug_01_input_nan.pt'로 저장 완료. 해당 배치를 건너뜁니다.")
+                    continue
+
                 with torch.no_grad():
                     centroid_tmp = torch.mean(point, axis=1, keepdim=True)
                     batch_m = torch.max(torch.sqrt(torch.sum((point - centroid_tmp) ** 2, axis=2)), axis=1)[0]
@@ -213,23 +222,31 @@ def train(args):
                 point_input = point_normal.permute(0, 2, 1)
                 pred_heatmap = model(point_input)
                 
+                # ====================================================================
+                # 🚨 [DEBUG LOGGING 2] 예측값 붕괴 검사 (가중치 폭발 확인)
+                # ====================================================================
+                if torch.isnan(pred_heatmap).any():
+                    print("\n💥 [디버그] 모델의 예측값(pred_heatmap)이 NaN으로 출력되었습니다!")
+                    print("   -> 원인: 이전 배치의 역전파(Backward) 과정에서 기울기(Gradient)가 폭발하여 가중치가 오염되었습니다.")
+                    
+                    with open("debug_02_weight_nan_log.txt", "w") as f:
+                        f.write("=== NaN이 발생한 파라미터(가중치) 목록 ===\n")
+                        for name, param in model.named_parameters():
+                            if torch.isnan(param).any():
+                                f.write(f" - {name}\n")
+                                
+                    torch.save({'points': point_input.cpu(), 'pred_heatmap': pred_heatmap.cpu()}, 'debug_02_pred_nan.pt')
+                    print("   -> 파라미터 로그('debug_02_weight_nan_log.txt')와 텐서('debug_02_pred_nan.pt') 저장 완료.")
+                    raise ValueError("가중치 붕괴로 인해 학습을 강제 종료합니다.")
+
                 points_for_coords = point_input.permute(0, 2, 1)
                 pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                
-                # =========================================================
-                # [수정] F.l1_loss를 Dynamic Focal-L1 Loss로 완벽 교체
-                # =========================================================
-                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=2.0)
-                # =========================================================
-                
+                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=1.0)
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
-                # =========================================================
-                # [적용] 거시적 밸런스 매니저: RLW (Random Loss Weighting)
-                # =========================================================
                 weights = torch.rand(4).to(device)
                 weights = weights / weights.sum()
                 
@@ -237,12 +254,31 @@ def train(args):
                               weights[1] * loss_coord + 
                               weights[2] * loss_surface + 
                               weights[3] * loss_struct)
-                # =========================================================
+                
+                # ====================================================================
+                # 🚨 [DEBUG LOGGING 3] 로스 연산 붕괴 검사 (수식 폭발 확인)
+                # ====================================================================
+                if torch.isnan(total_loss) or torch.isnan(loss_heatmap) or torch.isnan(loss_coord) or torch.isnan(loss_surface) or torch.isnan(loss_struct):
+                    print("\n💥 [디버그] 예측은 정상이었으나, Loss를 계산하는 수식에서 NaN이 발생했습니다!")
+                    torch.save({
+                        'pred_heatmap': pred_heatmap.cpu(), 
+                        'pred_coords': pred_coords.cpu(),
+                        'augmented_landmark': augmented_landmark.cpu(),
+                        'points': point_input.cpu(),
+                        'losses': {'total': total_loss.item(), 'hm': loss_heatmap.item(), 'crd': loss_coord.item(), 'srf': loss_surface.item(), 'str': loss_struct.item()}
+                    }, 'debug_03_loss_nan.pt')
+                    print("   -> 'debug_03_loss_nan.pt'로 저장 완료.")
+                    raise ValueError("Loss 수식 에러로 인해 학습을 강제 종료합니다.")
                 
                 loss = total_loss / accum_steps
                 loss.backward()
                 
                 if (i + 1) % accum_steps == 0:
+                    # ====================================================================
+                    # 🛡️ [방어막] 기울기 폭발(Gradient Explosion) 원천 차단
+                    # ====================================================================
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    
                     opt.step()
                     opt.zero_grad() 
 
@@ -293,7 +329,7 @@ def train(args):
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                     
                     # [수정] 검증 루프에서도 Dynamic Focal-L1 적용
-                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=2.0)
+                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=1.0)
                     
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
