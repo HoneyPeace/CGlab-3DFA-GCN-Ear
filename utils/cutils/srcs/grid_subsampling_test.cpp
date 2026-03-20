@@ -1,5 +1,14 @@
 #include <torch/extension.h>
 #include <random>
+#include <algorithm>
+#include <limits>
+#include <cstdint>
+
+#ifdef _MSC_VER
+typedef unsigned __int64 uint128_t_compat; 
+#else
+typedef __uint128_t uint128_t_compat;    
+#endif
 
 struct Cell
 {
@@ -29,7 +38,12 @@ struct SlowHash
 
     void insert(const uint64_t key, const uint32_t idx)
     {
-        const uint64_t slow_idx = __uint128_t(key * multiplier) * size >> 64;
+        uint64_t slow_idx;
+#ifdef _MSC_VER
+        slow_idx = (uint64_t)((key * multiplier) % size);
+#else
+        slow_idx = (uint64_t)((uint128_t_compat)key * multiplier * size >> 64);
+#endif
         Cell **cell = &table[slow_idx];
         for (; *cell && (*cell)->key != key; cell = &(*cell)->next);
         if (*cell == nullptr)
@@ -80,7 +94,7 @@ torch::Tensor grid_subsampling_test(const torch::Tensor &pc_, const float grid_s
     const uint64_t z_step = ((1ull << 21) / slow_hash_size * slow_hash_size + uint64_t(slow_hash_size * 0.559518));
     const auto d2u = [](double x)
     {
-        int64_t tmp = x;
+        int64_t tmp = (int64_t)x;
         return *(uint64_t*)&tmp;
     };
     for (uint64_t i = 0; i < pc_size; ++i)

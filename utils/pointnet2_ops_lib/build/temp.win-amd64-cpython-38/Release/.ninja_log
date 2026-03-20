@@ -1,0 +1,10 @@
+# ninja log v7
+8	9141	7957278617583850	C:/Users/CGlab/Desktop/Earlandmark/Ear 3DFA-GCN/utils/pointnet2_ops_lib/build/temp.win-amd64-cpython-38/Release/pointnet2_ops/_ext-src/src/ball_query.obj	e8fae0e2a66335e6
+24	9174	7957278617740058	C:/Users/CGlab/Desktop/Earlandmark/Ear 3DFA-GCN/utils/pointnet2_ops_lib/build/temp.win-amd64-cpython-38/Release/pointnet2_ops/_ext-src/src/interpolate.obj	4e663ab8f3f9ad17
+31	9215	7957278617896292	C:/Users/CGlab/Desktop/Earlandmark/Ear 3DFA-GCN/utils/pointnet2_ops_lib/build/temp.win-amd64-cpython-38/Release/pointnet2_ops/_ext-src/src/sampling.obj	5d29b9ba0292c7c5
+17	9245	7957278617740058	C:/Users/CGlab/Desktop/Earlandmark/Ear 3DFA-GCN/utils/pointnet2_ops_lib/build/temp.win-amd64-cpython-38/Release/pointnet2_ops/_ext-src/src/group_points.obj	35e9882ab2c26196
+15	9372	7957278617740058	C:/Users/CGlab/Desktop/Earlandmark/Ear 3DFA-GCN/utils/pointnet2_ops_lib/build/temp.win-amd64-cpython-38/Release/pointnet2_ops/_ext-src/src/bindings.obj	8ee10b261dad3d3c
+26	10571	7957278617740058	C:/Users/CGlab/Desktop/Earlandmark/Ear 3DFA-GCN/utils/pointnet2_ops_lib/build/temp.win-amd64-cpython-38/Release/pointnet2_ops/_ext-src/src/interpolate_gpu.obj	419b6203a5eb2564
+34	10679	7957278617896292	C:/Users/CGlab/Desktop/Earlandmark/Ear 3DFA-GCN/utils/pointnet2_ops_lib/build/temp.win-amd64-cpython-38/Release/pointnet2_ops/_ext-src/src/sampling_gpu.obj	de5a9e281f33e8f1
+11	10829	7957278617583850	C:/Users/CGlab/Desktop/Earlandmark/Ear 3DFA-GCN/utils/pointnet2_ops_lib/build/temp.win-amd64-cpython-38/Release/pointnet2_ops/_ext-src/src/ball_query_gpu.obj	9a30f100415ea7e6
+19	10875	7957278617740058	C:/Users/CGlab/Desktop/Earlandmark/Ear 3DFA-GCN/utils/pointnet2_ops_lib/build/temp.win-amd64-cpython-38/Release/pointnet2_ops/_ext-src/src/group_points_gpu.obj	809abfeb98c9be73

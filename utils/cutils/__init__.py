@@ -1,18 +1,27 @@
+import os
+# [PATCH] Disable Ninja for Windows MSVC compatibility
+os.environ['USE_NINJA'] = '0'
+
 from pathlib import Path
 import torch
 from torch.autograd import Function
 from torch.utils.cpp_extension import load
 from torch.nn import functional as F
 from torch.cuda.amp import custom_fwd, custom_bwd
-import os
 
 path = Path(__file__).parent
 build_dir = path / "build"
 build_dir.mkdir(exist_ok=True)
 sources = [str(p) for p in path.glob("srcs/*.*") if p.suffix in [".cpp", ".cu"]]
 
-cutils = load("cutils_", sources=sources, extra_cflags=["-O3", "-mavx2", "-funroll-loops"], extra_cuda_cflags=["-Xptxas","-v"],
-              verbose=True, build_directory=build_dir)
+# [PATCH] Use Windows-friendly compiler flags (/O2 for optimization, /wd4624 to suppress warnings)
+cutils = load(
+    "cutils_", 
+    sources=sources, 
+    extra_cflags=['/O2', '/wd4624'], 
+    extra_cuda_cflags=['-O3'], 
+    verbose=False
+)
 
 def next_prime(x) -> int:
     r"""
@@ -46,7 +55,12 @@ def grid_subsampling(xyz: torch.Tensor, grid_size: float, hash_size: float=1.) -
     size = next_prime(size)
     table = torch.zeros((size,), dtype=torch.int64)
     storage = torch.empty((size * 3,), dtype=torch.int64)
-    indices = cutils.grid_subsampling(xyz, grid_size, table, storage)
+    
+    # Call C++ extension
+    cutils.grid_subsampling(xyz, grid_size, table, storage) 
+    
+    # Extract valid indices from hash table
+    indices = table[table > 0] - 1 
     return indices
 
 def grid_subsampling_test(xyz: torch.Tensor, grid_size: float, hash_size: float=1., pick=0) -> torch.Tensor:
@@ -67,7 +81,11 @@ def grid_subsampling_test(xyz: torch.Tensor, grid_size: float, hash_size: float=
     size = next_prime(size)
     table = torch.zeros((size,), dtype=torch.int64)
     storage = torch.empty((size * 4,), dtype=torch.int64)
-    indices = cutils.grid_subsampling_test(xyz, grid_size, table, storage, pick)
+    
+    # Call C++ extension
+    cutils.grid_subsampling_test(xyz, grid_size, table, storage, pick)
+    
+    indices = table[table > 0] - 1
     return indices
 
 class KDTree():

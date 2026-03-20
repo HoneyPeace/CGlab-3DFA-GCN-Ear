@@ -16,7 +16,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 from tqdm import tqdm
-
+from DeepLA_model import DeepLA_Wrapper
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
@@ -176,7 +176,14 @@ def train(args):
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
     # 6. 모델 및 옵티마이저 초기화 (FAMO 제거됨)
-    model = PAConv(args, args.landmark_num).to(device)
+    print(f"\n>>> [Model Init] Selected Backbone: {args.model}")
+    if args.model == 'PAConv':
+        model = PAConv(args, args.landmark_num).to(device)
+    elif args.model == 'DeepLA':
+        model = DeepLA_Wrapper(args, args.landmark_num).to(device)
+    else:
+        raise ValueError(f"Unknown model: {args.model}")
+        
     model.apply(weight_init)
     
     if args.loss == 'adaptive_wing': criterion = AdaptiveWingLoss()
