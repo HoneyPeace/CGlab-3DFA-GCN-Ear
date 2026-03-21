@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss
+@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss + Two-Stage Training
 '''
 
 import os
@@ -20,7 +20,6 @@ from DeepLA_model import DeepLA_Wrapper
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-# [수정] loss.py에서 dynamic_focal_l1_loss를 임포트합니다.
 from loss import AdaptiveWingLoss, get_differentiable_coords, compute_point_to_plane_loss, compute_structural_loss, dynamic_focal_l1_loss
 from util import main_sample
 from PAConv_model import PAConv
@@ -171,11 +170,10 @@ def train(args):
     process_data_storage(test_dataset, "test", paths)
 
     train_loader = DataLoader(train_dataset, num_workers=0, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.test_batch_size, shuffle=False, drop_last=False)
+    test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.test_batch_size, shuffle=True, drop_last=False)
     
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
-    # 6. 모델 및 옵티마이저 초기화 (FAMO 제거됨)
     print(f"\n>>> [Model Init] Selected Backbone: {args.model}")
     if args.model == 'PAConv':
         model = PAConv(args, args.landmark_num).to(device)
@@ -197,7 +195,7 @@ def train(args):
     if args.scheduler == 'cos': scheduler = CosineAnnealingLR(opt, T_max=args.epochs)
     else: scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
-    print(f"\n=== [Phase 3] Start Training with RLW + Dynamic Focal-L1 Loss ===")
+    print(f"\n=== [Phase 3] Start Training with Curriculum Learning (Two-Stage) ===")
     
     opt.zero_grad() 
 
@@ -224,26 +222,27 @@ def train(args):
                 pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                
-                # =========================================================
-                # [수정] F.l1_loss를 Dynamic Focal-L1 Loss로 완벽 교체
-                # =========================================================
                 loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=2.0)
-                # =========================================================
-                
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
                 # =========================================================
-                # [적용] 거시적 밸런스 매니저: RLW (Random Loss Weighting)
+                # 🚀 [Two-Stage Training] 커리큘럼 학습 (기울기 간섭 방지)
                 # =========================================================
-                weights = torch.rand(4).to(device)
-                weights = weights / weights.sum()
+                stage1_epochs = args.epochs // 5  # 전체 에폭의 20% (예: 500이면 100)
                 
-                total_loss = (weights[0] * loss_heatmap + 
-                              weights[1] * loss_coord + 
-                              weights[2] * loss_surface + 
-                              weights[3] * loss_struct)
+                if epoch < stage1_epochs:
+                    # [Stage 1] 오직 히트맵 형성에만 100% 집중
+                    weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
+                    total_loss = loss_heatmap
+                else:
+                    # [Stage 2] 히트맵을 고정하고 나머지 미세조정
+                    weights = torch.rand(4).to(device)
+                    weights = weights / weights.sum()
+                    total_loss = (0.05 * loss_heatmap + 
+                                  weights[1] * loss_coord + 
+                                  weights[2] * loss_surface + 
+                                  weights[3] * loss_struct)
                 # =========================================================
                 
                 loss = total_loss / accum_steps
@@ -253,7 +252,6 @@ def train(args):
                     opt.step()
                     opt.zero_grad() 
 
-                # mm 변환 시, 로스값 자체는 왜곡되어 있으므로 별도의 L1 거리로 mm 오차를 추적합니다.
                 with torch.no_grad():
                     true_l1 = F.l1_loss(pred_coords, augmented_landmark).item()
                     mm_error = true_l1 * avg_m
@@ -275,13 +273,14 @@ def train(args):
         t_mm   = train_mm / len(train_loader)
 
         # -------------------------------------------------------------
-        # [VALIDATION] 평가 루프
+        # [VALIDATION] 평가 루프 (랜덤 30개 샘플링)
         # -------------------------------------------------------------
         model.eval()
         val_loss, val_hm, val_crd, val_srf, val_str, val_mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        val_sample_count = 0  # 평가한 샘플 개수를 세기 위한 변수
         
         with torch.no_grad():
-            with tqdm(enumerate(test_loader), total=len(test_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Valid]", unit="batch", leave=False) as vepoch:
+            with tqdm(enumerate(test_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Valid]", leave=False) as vepoch:
                 for i, (point, landmark, seg) in vepoch:
                     point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
@@ -298,33 +297,47 @@ def train(args):
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                    
-                    # [수정] 검증 루프에서도 Dynamic Focal-L1 적용
                     loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=2.0)
-                    
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     
-                    # mm 오차는 순수 L1 거리로 계산 (지표 왜곡 방지)
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
-                    # 검증 시 4개 로스 균등 비율 고정
-                    total_loss = 0.25 * (loss_heatmap + loss_coord + loss_surface + loss_struct)
+                    # =========================================================
+                    # 🚀 [Two-Stage Training] 검증 루프 (연구자님 제안: 25%씩 공평 분배)
+                    # =========================================================
+                    stage1_epochs = args.epochs // 5
+                    
+                    if epoch < stage1_epochs:
+                        total_loss = loss_heatmap
+                    else:
+                        # 0.25 (25%) 씩 동등하게 나눠먹기!
+                        total_loss = 0.25 * loss_heatmap + 0.25 * loss_coord + 0.25 * loss_surface + 0.25 * loss_struct
+                    # =========================================================
 
-                    val_loss += total_loss.item()
+                    val_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
                     val_hm   += loss_heatmap.item()
                     val_crd  += loss_coord.item()
                     val_srf  += loss_surface.item()
                     val_str  += loss_struct.item()
                     val_mm   += mm_error
+                    
+                    # 현재까지 평가한 샘플 개수 누적
+                    val_sample_count += point.size(0)
+                    
+                    # 🚀 30개가 넘으면 이번 에폭 검증은 여기서 즉시 종료!
+                    if val_sample_count >= 30:
+                        break
 
-        v_loss = val_loss / len(test_loader)
-        v_hm   = val_hm / len(test_loader)
-        v_crd  = val_crd / len(test_loader)
-        v_srf  = val_srf / len(test_loader)
-        v_str  = val_str / len(test_loader) 
-        v_mm   = val_mm / len(test_loader)
+        # 전체 test_loader 길이가 아닌, 실제로 돈 배치 개수(i + 1)로 나누어 평균 계산
+        num_val_batches = i + 1
+        v_loss = val_loss / num_val_batches
+        v_hm   = val_hm / num_val_batches
+        v_crd  = val_crd / num_val_batches
+        v_srf  = val_srf / num_val_batches
+        v_str  = val_str / num_val_batches 
+        v_mm   = val_mm / num_val_batches
 
         # -------------------------------------------------------------
         # [PRINT] 결과 및 가중치 출력 

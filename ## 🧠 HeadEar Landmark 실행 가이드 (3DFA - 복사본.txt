@@ -24,6 +24,7 @@ pip install numpy scikit-learn matplotlib h5py plyfile
 ``'
 conda activate EarLandMarking_CGLAB
 conda activate EarLandMarking_DeepLA 
+
 cd C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN
 ```
 
@@ -37,7 +38,7 @@ cd C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN
 ```
 
 python train.py --train_dataset_name train --test_dataset_name test --sigma 2.5 --num_points 4096 --batch_size 16 --accumulation_steps 2 --dataset_seed 1 --sample_way FPS --need_resample False --k_softargmax 10 --plane_knn 5 --exp_name Ear_3loss --user_tag "argmax10_plane5" 
-
+python train.py --train_dataset_name train --test_dataset_name test --sigma 2.5 --num_points 4096 --batch_size 16 --accumulation_steps 2 --dataset_seed 1 --epochs 250 --sample_way FPS --need_resample True --k_softargmax 10 --plane_knn 5 --exp_name DeepLA_test --user_tag "정렬_Focal2.0_epoch250"
 ```
 
 ---
@@ -46,7 +47,8 @@ python train.py --train_dataset_name train --test_dataset_name test --sigma 2.5 
 
 ```
 현재
-python eval_all.py --exp_name Ear_3loss --run_id 1 --sigma 2.5 --num_points 4096 --Eval_DataType test --regression_point_num 10 --batch_size 16 --accumulation_steps 2 --train_len 229 --k_softargmax 10 --user_tag "argmax10_plane5" 
+python eval_all.py --model PAConv --exp_name Ear_4loss --run_id 1 --sigma 2.5 --num_points 4096 --Eval_DataType test --batch_size 16 --accumulation_steps 2 --train_len 229 --k_softargmax 10 --landmark_num 40 --user_tag "히트맵학습xRWL_Focal1.0_rawepoch500" --model_epoch model_epoch_500.t7
+python eval_all.py --model DeepLA --exp_name DeepLA_test --run_id 1 --sigma 2.5 --num_points 4096 --Eval_DataType test --batch_size 16 --accumulation_steps 2 --train_len 229 --k_softargmax 10 --landmark_num 40 --user_tag "정렬_Focal1.0" --model_epoch model_epoch_500.t7 
 
 ```
 
