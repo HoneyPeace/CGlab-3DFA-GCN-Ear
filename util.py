@@ -1,7 +1,7 @@
 '''
-@Author: Yuan Wang (Modified by Researcher 2)
+@Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: util.py
-@Description: Includes Partition Logic, Name Saving & FPS Progress Bar.
+@Description: Includes Partition Logic, Name Saving & FPS Progress Bar (C++ Accelerated).
 '''
 
 import os 
@@ -17,6 +17,23 @@ from sklearn.neighbors import NearestNeighbors
 from tqdm import tqdm
 from functools import reduce
 
+# ==========================================================
+# 🚀 데이터 전처리용 초고속 C++ FPS 커널 로드
+# ==========================================================
+import sys
+from pathlib import Path
+
+current_dir = Path(__file__).resolve().parent
+sys.path.append(str(current_dir / "utils" / "pointnet2_ops_lib"))
+
+try:
+    from pointnet2_ops.pointnet2_utils import furthest_point_sample as fps_cpp
+    USE_CPP_FPS_UTIL = True
+    print(">>> [SUCCESS] 🚀 util.py에서 C++ 초고속 FPS 커널을 성공적으로 로드했습니다!")
+except ImportError:
+    USE_CPP_FPS_UTIL = False
+    print(">>> [WARNING] ⚠️ util.py에서 C++ FPS 커널을 찾지 못했습니다. 기존 방식으로 진행합니다.")
+# ==========================================================
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -183,7 +200,7 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
     return []
 
 # -----------------------------------------------------------------------------
-# Core Processing (Safety Check 없음 - 유지)
+# Core Processing
 # -----------------------------------------------------------------------------
 def Gaussian_Heatmap(Distance, sigma):
     D2 = Distance * Distance
@@ -222,26 +239,34 @@ def get_dists(points1, points2):
     dists = torch.where(dists < 0, torch.ones_like(dists) * 1e-7, dists)
     return torch.sqrt(dists).float()
 
+# ==========================================================
+# [수정됨] C++ 커널을 연동한 초고속 FPS 래퍼 함수
+# ==========================================================
 def fps(xyz, M):
-    device = xyz.device
-    B, N, C = xyz.shape
-    centroids = torch.zeros(size=(B, M), dtype=torch.long).to(device)
-    dists = torch.ones(B, N).to(device) * 1e5
-    inds = torch.randint(0, N, size=(B, ), dtype=torch.long).to(device)
-    batchlists = torch.arange(0, B, dtype=torch.long).to(device)
-    for i in range(M):
-        centroids[:, i] = inds
-        cur_point = xyz[batchlists, inds, :] 
-        cur_dist = torch.squeeze(get_dists(torch.unsqueeze(cur_point, 1), xyz), dim=1)
-        dists[cur_dist < dists] = cur_dist[cur_dist < dists]
-        inds = torch.max(dists, dim=1)[1]
-    return centroids
+    if USE_CPP_FPS_UTIL and xyz.is_cuda:
+        # C++ 커널 활용 (0.001초 컷)
+        xyz = xyz.contiguous()
+        idx = fps_cpp(xyz, M)
+        return idx.long()
+    else:
+        # 기존 PyTorch 반복문 로직 (안전장치용 백업)
+        device = xyz.device
+        B, N, C = xyz.shape
+        centroids = torch.zeros(size=(B, M), dtype=torch.long).to(device)
+        dists = torch.ones(B, N).to(device) * 1e5
+        inds = torch.randint(0, N, size=(B, ), dtype=torch.long).to(device)
+        batchlists = torch.arange(0, B, dtype=torch.long).to(device)
+        for i in range(M):
+            centroids[:, i] = inds
+            cur_point = xyz[batchlists, inds, :] 
+            cur_dist = torch.squeeze(get_dists(torch.unsqueeze(cur_point, 1), xyz), dim=1)
+            dists[cur_dist < dists] = cur_dist[cur_dist < dists]
+            inds = torch.max(dists, dim=1)[1]
+        return centroids
 
 def random_sample(shape_all, Heat_data_all, num_points, rand_seed, sample_way, dataset, data_root):    
     print('   Start sampling...')
     if sample_way == 'FPS':
-        # [수정] tqdm 게이지바 추가
-        # 리스트 컴프리헨션을 tqdm으로 감싸서 진행상황 표시
         FPS_matrix = [fps(torch.from_numpy(shape_all[i]).float().unsqueeze(0).to(device), num_points)
                       for i in tqdm(range(len(Heat_data_all)), desc="   FPS Sampling", unit="shape")]
 

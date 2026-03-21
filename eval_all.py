@@ -1,7 +1,7 @@
 '''
-@Author: Yuan Wang (Modified by Researcher 2)
-@File: eval_all.py
-@Description: Evaluation script with Quantitative Heatmap Metrics (Per-Landmark) & Inference Time.
+@Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
+@File: eval_DeepLA.py
+@Description: Evaluation script with Quantitative Heatmap Metrics (Per-Landmark) & Inference Time for DeepLA-Net.
 '''
 
 from __future__ import print_function, division
@@ -18,7 +18,12 @@ from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
-from PAConv_model import PAConv
+
+# ==========================================
+# [수정됨] PAConv 대신 DeepLA_Wrapper를 불러옵니다.
+from DeepLA_model import DeepLA_Wrapper
+# ==========================================
+
 from loss import get_differentiable_coords
 
 matplotlib.use('Agg')
@@ -131,9 +136,22 @@ test_dataset = TensorDataset(
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # -----------------------------------------------------------------------------
-# 3. 모델 로드
+# 3. 모델 로드 (args.model에 따른 자동 스위칭)
 # -----------------------------------------------------------------------------
-model = PAConv(args, args.landmark_num).to(device)
+if args.model == 'PAConv':
+    from PAConv_model import PAConv
+    model = PAConv(args, args.landmark_num).to(device)
+    print(">>> [INFO] 🧠 PAConv 백본을 로드합니다.")
+    
+elif args.model == 'DeepLA':
+    from DeepLA_model import DeepLA_Wrapper
+    model = DeepLA_Wrapper(args, args.landmark_num).to(device)
+    print(">>> [INFO] 🚀 DeepLA-Net 백본을 로드합니다.")
+    
+else:
+    print(f"Error: 지원하지 않는 모델입니다 -> {args.model}")
+    sys.exit(1)
+
 model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval()
 
@@ -222,7 +240,7 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         per_landmark_iou_list.append(iou_k.cpu().numpy()) # (1, K)
         # -----------------------------------------------------------
 
-        # [Visualization] 40개마다 저장
+        # [Visualization] 40개마다 히트맵 시각화 저장
         if idx % 40 == 0:
             points_np = point[0].cpu().numpy()
             heatmap_np = pred_heatmap[0].cpu().numpy()
@@ -242,10 +260,11 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         me_list.append(me)
         per_landmark_me_list.append(dists)
         
+        # 랜드마크 좌표 ASC 파일 저장
         np.savetxt(os.path.join(asc_save_dir, f"pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
 # -----------------------------------------------------------------------------
-# 5. 결과 집계 및 저장
+# 5. 결과 집계 및 텍스트 파일 저장
 # -----------------------------------------------------------------------------
 if len(per_landmark_me_list) > 0:
     # 1. ME Stats
@@ -307,7 +326,7 @@ with open(result_txt_path, "w") as f:
     f.write(f"------------------------------------------\n")
     f.write(f" [Heatmap Quantitative Evaluation (Global)]\n")
     f.write(f" Cosine Sim : {avg_cos_sim:.2f} % (Distribution Match)\n")
-    f.write(f" mIoU       : {avg_iou:.2f} % (Region Overlap @ 0.1)\n") # [수정됨] IoU Score -> mIoU
+    f.write(f" mIoU       : {avg_iou:.2f} % (Region Overlap @ 0.1)\n")
     f.write(f"==========================================\n")
     
     if len(per_landmark_me_list) > 0:
@@ -327,7 +346,7 @@ with open(result_txt_path, "w") as f:
             f.write(f"    LM {i+1:02d}: {lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f} %\n")
 
         # 3. Per-landmark mIoU
-        f.write("\n>>> Per-landmark mIoU (Mean ± Std) @ Th=0.1:\n") # [수정됨] IoU -> mIoU
+        f.write("\n>>> Per-landmark mIoU (Mean ± Std) @ Th=0.1:\n")
         for i in range(lm_iou_means.shape[0]):
             f.write(f"    LM {i+1:02d}: {lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f} %\n")
 
@@ -337,5 +356,5 @@ with open(result_txt_path, "w") as f:
 print(f"\n[Done] Results saved to: {run_root}")
 print(f"      Filename: {filename}")
 print(f"Average ME: {average_me:.4f} ± {std_me:.4f}")
-print(f"Cosine Sim: {avg_cos_sim:.2f}% | mIoU: {avg_iou:.2f}%") # [수정됨] IoU -> mIoU
+print(f"Cosine Sim: {avg_cos_sim:.2f}% | mIoU: {avg_iou:.2f}%")
 print(f"Avg Time  : {avg_time:.2f} ms")

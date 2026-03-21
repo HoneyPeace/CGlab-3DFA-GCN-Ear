@@ -21,7 +21,10 @@ def index_points(points, idx):
     return points[batch_indices, idx, :]
 
 def checkpoint(function, *args, **kwargs):
-    return torch_checkpoint(function, *args, use_reentrant=False, **kwargs)
+    try:
+        return torch_checkpoint(function, *args, use_reentrant=False, **kwargs)
+    except ValueError:
+        return torch_checkpoint(function, *args, **kwargs)
 
 class VFR(nn.Module):
     def __init__(self, in_dim, out_dim, bn_momentum, init=0.):

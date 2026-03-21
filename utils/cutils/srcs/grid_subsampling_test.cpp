@@ -5,83 +5,87 @@
 #include <cstdint>
 
 #ifdef _MSC_VER
-typedef unsigned __int64 uint128_t_compat; 
+#include <intrin.h>
 #else
 typedef __uint128_t uint128_t_compat;    
 #endif
 
-struct Cell
-{
-    uint64_t key;
-    uint32_t idx;
-    uint32_t weight;
-    uint32_t running_weight;
-    uint32_t count;
-    Cell *next;
-};
-
-struct SlowHash
-{
-    Cell **table;
-    Cell *storage;
-    uint64_t size;
-    uint64_t multiplier;
-    uint64_t count;
-    uint32_t pick;
-    std::mt19937 rand;
-
-    SlowHash(Cell **table, Cell *storage, const uint64_t size, const uint32_t pick)
-        : table(table), storage(storage), size(size), multiplier(~0ull / size + 1), count(0), pick(pick)
+namespace {
+    struct Cell
     {
-        rand.seed(*(uint32_t*)torch::randint(0, std::numeric_limits<uint32_t>::max(), 1, torch::kInt64).data_ptr());
-    }
+        uint64_t key;
+        uint32_t idx;
+        uint32_t weight;
+        uint32_t running_weight;
+        uint32_t count;
+        Cell *next;
+    };
 
-    void insert(const uint64_t key, const uint32_t idx)
+    struct SlowHash
     {
-        uint64_t slow_idx;
-#ifdef _MSC_VER
-        slow_idx = (uint64_t)((key * multiplier) % size);
-#else
-        slow_idx = (uint64_t)((uint128_t_compat)key * multiplier * size >> 64);
-#endif
-        Cell **cell = &table[slow_idx];
-        for (; *cell && (*cell)->key != key; cell = &(*cell)->next);
-        if (*cell == nullptr)
+        Cell **table;
+        Cell *storage;
+        uint64_t size;
+        uint64_t multiplier;
+        uint64_t count;
+        uint32_t pick;
+        std::mt19937 rand;
+
+        SlowHash(Cell **table, Cell *storage, const uint64_t size, const uint32_t pick)
+            : table(table), storage(storage), size(size), multiplier(~0ull / size + 1), count(0), pick(pick)
         {
-            *cell = storage + count;
-            ++count;
-            (*cell)->next = nullptr;
-            (*cell)->key = key;
-            (*cell)->weight = (*cell)->running_weight = rand();
-            (*cell)->count = 0;
-            (*cell)->idx = idx;
-            if (pick == 0)  (*cell)->weight = std::numeric_limits<uint32_t>::max();
-        } else {
-            if (++(*cell)->count == pick)
-            {
-                (*cell)->weight = std::numeric_limits<uint32_t>::max();
-                (*cell)->idx = idx;
-                return;
-            }
-            uint32_t new_weight = (*cell)->running_weight * (uint32_t)31 + (uint32_t)1857864947;
-            if (new_weight > (*cell)->weight)
-            {
-                (*cell)->weight = new_weight;
-                (*cell)->idx = idx;
-            }
-            (*cell)->running_weight = new_weight;
+            rand.seed(*(uint32_t*)torch::randint(0, std::numeric_limits<uint32_t>::max(), 1, torch::kInt64).data_ptr());
         }
-    }
 
-    torch::Tensor finalize()
-    {
-        auto indices = torch::empty(count, torch::kInt64);
-        uint64_t *pindices = (uint64_t*)indices.data_ptr();
-        for (uint64_t i = 0; i < count; ++i)
-            pindices[i] = storage[i].idx;
-        return indices;
-    }
-};
+        void insert(const uint64_t key, const uint32_t idx)
+        {
+            uint64_t slow_idx;
+#ifdef _MSC_VER
+            uint64_t high_bits;
+            _umul128((uint64_t)(key * multiplier), size, &high_bits);
+            slow_idx = high_bits;
+#else
+            slow_idx = (uint64_t)((uint128_t_compat)(key * multiplier) * size >> 64);
+#endif
+            Cell **cell = &table[slow_idx];
+            for (; *cell && (*cell)->key != key; cell = &(*cell)->next);
+            if (*cell == nullptr)
+            {
+                *cell = storage + count;
+                ++count;
+                (*cell)->next = nullptr;
+                (*cell)->key = key;
+                (*cell)->weight = (*cell)->running_weight = rand();
+                (*cell)->count = 0;
+                (*cell)->idx = idx;
+                if (pick == 0)  (*cell)->weight = std::numeric_limits<uint32_t>::max();
+            } else {
+                if (++(*cell)->count == pick)
+                {
+                    (*cell)->weight = std::numeric_limits<uint32_t>::max();
+                    (*cell)->idx = idx;
+                    return;
+                }
+                uint32_t new_weight = (*cell)->running_weight * (uint32_t)31 + (uint32_t)1857864947;
+                if (new_weight > (*cell)->weight)
+                {
+                    (*cell)->weight = new_weight;
+                    (*cell)->idx = idx;
+                }
+                (*cell)->running_weight = new_weight;
+            }
+        }
+
+        torch::Tensor finalize()
+        {
+            auto indices = torch::empty(count, torch::kInt64);
+            uint64_t *pindices = (uint64_t*)indices.data_ptr();
+            for (uint64_t i = 0; i < count; ++i)
+                pindices[i] = storage[i].idx;
+            return indices;
+        }
+    };
+}
 
 torch::Tensor grid_subsampling_test(const torch::Tensor &pc_, const float grid_size_, torch::Tensor &hash_table, torch::Tensor &hash_storage, uint32_t pick)
 {

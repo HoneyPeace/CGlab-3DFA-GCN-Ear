@@ -23,6 +23,7 @@ pip install numpy scikit-learn matplotlib h5py plyfile
 
 ``'
 conda activate EarLandMarking_CGLAB
+conda activate EarLandMarking_DeepLA 
 cd C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN
 ```
 
