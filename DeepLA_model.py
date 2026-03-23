@@ -73,7 +73,7 @@ class DeepLA_Wrapper(nn.Module):
         # [자동화] 층 수에 따라 Gradient Checkpointing 자동 판단!
         total_depth = sum(dl_args.depths)
         if total_depth >= 120:
-            dl_args.use_cp = False
+            dl_args.use_cp = True
             print(f">>> [INFO] 120층 이상({total_depth}층) 감지! OOM 방지를 위해 Gradient Checkpointing(use_cp)을 자동 활성화합니다.")
         else:
             dl_args.use_cp = False
