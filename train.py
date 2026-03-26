@@ -222,7 +222,7 @@ def train(args):
                 pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=2.0)
+                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=1.0)
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
@@ -297,7 +297,7 @@ def train(args):
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=2.0)
+                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=1.0)
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     
