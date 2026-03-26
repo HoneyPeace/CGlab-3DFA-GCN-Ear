@@ -94,3 +94,6 @@ parser.add_argument('--alpha_init', type=float, default=0.5, help='Initial weigh
 parser.add_argument('--beta_init', type=float, default=0.1, help='Initial weight for Point-to-Plane Surface Loss')
 parser.add_argument('--k_softargmax', type=int, default=10, help='Top-K points used for Soft-argmax')
 parser.add_argument('--plane_knn', type=int, default=5, help='K points for Local Tangent Plane estimation')
+
+parser.add_argument('--focal_gamma', type=float, default=2.0, help='Gamma for dynamic focal loss')
+parser.add_argument('--focal_max', type=float, default=5.0, help='Max clamp for focal weights')

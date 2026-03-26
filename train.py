@@ -1,7 +1,7 @@
 '''
-@Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
+@Author: Yuan Wang (Modified by Pyeong-hwa Park & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss + Two-Stage Training
+@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss + Two-Stage Training + Optuna Pruning
 '''
 
 import os
@@ -9,6 +9,7 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt 
 from mpl_toolkits.mplot3d import Axes3D
+import optuna  # 🚀 Optuna 튜닝 라이브러리 추가
 
 import torch
 import torch.nn.functional as F 
@@ -127,7 +128,8 @@ def process_data_storage(dataset, prefix, paths):
     else:
         print(f"   [{prefix.upper()}] GT Heatmap generation skipped (Requested).")
 
-def train(args):
+# 🚀 [수정됨] Optuna 연동을 위해 trial 파라미터 추가
+def train(args, trial=None):
     accum_steps = args.accumulation_steps
     
     if not args.test_dataset_name or (args.train_dataset_name == args.test_dataset_name):
@@ -195,9 +197,19 @@ def train(args):
     if args.scheduler == 'cos': scheduler = CosineAnnealingLR(opt, T_max=args.epochs)
     else: scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
-    print(f"\n=== [Phase 3] Start Training with Curriculum Learning (Two-Stage) ===")
+    # 🚀 [수정됨] Optuna 파라미터 안전하게 받아오기
+    focal_gamma = getattr(args, 'focal_gamma', 2.0)
+    focal_max = getattr(args, 'focal_max', 5.0)
+
+    # 🚀 [수정됨] 현재 모드 표시 로그 추가
+    if trial is not None:
+        print(f"\n=== [Phase 3] Start Optuna TUNING MODE (Gamma:{focal_gamma:.2f}, Max:{focal_max:.2f}) ===")
+        print(f">>> (선학습 OFF: 1 Epoch부터 4개 로스가 모두 개입합니다!)")
+    else:
+        print(f"\n=== [Phase 3] Start NORMAL TRAINING MODE (Two-Stage Curriculum) ===")
     
     opt.zero_grad() 
+    best_v_mm = float('inf') # 🚀 [수정됨] 최고 성능 기록용 변수
 
     for epoch in range(args.epochs):
         model.train()
@@ -222,27 +234,37 @@ def train(args):
                 pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=1.0)
+                
+                # 🚀 [수정됨] Optuna 파라미터 연동
+                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=focal_gamma, max_weight=focal_max)
+                
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
                 # =========================================================
-                # 🚀 [Two-Stage Training] 커리큘럼 학습 (기울기 간섭 방지)
+                # 🚀 [수정됨] 모드에 따른 로스 결합 방식 스위치
                 # =========================================================
-                stage1_epochs = args.epochs // 5  # 전체 에폭의 20% (예: 500이면 100)
-                
-                if epoch < stage1_epochs:
-                    # [Stage 1] 오직 히트맵 형성에만 100% 집중
-                    weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
-                    total_loss = loss_heatmap
-                else:
-                    # [Stage 2] 히트맵을 고정하고 나머지 미세조정
+                if trial is not None:
+                    # [튜닝 모드] 선학습 끄고 4개 로스를 처음부터 무조건 다 섞음
                     weights = torch.rand(4).to(device)
                     weights = weights / weights.sum()
-                    total_loss = (0.05 * loss_heatmap + 
+                    total_loss = (weights[0] * loss_heatmap + 
                                   weights[1] * loss_coord + 
                                   weights[2] * loss_surface + 
                                   weights[3] * loss_struct)
+                else:
+                    # [일반 모드] 기존 Two-Stage 선학습 유지
+                    stage1_epochs = args.epochs // 5  # 전체 에폭의 20%
+                    if epoch < stage1_epochs:
+                        weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
+                        total_loss = loss_heatmap
+                    else:
+                        weights = torch.rand(4).to(device)
+                        weights = weights / weights.sum()
+                        total_loss = (0.05 * loss_heatmap + 
+                                      weights[1] * loss_coord + 
+                                      weights[2] * loss_surface + 
+                                      weights[3] * loss_struct)
                 # =========================================================
                 
                 loss = total_loss / accum_steps
@@ -277,7 +299,7 @@ def train(args):
         # -------------------------------------------------------------
         model.eval()
         val_loss, val_hm, val_crd, val_srf, val_str, val_mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        val_sample_count = 0  # 평가한 샘플 개수를 세기 위한 변수
+        val_sample_count = 0  
         
         with torch.no_grad():
             with tqdm(enumerate(test_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Valid]", leave=False) as vepoch:
@@ -297,24 +319,25 @@ def train(args):
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=1.0)
+                    
+                    # 🚀 [수정됨] Validation 파라미터 연동
+                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=focal_gamma, max_weight=focal_max)
+                    
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
-                    # =========================================================
-                    # 🚀 [Two-Stage Training] 검증 루프 (연구자님 제안: 25%씩 공평 분배)
-                    # =========================================================
-                    stage1_epochs = args.epochs // 5
-                    
-                    if epoch < stage1_epochs:
-                        total_loss = loss_heatmap
-                    else:
-                        # 0.25 (25%) 씩 동등하게 나눠먹기!
+                    # 🚀 [수정됨] Validation 모드에 따른 로스 스위치
+                    if trial is not None:
                         total_loss = 0.25 * loss_heatmap + 0.25 * loss_coord + 0.25 * loss_surface + 0.25 * loss_struct
-                    # =========================================================
+                    else:
+                        stage1_epochs = args.epochs // 5
+                        if epoch < stage1_epochs:
+                            total_loss = loss_heatmap
+                        else:
+                            total_loss = 0.25 * loss_heatmap + 0.25 * loss_coord + 0.25 * loss_surface + 0.25 * loss_struct
 
                     val_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
                     val_hm   += loss_heatmap.item()
@@ -323,14 +346,10 @@ def train(args):
                     val_str  += loss_struct.item()
                     val_mm   += mm_error
                     
-                    # 현재까지 평가한 샘플 개수 누적
                     val_sample_count += point.size(0)
-                    
-                    # 🚀 30개가 넘으면 이번 에폭 검증은 여기서 즉시 종료!
                     if val_sample_count >= 30:
                         break
 
-        # 전체 test_loader 길이가 아닌, 실제로 돈 배치 개수(i + 1)로 나누어 평균 계산
         num_val_batches = i + 1
         v_loss = val_loss / num_val_batches
         v_hm   = val_hm / num_val_batches
@@ -339,17 +358,31 @@ def train(args):
         v_str  = val_str / num_val_batches 
         v_mm   = val_mm / num_val_batches
 
+        # 🚀 [수정됨] 베스트 성능 갱신 로직
+        if v_mm < best_v_mm:
+            best_v_mm = v_mm
+
         # -------------------------------------------------------------
         # [PRINT] 결과 및 가중치 출력 
         # -------------------------------------------------------------
         print(f" [Train] 전체 Loss: {t_loss:.4f} | HM: {t_hm:.4f} | Crd: {t_crd:.4f} | Srf: {t_srf:.4f} | Struct: {t_str:.4f} | mm: {t_mm:.2f}")
         print(f" [Val]   전체 Loss: {v_loss:.4f} | HM: {v_hm:.4f} | Crd: {v_crd:.4f} | Srf: {v_srf:.4f} | Struct: {v_str:.4f} | mm: {v_mm:.2f}")
         
-        # RLW 마지막 배치 가중치 확인
         w_np = weights.detach().cpu().numpy()
         print(f" [RLW Weights (Last Batch)] HM: {w_np[0]:.4f} | Crd: {w_np[1]:.4f} | Srf: {w_np[2]:.4f} | Struct: {w_np[3]:.4f}\n")
 
-        if (epoch + 1) % 5 == 0:
+        # ==========================================
+        # 🚨 [수정됨] Optuna Pruning (조기 종료) 로직 🚨
+        # ==========================================
+        if trial is not None:
+            trial.report(v_mm, epoch) 
+            if trial.should_prune():
+                print(f"✂️ [Trial Pruned] Optuna: 이 파라미터 조합은 가망이 없어 조기 종료합니다. (Epoch {epoch+1})")
+                raise optuna.exceptions.TrialPruned() 
+        # ==========================================
+
+        # 🚀 [수정됨] 모델 저장은 일반 학습(trial is None)일 때만 하도록 하여 튜닝 시 용량 터짐 방지
+        if trial is None and (epoch + 1) % 5 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
             save_path = os.path.join(paths['models'], filename)
             torch.save(model.state_dict(), save_path)
@@ -357,6 +390,7 @@ def train(args):
         scheduler.step()
     
     print(f"\n=== Training Finished. Results at: {paths['root']} ===\n")
+    return best_v_mm # 🚀 [수정됨] Optuna 최종 점수 반환
 
 if __name__ == "__main__":
     args = parser.parse_args()

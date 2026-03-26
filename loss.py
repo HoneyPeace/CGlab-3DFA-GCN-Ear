@@ -108,7 +108,7 @@ def compute_structural_loss(pred_coords, gt_coords):
     
     return loss_struct
 
-def dynamic_focal_l1_loss(pred_coords, gt_coords, gamma=2.0):
+def dynamic_focal_l1_loss(pred_coords, gt_coords, gamma=2.0, max_weight=5.0):
     """
     [CVPR 2022+ 트렌드] 배치의 평균 오차를 동적 기준선으로 삼아,
     평균보다 못 맞추는 악성 랜드마크에 기하급수적 패널티를 부여하는 로스
@@ -117,15 +117,14 @@ def dynamic_focal_l1_loss(pred_coords, gt_coords, gamma=2.0):
     l1_errors = torch.norm(pred_coords - gt_coords, p=1, dim=-1)
     
     # 2. 현재 배치의 '평균 오차'를 동적 기준선(Dynamic Threshold)으로 설정
-    # detach()를 붙여서 기준선 자체로는 역전파가 흐르지 않게 고정
     dynamic_threshold = l1_errors.mean().detach() + 1e-5
     
     # 3. 평균 대비 얼마나 더 틀렸는지 비율을 구하고, gamma 제곱으로 휘어버림 (Focal 효과)
-    # 에러가 평균보다 크면(비율 > 1) 패널티 폭발, 평균보다 작으면(비율 < 1) 패널티 축소
     focal_weights = torch.pow(l1_errors.detach() / dynamic_threshold, gamma)
     
-    # 4. 가중치가 너무 폭발해서 NaN 에러가 나는 것을 방지 (최대 5배까지만 허용)
-    focal_weights = torch.clamp(focal_weights, min=0.1, max=5.0)
+    # 👇👇👇 [숫자 5.0 대신 max_weight 변수로 변경] 👇👇👇
+    # 4. 가중치가 너무 폭발해서 NaN 에러가 나는 것을 방지 (focal_max 적용)
+    focal_weights = torch.clamp(focal_weights, min=0.1, max=max_weight)
     
     # 5. 기존 L1 오차에 동적 가중치 곱하기
     weighted_loss = (l1_errors * focal_weights).mean()
