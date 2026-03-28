@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from deepla_semseg import DeepLA_semseg
+from deeppa_semseg import DeepPA_semseg
 
 import sys
 from pathlib import Path
@@ -78,38 +78,26 @@ class DeepPA_Wrapper(nn.Module):
         
         self.k = dl_args.ks[0]
         self.stage_count = len(dl_args.depths)
-        self.model = DeepLA_semseg(dl_args)
+        
+        # 🔥 [수정됨] 껍데기 믹서기 삭제! 오직 DeepPA_semseg 심장부만 장착!
+        self.model = DeepPA_semseg(dl_args)
 
-        in_channels = 3 + dl_args.num_classes
-        self.prior_adapter = nn.Sequential(
-            nn.Conv1d(in_channels, 64, kernel_size=1),
-            nn.BatchNorm1d(64),
-            nn.GELU(),
-            nn.Conv1d(64, 3, kernel_size=1)
-        )
 
     def forward(self, x, prior_heatmap=None):
-        # 🔍 CCTV 1번
-        # print("    >> [DeepPA 내부] 1. 힌트 어댑터 융합 시작...")
         B, C, N = x.shape
         
-        if prior_heatmap is not None:
-            fused_input = torch.cat([x, prior_heatmap], dim=1)
-            enhanced_feature = self.prior_adapter(fused_input)
-        else:
-            enhanced_feature = x
-            
+        # 3D 좌표 기본 세팅
         xyz = x.permute(0, 2, 1).contiguous()
-        feature = enhanced_feature.permute(0, 2, 1).contiguous()  
+        feature = xyz  # 원본 3D 좌표 그대로 출발
         
+        # 🔥 [핵심 추가] PAConv 힌트도 DeepLA 내부 연산(B, N, C)에 맞게 형태를 돌려줌
+        if prior_heatmap is not None:
+            prior_heatmap = prior_heatmap.permute(0, 2, 1).contiguous()
+            
         device = x.device
         up_idx_list = []
         down_knn_list = []
         cur_xyz = xyz
-        
-        # 🔍 CCTV 2번 (GPU 파이프라인 정리)
-        # print("    >> [DeepPA 내부] 2. 융합 완료! FPS 다운샘플링 진입...")
-        torch.cuda.synchronize() 
         
         for d in range(self.stage_count):
             num_points = cur_xyz.shape[1]
@@ -128,10 +116,7 @@ class DeepPA_Wrapper(nn.Module):
             if d < self.stage_count - 1:
                 next_points = self.dl_args.ns[d+1]
                 
-                # 🔍 CCTV 3번 (가장 멈추기 쉬운 마의 구간)
-                # print(f"      - Stage {d} FPS 추출 시작 ({next_points}개)...")
                 down_idx = farthest_point_sample(cur_xyz, next_points)
-                # print(f"      - Stage {d} FPS 추출 통과 완료!")
                 
                 down_knn_list.append(down_idx)
                 
@@ -147,9 +132,8 @@ class DeepPA_Wrapper(nn.Module):
         down_knn_list = down_knn_list[::-1]
         indices = up_idx_list + down_knn_list
         
-        # 🔍 CCTV 4번
-        # print("    >> [DeepPA 내부] 3. 다운샘플링 완료! 메인 신경망 연산 시작...")
-        out = self.model(xyz, feature, indices)
+        # 🔥 [수정됨] 힌트를 매번 다운샘플링하기 위해 메인 두뇌(self.model)에 직접 쏴줍니다!
+        out = self.model(xyz, feature, indices, prior_heatmap=prior_heatmap)
         
         if isinstance(out, tuple):
             out = out[0]

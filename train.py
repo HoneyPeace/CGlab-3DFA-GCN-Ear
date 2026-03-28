@@ -279,7 +279,7 @@ def train(args):
                 else:
                     weights = torch.rand(4).to(device)
                     weights = weights / weights.sum()
-                    total_loss = (0.05 * loss_heatmap + 
+                    total_loss = (weights[0] * loss_heatmap + 
                                   weights[1] * loss_coord + 
                                   weights[2] * loss_surface + 
                                   weights[3] * loss_struct)
