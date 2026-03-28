@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + RLW (Random Loss Weighting) + Dynamic Focal-L1 Loss + Two-Stage Training
+@Description: Gradient Accumulation + Curriculum Learning + DeepPA Switching + Best Model Saving
 '''
 
 import os
@@ -16,14 +16,20 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
 from tqdm import tqdm
-from DeepLA_model import DeepLA_Wrapper
+
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
 from loss import AdaptiveWingLoss, get_differentiable_coords, compute_point_to_plane_loss, compute_structural_loss, dynamic_focal_l1_loss
 from util import main_sample
-from PAConv_model import PAConv
 from augmentations import normalize_data, PointcloudScaleAndTranslate
+
+# ==========================================
+# 🚀 모델 임포트 (3대장 모두 준비 완료)
+# ==========================================
+from PAConv_model import PAConv
+from DeepLA_model import DeepLA_Wrapper
+from DeepPA_model import DeepPA_Wrapper  
 
 # GPU 설정
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -115,18 +121,6 @@ def process_data_storage(dataset, prefix, paths):
     np.save(os.path.join(paths['npy_backup'], f"Heat_data_{prefix}.npy"), heatmap_arr)
     print(f"   [{prefix.upper()}] Backup Saved: {paths['npy_backup']}")
 
-    if prefix == 'test':
-        vis_save_dir = os.path.join(paths['gt_heatmap'], prefix)
-        os.makedirs(vis_save_dir, exist_ok=True)
-        print(f"   [{prefix.upper()}] Saving GT Heatmaps (Every 30th Sample)...")
-        for idx in tqdm(range(0, len(shape_arr), 30), desc=f"   Saving GT {prefix}"):
-            points_np = shape_arr[idx]
-            heatmap_np = heatmap_arr[idx].T
-            for lm_idx in range(heatmap_np.shape[0]):
-                save_multiview_heatmap(points_np, heatmap_np[lm_idx], vis_save_dir, idx, lm_idx, prefix)
-    else:
-        print(f"   [{prefix.upper()}] GT Heatmap generation skipped (Requested).")
-
 def train(args):
     accum_steps = args.accumulation_steps
     
@@ -175,10 +169,35 @@ def train(args):
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
     print(f"\n>>> [Model Init] Selected Backbone: {args.model}")
+    
+    # =========================================================
+    # 🧊 [신규] DeepPA 전용: 얼려진 PAConv Prior 모델 로드
+    # =========================================================
+    if args.model == 'DeepPA':
+        print(">>> [Prior Load] Loading Pre-trained PAConv (0.3mm SOTA)...")
+        paconv_prior = PAConv(args, args.landmark_num).to(device)
+        
+        # 🚨 평화님이 지정해주신 PAConv 폴더 절대 경로 (파일명은 본인 파일명에 맞게 수정하세요!)
+        best_paconv_path = os.path.join("..", "PAConv_model", "model_epoch_500.t7")
+        
+        if not os.path.exists(best_paconv_path):
+            raise FileNotFoundError(f"🚨 PAConv 모델 파일을 찾을 수 없습니다! 파일명을 확인해주세요: {best_paconv_path}")
+            
+        paconv_prior.load_state_dict(torch.load(best_paconv_path))
+        paconv_prior.eval() # 평가 모드 고정
+        for param in paconv_prior.parameters():
+            param.requires_grad = False # 기울기 계산 완전 차단! (메모리 아끼기)
+    else:
+        paconv_prior = None
+    # =========================================================
+
+    # 🚀 메인 학습 모델 스위칭 로직
     if args.model == 'PAConv':
         model = PAConv(args, args.landmark_num).to(device)
     elif args.model == 'DeepLA':
         model = DeepLA_Wrapper(args, args.landmark_num).to(device)
+    elif args.model == 'DeepPA':
+        model = DeepPA_Wrapper(args, args.landmark_num).to(device)
     else:
         raise ValueError(f"Unknown model: {args.model}")
         
@@ -195,9 +214,12 @@ def train(args):
     if args.scheduler == 'cos': scheduler = CosineAnnealingLR(opt, T_max=args.epochs)
     else: scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
-    print(f"\n=== [Phase 3] Start Training with Curriculum Learning (Two-Stage) ===")
+    print(f"\n=== [Phase 3] Start Training with Curriculum Learning ===")
     
     opt.zero_grad() 
+    
+    # 🏆 [신규] 최고 성능을 기록하기 위한 변수 초기화
+    best_val_mm = float('inf')
 
     for epoch in range(args.epochs):
         model.train()
@@ -216,34 +238,51 @@ def train(args):
                 point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                 
                 point_input = point_normal.permute(0, 2, 1)
-                pred_heatmap = model(point_input)
+                
+                # =========================================================
+                # 🚀 스위칭 로직: DeepPA일 때만 Prior를 뽑아서 같이 넣어줌!
+                # =========================================================
+                point_input = point_normal.permute(0, 2, 1)
+                
+                # 👇👇 [여기에 추가 1]
+                #print("\n>>> [DEBUG 1] 데이터 전처리 완료, PAConv 진입 대기...")
+                
+                if args.model == 'DeepPA':
+                    with torch.no_grad():
+                        prior_hint = paconv_prior(point_input)
+                    # 👇👇 [여기에 추가 2]
+                    #print(">>> [DEBUG 2] PAConv(Prior) 통과 완료! DeepLA 진입 대기...")
+                    
+                    pred_heatmap = model(point_input, prior_heatmap=prior_hint)
+                    # 👇👇 [여기에 추가 3]
+                    #print(">>> [DEBUG 3] DeepLA 통과 완료! 3D 좌표 추출 대기...")
+                else:
+                    pred_heatmap = model(point_input)
                 
                 points_for_coords = point_input.permute(0, 2, 1)
                 pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
-
+                
+                # 👇👇 [여기에 추가 4]
+                #print(">>> [DEBUG 4] 3D 좌표 추출 완료! Loss 계산 시작...")
+                
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=2.0)
+                # ... (이하 기존 코드 동일)
+                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
-                # =========================================================
-                # 🚀 [Two-Stage Training] 커리큘럼 학습 (기울기 간섭 방지)
-                # =========================================================
-                stage1_epochs = args.epochs // 5  # 전체 에폭의 20% (예: 500이면 100)
+                stage1_epochs = args.epochs // 5 
                 
                 if epoch < stage1_epochs:
-                    # [Stage 1] 오직 히트맵 형성에만 100% 집중
                     weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                     total_loss = loss_heatmap
                 else:
-                    # [Stage 2] 히트맵을 고정하고 나머지 미세조정
                     weights = torch.rand(4).to(device)
                     weights = weights / weights.sum()
                     total_loss = (0.05 * loss_heatmap + 
                                   weights[1] * loss_coord + 
                                   weights[2] * loss_surface + 
                                   weights[3] * loss_struct)
-                # =========================================================
                 
                 loss = total_loss / accum_steps
                 loss.backward()
@@ -273,11 +312,11 @@ def train(args):
         t_mm   = train_mm / len(train_loader)
 
         # -------------------------------------------------------------
-        # [VALIDATION] 평가 루프 (랜덤 30개 샘플링)
+        # [VALIDATION] 
         # -------------------------------------------------------------
         model.eval()
         val_loss, val_hm, val_crd, val_srf, val_str, val_mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-        val_sample_count = 0  # 평가한 샘플 개수를 세기 위한 변수
+        val_sample_count = 0 
         
         with torch.no_grad():
             with tqdm(enumerate(test_loader), desc=f"Epoch {epoch+1:03d}/{args.epochs} [Valid]", leave=False) as vepoch:
@@ -289,32 +328,34 @@ def train(args):
                     avg_m = torch.mean(batch_m).item()
 
                     point_normal, landmark_normal = normalize_data(point, landmark)
-                    
                     point_input = point_normal.permute(0, 2, 1)
-                    pred_heatmap = model(point_input)
+                    
+                    # =========================================================
+                    # 🚀 Val 루프에서도 스위칭 로직 동일하게 적용
+                    # =========================================================
+                    if args.model == 'DeepPA':
+                        prior_hint = paconv_prior(point_input)
+                        pred_heatmap = model(point_input, prior_heatmap=prior_hint)
+                    else:
+                        pred_heatmap = model(point_input)
+                    # =========================================================
                     
                     points_for_coords = point_input.permute(0, 2, 1)
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=2.0)
+                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=args.focal_gamma)
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
-                    # =========================================================
-                    # 🚀 [Two-Stage Training] 검증 루프 (연구자님 제안: 25%씩 공평 분배)
-                    # =========================================================
                     stage1_epochs = args.epochs // 5
-                    
                     if epoch < stage1_epochs:
                         total_loss = loss_heatmap
                     else:
-                        # 0.25 (25%) 씩 동등하게 나눠먹기!
                         total_loss = 0.25 * loss_heatmap + 0.25 * loss_coord + 0.25 * loss_surface + 0.25 * loss_struct
-                    # =========================================================
 
                     val_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
                     val_hm   += loss_heatmap.item()
@@ -323,14 +364,10 @@ def train(args):
                     val_str  += loss_struct.item()
                     val_mm   += mm_error
                     
-                    # 현재까지 평가한 샘플 개수 누적
                     val_sample_count += point.size(0)
-                    
-                    # 🚀 30개가 넘으면 이번 에폭 검증은 여기서 즉시 종료!
                     if val_sample_count >= 30:
                         break
 
-        # 전체 test_loader 길이가 아닌, 실제로 돈 배치 개수(i + 1)로 나누어 평균 계산
         num_val_batches = i + 1
         v_loss = val_loss / num_val_batches
         v_hm   = val_hm / num_val_batches
@@ -340,23 +377,28 @@ def train(args):
         v_mm   = val_mm / num_val_batches
 
         # -------------------------------------------------------------
-        # [PRINT] 결과 및 가중치 출력 
+        # [PRINT] 
         # -------------------------------------------------------------
         print(f" [Train] 전체 Loss: {t_loss:.4f} | HM: {t_hm:.4f} | Crd: {t_crd:.4f} | Srf: {t_srf:.4f} | Struct: {t_str:.4f} | mm: {t_mm:.2f}")
         print(f" [Val]   전체 Loss: {v_loss:.4f} | HM: {v_hm:.4f} | Crd: {v_crd:.4f} | Srf: {v_srf:.4f} | Struct: {v_str:.4f} | mm: {v_mm:.2f}")
         
-        # RLW 마지막 배치 가중치 확인
-        w_np = weights.detach().cpu().numpy()
-        print(f" [RLW Weights (Last Batch)] HM: {w_np[0]:.4f} | Crd: {w_np[1]:.4f} | Srf: {w_np[2]:.4f} | Struct: {w_np[3]:.4f}\n")
+        # 🏆 [신규] 베스트 모델 저장 로직
+        if v_mm < best_val_mm:
+            best_val_mm = v_mm
+            print(f" 🌟 [Best Model Saved] 최고 성능 갱신! 오차: {best_val_mm:.4f} mm")
+            best_save_path = os.path.join(paths['models'], 'model_best.t7')
+            torch.save(model.state_dict(), best_save_path)
 
-        if (epoch + 1) % 5 == 0:
+        # 기존 10주기마다 중간 백업 저장 (원하시면 삭제 가능)
+        if (epoch + 1) % 10 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
             save_path = os.path.join(paths['models'], filename)
             torch.save(model.state_dict(), save_path)
 
         scheduler.step()
     
-    print(f"\n=== Training Finished. Results at: {paths['root']} ===\n")
+    print(f"\n=== Training Finished. Results at: {paths['root']} ===")
+    print(f"🏆 최종 달성한 최고 성능(Best Validation Error): {best_val_mm:.4f} mm\n")
 
 if __name__ == "__main__":
     args = parser.parse_args()

@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
-@File: eval_DeepLA.py
-@Description: Evaluation script with Quantitative Heatmap Metrics (Per-Landmark) & Inference Time for DeepLA-Net.
+@File: eval_all.py
+@Description: Evaluation script with Quantitative Heatmap Metrics & DeepPA Support
 '''
 
 from __future__ import print_function, division
@@ -20,8 +20,11 @@ from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
 
 # ==========================================
-# [수정됨] PAConv 대신 DeepLA_Wrapper를 불러옵니다.
+# 🚀 모델 3대장 모두 임포트
+# ==========================================
 from DeepLA_model import DeepLA_Wrapper
+from DeepPA_model import DeepPA_Wrapper  
+from PAConv_model import PAConv          
 # ==========================================
 
 from loss import get_differentiable_coords
@@ -34,9 +37,6 @@ args = parser.parse_args()
 args.eval = True
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# -----------------------------------------------------------------------------
-# [기능] 3각도 히트맵 저장
-# -----------------------------------------------------------------------------
 def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx, prefix):
     fig = plt.figure(figsize=(30, 10))
     views = [
@@ -138,20 +138,36 @@ test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 # -----------------------------------------------------------------------------
 # 3. 모델 로드 (args.model에 따른 자동 스위칭)
 # -----------------------------------------------------------------------------
+
+# =========================================================
+# 🧊 DeepPA 평가용 PAConv Prior 로드
+# =========================================================
+if args.model == 'DeepPA':
+    print(">>> [Prior Load] Loading Pre-trained PAConv (0.3mm SOTA) for DeepPA Eval...")
+    paconv_prior = PAConv(args, args.landmark_num).to(device)
+    
+    # train.py와 동일한 PAConv 가중치 절대 경로
+    best_paconv_path = os.path.join("..", "PAConv_model", "model_epoch_500.t7") 
+    paconv_prior.load_state_dict(torch.load(best_paconv_path, map_location=device))
+    paconv_prior.eval()
+else:
+    paconv_prior = None
+# =========================================================
+
 if args.model == 'PAConv':
-    from PAConv_model import PAConv
     model = PAConv(args, args.landmark_num).to(device)
     print(">>> [INFO] 🧠 PAConv 백본을 로드합니다.")
-    
 elif args.model == 'DeepLA':
-    from DeepLA_model import DeepLA_Wrapper
     model = DeepLA_Wrapper(args, args.landmark_num).to(device)
     print(">>> [INFO] 🚀 DeepLA-Net 백본을 로드합니다.")
-    
+elif args.model == 'DeepPA':
+    model = DeepPA_Wrapper(args, args.landmark_num).to(device)
+    print(">>> [INFO] 🔥 DeepPA (PAConv-Guided) 백본을 로드합니다.")
 else:
     print(f"Error: 지원하지 않는 모델입니다 -> {args.model}")
     sys.exit(1)
 
+# 평가할 모델 파일 로드
 model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval()
 
@@ -161,12 +177,10 @@ model.eval()
 me_list = []
 per_landmark_me_list = []
 
-# [Global Average Lists]
 cos_sim_list = []  
 iou_list = []
 time_list = []
 
-# [Per-Landmark Lists] - (Sample, K) 형태로 저장
 per_landmark_cos_sim_list = []
 per_landmark_iou_list = []
 
@@ -179,7 +193,6 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
     
     real_name = name_sample[idx]
     
-    # [1] 정규화
     B, N, C = point.shape
     centroid = torch.mean(point, axis=1, keepdim=True)
     point_centered = point - centroid
@@ -188,22 +201,27 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
     point_norm = point_centered / scale 
     
     with torch.no_grad():
-        # --- [추가] 시간 측정 시작 ---
         if device.type == 'cuda':
             torch.cuda.synchronize()
         start_time = time.time()
 
-        # [2] 모델 예측
-        pred_heatmap_raw = model(point_norm.permute(0, 2, 1)) # (B, K, N)
+        point_input = point_norm.permute(0, 2, 1)
+        
+        # =========================================================
+        # 🚀 DeepPA 스위칭 로직 (Forward Pass)
+        # =========================================================
+        if args.model == 'DeepPA':
+            prior_hint = paconv_prior(point_input)
+            pred_heatmap_raw = model(point_input, prior_heatmap=prior_hint) # (B, K, N)
+        else:
+            pred_heatmap_raw = model(point_input) # (B, K, N)
+        # =========================================================
+            
         pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)      # 시각화 및 IoU용 (B, N, K)
 
-        # [3] Soft-argmax 회귀 (MDS 없이 즉시 Sub-vertex 좌표 추출!)
         pred_landmark_norm = get_differentiable_coords(point_norm, pred_heatmap_raw, k=args.k_softargmax)
-        
-        # [4] 복원 (Denormalization)
         pred_landmark = (pred_landmark_norm * scale) + centroid
 
-        # --- [추가] 시간 측정 종료 ---
         if device.type == 'cuda':
             torch.cuda.synchronize()
         end_time = time.time()
@@ -212,35 +230,27 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         # -----------------------------------------------------------
         # 히트맵 정량 평가 (Per-Landmark Calculation)
         # -----------------------------------------------------------
+        pred_vec = pred_heatmap.permute(0, 2, 1) 
+        gt_vec = gt_heatmap.permute(0, 2, 1)     
         
-        # 1. Cosine Similarity per Landmark
-        pred_vec = pred_heatmap.permute(0, 2, 1) # (B, K, N)
-        gt_vec = gt_heatmap.permute(0, 2, 1)     # (B, K, N)
-        
-        # Calculate along dim=2 (Points)
         cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
         
-        # Store
-        cos_sim_list.append(cos_sim_k.mean().item()) # Global Mean for this sample
-        per_landmark_cos_sim_list.append(cos_sim_k.cpu().numpy()) # (1, K)
+        cos_sim_list.append(cos_sim_k.mean().item()) 
+        per_landmark_cos_sim_list.append(cos_sim_k.cpu().numpy()) 
 
-        # 2. IoU per Landmark (Threshold 0.1)
         threshold = 0.1
-        pred_mask = (pred_heatmap > threshold).float() # (B, N, K)
-        gt_mask = (gt_heatmap > threshold).float()     # (B, N, K)
+        pred_mask = (pred_heatmap > threshold).float() 
+        gt_mask = (gt_heatmap > threshold).float()     
         
-        # Sum along dim=1 (Points)
         intersection_k = (pred_mask * gt_mask).sum(dim=1) 
         union_k = (pred_mask + gt_mask).clamp(0, 1).sum(dim=1)
         
         iou_k = ((intersection_k + 1e-6) / (union_k + 1e-6)) * 100.0
         
-        # Store
-        iou_list.append(iou_k.mean().item()) # Global Mean for this sample
-        per_landmark_iou_list.append(iou_k.cpu().numpy()) # (1, K)
+        iou_list.append(iou_k.mean().item()) 
+        per_landmark_iou_list.append(iou_k.cpu().numpy()) 
         # -----------------------------------------------------------
 
-        # [Visualization] 40개마다 히트맵 시각화 저장
         if idx % 40 == 0:
             points_np = point[0].cpu().numpy()
             heatmap_np = pred_heatmap[0].cpu().numpy()
@@ -248,7 +258,6 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
                  save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], 
                                         heatmap_save_dir, real_name, lm_idx, "pred")
 
-        # ME 계산
         pred_np = pred_landmark.cpu().numpy()
         gt_np = gt_landmark[0].cpu().numpy()
         if pred_np.ndim == 3: pred_np = pred_np.squeeze(0)
@@ -260,27 +269,23 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         me_list.append(me)
         per_landmark_me_list.append(dists)
         
-        # 랜드마크 좌표 ASC 파일 저장
         np.savetxt(os.path.join(asc_save_dir, f"pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
 # -----------------------------------------------------------------------------
 # 5. 결과 집계 및 텍스트 파일 저장
 # -----------------------------------------------------------------------------
 if len(per_landmark_me_list) > 0:
-    # 1. ME Stats
-    per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) # (N_samples, K)
+    per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) 
     lm_means = np.mean(per_landmark_me_array, axis=0)
     lm_stds = np.std(per_landmark_me_array, axis=0)
     average_me = np.mean(lm_means)
     std_me = np.mean(lm_stds)
     
-    # 2. Cosine Sim Stats
-    per_landmark_cos_array = np.vstack(per_landmark_cos_sim_list) # (N_samples, K)
+    per_landmark_cos_array = np.vstack(per_landmark_cos_sim_list) 
     lm_cos_means = np.mean(per_landmark_cos_array, axis=0)
     lm_cos_stds = np.std(per_landmark_cos_array, axis=0)
     
-    # 3. IoU Stats
-    per_landmark_iou_array = np.vstack(per_landmark_iou_list) # (N_samples, K)
+    per_landmark_iou_array = np.vstack(per_landmark_iou_list) 
     lm_iou_means = np.mean(per_landmark_iou_array, axis=0)
     lm_iou_stds = np.std(per_landmark_iou_array, axis=0)
     
@@ -335,17 +340,14 @@ with open(result_txt_path, "w") as f:
         for i in worst_indices:
             f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
         
-        # 1. Per-landmark ME
         f.write("\n>>> Per-landmark ME (Mean ± Std):\n")
         for i in range(lm_means.shape[0]):
             f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
         
-        # 2. Per-landmark Cosine Sim
         f.write("\n>>> Per-landmark Cosine Sim (Mean ± Std):\n")
         for i in range(lm_cos_means.shape[0]):
             f.write(f"    LM {i+1:02d}: {lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f} %\n")
 
-        # 3. Per-landmark mIoU
         f.write("\n>>> Per-landmark mIoU (Mean ± Std) @ Th=0.1:\n")
         for i in range(lm_iou_means.shape[0]):
             f.write(f"    LM {i+1:02d}: {lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f} %\n")
