@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + Curriculum Learning + DeepPA Switching + PAConv_heat Support + Best Model Saving
+@Description: Gradient Accumulation + Curriculum Learning + DeepPA(Offset Regression) + PAConv_heat Support
 '''
 
 import os
@@ -25,7 +25,7 @@ from util import main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate
 
 # ==========================================
-# 🚀 모델 임포트 (3대장 모두 준비 완료)
+# 🚀 모델 임포트
 # ==========================================
 from PAConv_model import PAConv
 from DeepLA_model import DeepLA_Wrapper
@@ -190,7 +190,6 @@ def train(args):
         paconv_prior = None
     # =========================================================
 
-    # 🚀 메인 학습 모델 스위칭 로직 (PAConv_heat 추가)
     if args.model == 'PAConv' or args.model == 'PAConv_heat':
         model = PAConv(args, args.landmark_num).to(device)
         if args.model == 'PAConv_heat':
@@ -199,6 +198,7 @@ def train(args):
         model = DeepLA_Wrapper(args, args.landmark_num).to(device)
     elif args.model == 'DeepPA':
         model = DeepPA_Wrapper(args, args.landmark_num).to(device)
+        print(">>> [INFO] 🎯 DeepPA 모드 가동: Plan B (오프셋 3D 정밀 타격) 아키텍처 활성화!")
     else:
         raise ValueError(f"Unknown model: {args.model}")
         
@@ -215,10 +215,9 @@ def train(args):
     if args.scheduler == 'cos': scheduler = CosineAnnealingLR(opt, T_max=args.epochs)
     else: scheduler = StepLR(opt, step_size=40, gamma=0.9)
 
-    print(f"\n=== [Phase 3] Start Training with Curriculum Learning ===")
+    print(f"\n=== [Phase 3] Start Training ===")
     
     opt.zero_grad() 
-    
     best_val_mm = float('inf')
 
     for epoch in range(args.epochs):
@@ -238,48 +237,64 @@ def train(args):
                 point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                 
                 point_input = point_normal.permute(0, 2, 1)
+                points_for_coords = point_input.permute(0, 2, 1)
                 
+                # =========================================================
+                # 🚀 [Plan B] 직렬 오프셋 회귀 vs 기존 히트맵 회귀 분기
+                # =========================================================
                 if args.model == 'DeepPA':
+                    # 1. PAConv에서 정답지(히트맵)와 1차 좌표(Prior)를 얻어냄
                     with torch.no_grad():
                         prior_hint = paconv_prior(point_input)
-                    pred_heatmap = model(point_input, prior_heatmap=prior_hint)
-                else:
+                        prior_coords = get_differentiable_coords(points_for_coords, prior_hint, k=args.k_softargmax)
+                    
+                    # 2. DeepPA는 히트맵을 무시하고 오프셋(Delta X,Y,Z)만 예측함!
+                    offsets = model(point_input, prior_heatmap=prior_hint) # (B, K, 3)
+                    
+                    # 3. 최종 예측 좌표 = 1차 좌표 + 오프셋
+                    pred_coords = prior_coords + offsets
+                    
+                    # 로스 출력을 위해 0으로 세팅 (학습에는 쓰이지 않음)
+                    loss_heatmap = torch.tensor(0.0, device=device)
+                    
+                else: # PAConv_heat, DeepLA 등 기존 방식
                     pred_heatmap = model(point_input)
-                
-                points_for_coords = point_input.permute(0, 2, 1)
-                pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
-                
-                loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
+                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
+                    loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
+                # =========================================================
+
                 loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
                 # =========================================================
-                # 🚀 Loss 스위칭 로직 (PAConv_heat vs DeepPA/DeepLA)
+                # 🚀 Loss 스위칭 로직 (Plan B 대응)
                 # =========================================================
-                if args.model == 'PAConv_heat':
+                if args.model == 'DeepPA':
+                    # 🔥 히트맵 로스 완전 삭제! 3D 기하학 3-Loss만 RLW(랜덤 배율)로 풀가동!
+                    weights = torch.rand(3).to(device)
+                    weights = weights / weights.sum()
+                    total_loss = (weights[0] * loss_coord + 
+                                  weights[1] * loss_surface + 
+                                  weights[2] * loss_struct)
+                                  
+                elif args.model == 'PAConv_heat':
                     # 🔥 무조건 히트맵만 100% 학습!
                     weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                     total_loss = loss_heatmap
-                else:
+                    
+                else: # DeepLA의 경우 커리큘럼 적용
                     stage1_epochs = args.epochs // 5 
                     if epoch < stage1_epochs:
                         weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                         total_loss = loss_heatmap
                     else:
-                        # 1. 나머지 3개의 로스를 위한 랜덤 가중치를 뽑습니다.
                         rand_weights = torch.rand(3).to(device)
-                        
-                        # 2. 이 3개의 합이 딱 '0.95(95%)'가 되도록 맞춰줍니다.
                         rand_weights = (rand_weights / rand_weights.sum()) * 0.95
-                        
-                        # 3. 히트맵은 0.05 고정, 나머지는 0.95를 나눠가진 값을 곱해줍니다.
                         total_loss = (0.05 * loss_heatmap + 
                                       rand_weights[0] * loss_coord + 
                                       rand_weights[1] * loss_surface + 
                                       rand_weights[2] * loss_struct)
-                        
-                        # (선택) 터미널 화면 출력을 위해 weights 변수를 예쁘게 다시 조립해 줍니다.
                         weights = torch.tensor([0.05, rand_weights[0], rand_weights[1], rand_weights[2]])
                 # =========================================================
                 
@@ -328,17 +343,20 @@ def train(args):
 
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1)
+                    points_for_coords = point_input.permute(0, 2, 1)
                     
+                    # 🚀 Val 루프에도 오프셋 회귀 분기 적용
                     if args.model == 'DeepPA':
                         prior_hint = paconv_prior(point_input)
-                        pred_heatmap = model(point_input, prior_heatmap=prior_hint)
+                        prior_coords = get_differentiable_coords(points_for_coords, prior_hint, k=args.k_softargmax)
+                        offsets = model(point_input, prior_heatmap=prior_hint)
+                        pred_coords = prior_coords + offsets
+                        loss_heatmap = torch.tensor(0.0, device=device)
                     else:
                         pred_heatmap = model(point_input)
-                    
-                    points_for_coords = point_input.permute(0, 2, 1)
-                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
+                        pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
+                        loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
 
-                    loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                     loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=args.focal_gamma)
                     loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
@@ -346,10 +364,10 @@ def train(args):
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
-                    # =========================================================
-                    # 🚀 Val 루프 Loss 스위칭 로직
-                    # =========================================================
-                    if args.model == 'PAConv_heat':
+                    # 🚀 Val 루프 Loss 채점 스위칭
+                    if args.model == 'DeepPA':
+                        total_loss = 0.33 * loss_coord + 0.33 * loss_surface + 0.34 * loss_struct
+                    elif args.model == 'PAConv_heat':
                         total_loss = loss_heatmap
                     else:
                         stage1_epochs = args.epochs // 5
@@ -357,7 +375,6 @@ def train(args):
                             total_loss = loss_heatmap
                         else:
                             total_loss = 0.25 * loss_heatmap + 0.25 * loss_coord + 0.25 * loss_surface + 0.25 * loss_struct
-                    # =========================================================
 
                     val_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
                     val_hm   += loss_heatmap.item()
@@ -385,7 +402,10 @@ def train(args):
         print(f" [Val]   전체 Loss: {v_loss:.4f} | HM: {v_hm:.4f} | Crd: {v_crd:.4f} | Srf: {v_srf:.4f} | Struct: {v_str:.4f} | mm: {v_mm:.2f}")
         
         # 🚀 에폭별 로스 반영률(%) 모니터링 출력 스위칭
-        if args.model == 'PAConv_heat':
+        if args.model == 'DeepPA':
+            w_np = weights.detach().cpu().numpy()
+            print(f" 📊 [로스 반영률] Heatmap: 0.0% | Coord: {w_np[0]*100:.1f}% | Surface: {w_np[1]*100:.1f}% | Struct: {w_np[2]*100:.1f}%  (Plan B: 3D 오프셋 정밀 타격 중! 🎯)")
+        elif args.model == 'PAConv_heat':
             print(f" 📊 [로스 반영률] Heatmap: 100% (오직 히트맵 정답지 구축 중! 🎯)")
         else:
             stage1_epochs = args.epochs // 5

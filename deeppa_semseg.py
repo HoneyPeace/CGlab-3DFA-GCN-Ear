@@ -277,3 +277,57 @@ class DeepPA_semseg(nn.Module):
         if self.training:
             return x, spa, sem
         return x
+    
+# ==========================================================
+# 🚀 [Plan B] 오프셋 회귀 전용 심장부 (히트맵 출력 없음!)
+# ==========================================================
+class DeepPA_Offset_semseg(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        args.cp_bn_momentum = 1 - (1 - args.bn_momentum)**0.5
+        self.stage = Stage_PA(args) # 우리가 만든 딥 퓨전 스테이지 그대로 활용!
+        
+        # 3D 피처 추출 헤드
+        self.feat_head = nn.Sequential(
+            nn.BatchNorm1d(args.head_dim, momentum=args.bn_momentum),
+            args.act(),
+            nn.Linear(args.head_dim, 128),
+            nn.BatchNorm1d(128, momentum=args.bn_momentum),
+            args.act()
+        )
+        # 오프셋(Delta X, Y, Z) 예측 헤드
+        self.offset_head = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.GELU(),
+            nn.Linear(64, 3) # (B, K, 3) 오프셋 좌표만 딱 출력!
+        )
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, xyz, x, indices, prior_heatmap=None, pts_list=None):
+        indices = indices[:]
+        # 1. 딥 퓨전 통과 -> x: (B, N, C)
+        x, spa, sem = self.stage(x, xyz, None, indices, pts_list, prior_heatmap)
+        B, N, C = x.shape
+        
+        # 2. 점마다 128차원 피처 추출
+        point_feats = self.feat_head(x.view(-1, C)).view(B, N, -1) # (B, N, 128)
+        
+        # 3. 🌟 [어텐션 풀링] PAConv 히트맵을 돋보기로 써서 랜드마크 주변 피처만 빨아들임!
+        # prior_heatmap은 (B, N, K) 형태로 들어옴
+        weight_map = F.softmax(prior_heatmap.permute(0, 2, 1), dim=-1) # (B, K, N)
+        
+        # (B, K, N) x (B, N, 128) = (B, K, 128) -> 각 랜드마크 36개의 핵심 3D 특징 추출!
+        landmark_feats = torch.bmm(weight_map, point_feats)
+        
+        # 4. (B, K, 128) -> (B, K, 3) 오프셋 예측
+        offsets = self.offset_head(landmark_feats)
+        
+        if self.training:
+            return offsets, spa, sem
+        return offsets

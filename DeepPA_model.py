@@ -4,7 +4,7 @@ from deeppa_semseg import DeepPA_semseg
 
 import sys
 from pathlib import Path
-
+from deeppa_semseg import DeepPA_Offset_semseg
 current_dir = Path(__file__).resolve().parent
 sys.path.append(str(current_dir / "utils" / "pointnet2_ops_lib"))
 
@@ -80,7 +80,7 @@ class DeepPA_Wrapper(nn.Module):
         self.stage_count = len(dl_args.depths)
         
         # 🔥 [수정됨] 껍데기 믹서기 삭제! 오직 DeepPA_semseg 심장부만 장착!
-        self.model = DeepPA_semseg(dl_args)
+        self.model = DeepPA_Offset_semseg(dl_args)
 
 
     def forward(self, x, prior_heatmap=None):
@@ -138,4 +138,4 @@ class DeepPA_Wrapper(nn.Module):
         if isinstance(out, tuple):
             out = out[0]
             
-        return out.permute(0, 2, 1).contiguous()
+        return out # (B, K, 3)

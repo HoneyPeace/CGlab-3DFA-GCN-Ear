@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: eval_all.py
-@Description: Evaluation script with Quantitative Heatmap Metrics & DeepPA Support
+@Description: Evaluation script with Quantitative Heatmap Metrics & DeepPA(Offset Regression) Support
 '''
 
 from __future__ import print_function, division
@@ -146,7 +146,6 @@ if args.model == 'DeepPA':
     print(">>> [Prior Load] Loading Pre-trained PAConv (0.3mm SOTA) for DeepPA Eval...")
     paconv_prior = PAConv(args, args.landmark_num).to(device)
     
-    # train.py와 동일한 PAConv 가중치 절대 경로
     best_paconv_path = os.path.join("..", "PAConv_model", "model_epoch_500.t7") 
     paconv_prior.load_state_dict(torch.load(best_paconv_path, map_location=device))
     paconv_prior.eval()
@@ -162,7 +161,7 @@ elif args.model == 'DeepLA':
     print(">>> [INFO] 🚀 DeepLA-Net 백본을 로드합니다.")
 elif args.model == 'DeepPA':
     model = DeepPA_Wrapper(args, args.landmark_num).to(device)
-    print(">>> [INFO] 🔥 DeepPA (PAConv-Guided) 백본을 로드합니다.")
+    print(">>> [INFO] 🔥 DeepPA (PAConv-Guided) 백본을 로드합니다. (Plan B: Offset Regression)")
 else:
     print(f"Error: 지원하지 않는 모델입니다 -> {args.model}")
     sys.exit(1)
@@ -211,15 +210,22 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         # 🚀 DeepPA 스위칭 로직 (Forward Pass)
         # =========================================================
         if args.model == 'DeepPA':
+            # 1. 1차 좌표(Prior) 추출
             prior_hint = paconv_prior(point_input)
-            pred_heatmap_raw = model(point_input, prior_heatmap=prior_hint) # (B, K, N)
+            prior_coords = get_differentiable_coords(point_norm, prior_hint, k=args.k_softargmax)
+            
+            # 2. DeepPA 오프셋 계산 및 더하기
+            offsets = model(point_input, prior_heatmap=prior_hint) # (B, K, 3)
+            pred_landmark_norm = prior_coords + offsets
+            
+            # 히트맵 평가(IoU 등)는 PAConv가 뱉은 1차 정답지(prior_hint)로 채점
+            pred_heatmap_raw = prior_hint 
         else:
             pred_heatmap_raw = model(point_input) # (B, K, N)
+            pred_landmark_norm = get_differentiable_coords(point_norm, pred_heatmap_raw, k=args.k_softargmax)
         # =========================================================
             
         pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)      # 시각화 및 IoU용 (B, N, K)
-
-        pred_landmark_norm = get_differentiable_coords(point_norm, pred_heatmap_raw, k=args.k_softargmax)
         pred_landmark = (pred_landmark_norm * scale) + centroid
 
         if device.type == 'cuda':
