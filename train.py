@@ -267,12 +267,20 @@ def train(args):
                         weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                         total_loss = loss_heatmap
                     else:
-                        weights = torch.rand(4).to(device)
-                        weights = weights / weights.sum()
-                        total_loss = (weights[0] * loss_heatmap + 
-                                      weights[1] * loss_coord + 
-                                      weights[2] * loss_surface + 
-                                      weights[3] * loss_struct)
+                        # 1. 나머지 3개의 로스를 위한 랜덤 가중치를 뽑습니다.
+                        rand_weights = torch.rand(3).to(device)
+                        
+                        # 2. 이 3개의 합이 딱 '0.95(95%)'가 되도록 맞춰줍니다.
+                        rand_weights = (rand_weights / rand_weights.sum()) * 0.95
+                        
+                        # 3. 히트맵은 0.05 고정, 나머지는 0.95를 나눠가진 값을 곱해줍니다.
+                        total_loss = (0.05 * loss_heatmap + 
+                                      rand_weights[0] * loss_coord + 
+                                      rand_weights[1] * loss_surface + 
+                                      rand_weights[2] * loss_struct)
+                        
+                        # (선택) 터미널 화면 출력을 위해 weights 변수를 예쁘게 다시 조립해 줍니다.
+                        weights = torch.tensor([0.05, rand_weights[0], rand_weights[1], rand_weights[2]])
                 # =========================================================
                 
                 loss = total_loss / accum_steps
