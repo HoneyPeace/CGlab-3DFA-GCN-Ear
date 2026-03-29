@@ -19,7 +19,7 @@ parser = argparse.ArgumentParser(description='3D Ear/Face Landmark Detection')
 # [1] 기본 설정 (Base Args)
 # =============================================================================
 parser.add_argument('--exp_name', type=str, default='Ear_Project_Final', metavar='N', help='Name of the experiment')
-parser.add_argument('--model', type=str, default='DeepLA', metavar='N', choices=['EdgeConv', 'PAConv', 'DeepLA', 'DeepPA'], help='Model to use, [EdgeConv, PAConv, DeepLA, DeepPA]')
+parser.add_argument('--model', type=str, default='DeepLA', metavar='N', choices=['PAConv_heat', 'PAConv', 'DeepLA', 'DeepPA'], help='Model to use, [PAConv_heat, PAConv, DeepLA, DeepPA]')
 parser.add_argument('--no_cuda', type=str2bool, default=False, help='enables CUDA training')
 parser.add_argument('--model_path', type=str, default='', metavar='N', help='Pretrained model path')
 

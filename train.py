@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + Curriculum Learning + DeepPA Switching + Best Model Saving
+@Description: Gradient Accumulation + Curriculum Learning + DeepPA Switching + PAConv_heat Support + Best Model Saving
 '''
 
 import os
@@ -171,29 +171,30 @@ def train(args):
     print(f"\n>>> [Model Init] Selected Backbone: {args.model}")
     
     # =========================================================
-    # 🧊 [신규] DeepPA 전용: 얼려진 PAConv Prior 모델 로드
+    # 🧊 DeepPA 전용: 얼려진 PAConv Prior 모델 로드
     # =========================================================
     if args.model == 'DeepPA':
         print(">>> [Prior Load] Loading Pre-trained PAConv (0.3mm SOTA)...")
         paconv_prior = PAConv(args, args.landmark_num).to(device)
         
-        # 🚨 평화님이 지정해주신 PAConv 폴더 절대 경로 (파일명은 본인 파일명에 맞게 수정하세요!)
         best_paconv_path = os.path.join("..", "PAConv_model", "model_epoch_500.t7")
         
         if not os.path.exists(best_paconv_path):
             raise FileNotFoundError(f"🚨 PAConv 모델 파일을 찾을 수 없습니다! 파일명을 확인해주세요: {best_paconv_path}")
             
         paconv_prior.load_state_dict(torch.load(best_paconv_path))
-        paconv_prior.eval() # 평가 모드 고정
+        paconv_prior.eval()
         for param in paconv_prior.parameters():
-            param.requires_grad = False # 기울기 계산 완전 차단! (메모리 아끼기)
+            param.requires_grad = False 
     else:
         paconv_prior = None
     # =========================================================
 
-    # 🚀 메인 학습 모델 스위칭 로직
-    if args.model == 'PAConv':
+    # 🚀 메인 학습 모델 스위칭 로직 (PAConv_heat 추가)
+    if args.model == 'PAConv' or args.model == 'PAConv_heat':
         model = PAConv(args, args.landmark_num).to(device)
+        if args.model == 'PAConv_heat':
+            print(">>> [INFO] 🔥 PAConv_heat 모드 가동: 500에폭 내내 1-Loss(히트맵)만 학습합니다!")
     elif args.model == 'DeepLA':
         model = DeepLA_Wrapper(args, args.landmark_num).to(device)
     elif args.model == 'DeepPA':
@@ -218,7 +219,6 @@ def train(args):
     
     opt.zero_grad() 
     
-    # 🏆 [신규] 최고 성능을 기록하기 위한 변수 초기화
     best_val_mm = float('inf')
 
     for epoch in range(args.epochs):
@@ -239,50 +239,41 @@ def train(args):
                 
                 point_input = point_normal.permute(0, 2, 1)
                 
-                # =========================================================
-                # 🚀 스위칭 로직: DeepPA일 때만 Prior를 뽑아서 같이 넣어줌!
-                # =========================================================
-                point_input = point_normal.permute(0, 2, 1)
-                
-                # 👇👇 [여기에 추가 1]
-                #print("\n>>> [DEBUG 1] 데이터 전처리 완료, PAConv 진입 대기...")
-                
                 if args.model == 'DeepPA':
                     with torch.no_grad():
                         prior_hint = paconv_prior(point_input)
-                    # 👇👇 [여기에 추가 2]
-                    #print(">>> [DEBUG 2] PAConv(Prior) 통과 완료! DeepLA 진입 대기...")
-                    
                     pred_heatmap = model(point_input, prior_heatmap=prior_hint)
-                    # 👇👇 [여기에 추가 3]
-                    #print(">>> [DEBUG 3] DeepLA 통과 완료! 3D 좌표 추출 대기...")
                 else:
                     pred_heatmap = model(point_input)
                 
                 points_for_coords = point_input.permute(0, 2, 1)
                 pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
                 
-                # 👇👇 [여기에 추가 4]
-                #print(">>> [DEBUG 4] 3D 좌표 추출 완료! Loss 계산 시작...")
-                
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                # ... (이하 기존 코드 동일)
                 loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                 loss_surface = compute_point_to_plane_loss(pred_coords, points_for_coords, k=args.plane_knn)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
-                stage1_epochs = args.epochs // 5 
-                
-                if epoch < stage1_epochs:
+                # =========================================================
+                # 🚀 Loss 스위칭 로직 (PAConv_heat vs DeepPA/DeepLA)
+                # =========================================================
+                if args.model == 'PAConv_heat':
+                    # 🔥 무조건 히트맵만 100% 학습!
                     weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                     total_loss = loss_heatmap
                 else:
-                    weights = torch.rand(4).to(device)
-                    weights = weights / weights.sum()
-                    total_loss = (weights[0] * loss_heatmap + 
-                                  weights[1] * loss_coord + 
-                                  weights[2] * loss_surface + 
-                                  weights[3] * loss_struct)
+                    stage1_epochs = args.epochs // 5 
+                    if epoch < stage1_epochs:
+                        weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
+                        total_loss = loss_heatmap
+                    else:
+                        weights = torch.rand(4).to(device)
+                        weights = weights / weights.sum()
+                        total_loss = (weights[0] * loss_heatmap + 
+                                      weights[1] * loss_coord + 
+                                      weights[2] * loss_surface + 
+                                      weights[3] * loss_struct)
+                # =========================================================
                 
                 loss = total_loss / accum_steps
                 loss.backward()
@@ -330,15 +321,11 @@ def train(args):
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1)
                     
-                    # =========================================================
-                    # 🚀 Val 루프에서도 스위칭 로직 동일하게 적용
-                    # =========================================================
                     if args.model == 'DeepPA':
                         prior_hint = paconv_prior(point_input)
                         pred_heatmap = model(point_input, prior_heatmap=prior_hint)
                     else:
                         pred_heatmap = model(point_input)
-                    # =========================================================
                     
                     points_for_coords = point_input.permute(0, 2, 1)
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
@@ -351,11 +338,18 @@ def train(args):
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
-                    stage1_epochs = args.epochs // 5
-                    if epoch < stage1_epochs:
+                    # =========================================================
+                    # 🚀 Val 루프 Loss 스위칭 로직
+                    # =========================================================
+                    if args.model == 'PAConv_heat':
                         total_loss = loss_heatmap
                     else:
-                        total_loss = 0.25 * loss_heatmap + 0.25 * loss_coord + 0.25 * loss_surface + 0.25 * loss_struct
+                        stage1_epochs = args.epochs // 5
+                        if epoch < stage1_epochs:
+                            total_loss = loss_heatmap
+                        else:
+                            total_loss = 0.25 * loss_heatmap + 0.25 * loss_coord + 0.25 * loss_surface + 0.25 * loss_struct
+                    # =========================================================
 
                     val_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
                     val_hm   += loss_heatmap.item()
@@ -382,14 +376,25 @@ def train(args):
         print(f" [Train] 전체 Loss: {t_loss:.4f} | HM: {t_hm:.4f} | Crd: {t_crd:.4f} | Srf: {t_srf:.4f} | Struct: {t_str:.4f} | mm: {t_mm:.2f}")
         print(f" [Val]   전체 Loss: {v_loss:.4f} | HM: {v_hm:.4f} | Crd: {v_crd:.4f} | Srf: {v_srf:.4f} | Struct: {v_str:.4f} | mm: {v_mm:.2f}")
         
-        # 🏆 [신규] 베스트 모델 저장 로직
+        # 🚀 에폭별 로스 반영률(%) 모니터링 출력 스위칭
+        if args.model == 'PAConv_heat':
+            print(f" 📊 [로스 반영률] Heatmap: 100% (오직 히트맵 정답지 구축 중! 🎯)")
+        else:
+            stage1_epochs = args.epochs // 5
+            if epoch < stage1_epochs:
+                print(f" 📊 [로스 반영률] Heatmap: 100% | Coord: 0% | Surface: 0% | Struct: 0%  (Stage 1: 번역기 집중 학습 🔥)")
+            else:
+                w_np = weights.detach().cpu().numpy()
+                print(f" 📊 [로스 반영률] Heatmap: {w_np[0]*100:.1f}% | Coord: {w_np[1]*100:.1f}% | Surface: {w_np[2]*100:.1f}% | Struct: {w_np[3]*100:.1f}%  (Stage 2: 4-Loss RLW 완전 해방 🌪️)")
+
+        # 🏆 베스트 모델 저장 로직
         if v_mm < best_val_mm:
             best_val_mm = v_mm
             print(f" 🌟 [Best Model Saved] 최고 성능 갱신! 오차: {best_val_mm:.4f} mm")
             best_save_path = os.path.join(paths['models'], 'model_best.t7')
             torch.save(model.state_dict(), best_save_path)
 
-        # 기존 10주기마다 중간 백업 저장 (원하시면 삭제 가능)
+        # 기존 10주기마다 중간 백업 저장
         if (epoch + 1) % 10 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
             save_path = os.path.join(paths['models'], filename)
