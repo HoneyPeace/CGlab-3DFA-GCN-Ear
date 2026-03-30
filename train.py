@@ -296,14 +296,31 @@ def train(args):
                     weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                     total_loss = norm_heatmap
                 else:
-                    # 1. 나머지 3개의 로스를 위한 랜덤 가중치를 뽑습니다.
-                    rand_weights = torch.rand(4).to(device)
-                    # 3. 히트맵은 0.05 고정, 나머지는 0.95를 나눠가진 값을 곱해줍니다. (정규화된 로스 사용)
-                    total_loss = ( rand_weights[0] * norm_heatmap + 
-                                   rand_weights[1] * norm_coord + 
-                                   rand_weights[2] * norm_surface + 
-                                   rand_weights[3] * norm_struct)
-                    
+                    stage1_epochs = args.epochs // 5 
+                    if epoch < stage1_epochs:
+                        weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
+                        total_loss = norm_heatmap
+                    else:
+                        # 1. 나머지 3개의 로스를 위한 랜덤 가중치를 뽑습니다.
+                        rand_weights = torch.rand(3).to(device)
+                        
+                        # 2. 이 3개의 합이 딱 '0.95(95%)'가 되도록 맞춰줍니다.
+                        rand_weights = (rand_weights / rand_weights.sum()) * 0.95
+                        
+                        # 3. 히트맵은 0.05 고정, 나머지는 0.95를 나눠가진 값을 곱해줍니다. (정규화된 로스 사용)
+                        total_loss = (0.05 * norm_heatmap + 
+                                      rand_weights[0] * norm_coord + 
+                                      rand_weights[1] * norm_surface + 
+                                      rand_weights[2] * norm_struct)
+                
+                #else:
+                    #rand_weights = torch.rand(4).to(device)
+
+                    #total_loss = ( rand_weights[0] * norm_heatmap + 
+                    #               rand_weights[1] * norm_coord + 
+                    #               rand_weights[2] * norm_surface + 
+                    #               rand_weights[3] * norm_struct)
+                  
                     # (선택) 터미널 화면 출력을 위해 weights 변수를 예쁘게 다시 조립해 줍니다.
                     weights = torch.tensor([rand_weights[0], rand_weights[1], rand_weights[2], rand_weights[3]])
                 # =========================================================
