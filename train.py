@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + Curriculum Learning + DeepPA Switching + PAConv_heat Support + Best Model Saving + Auto-Scaled Curvature Loss
+@Description: Gradient Accumulation + Curriculum Learning + DeepPA Switching + PAConv_heat Support + Best Model Saving + Global Auto-Scaled 4-Loss
 '''
 
 import os
@@ -20,8 +20,8 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-# 🚀 변경점: compute_point_to_plane_loss 대신 AutoScaledCurvatureSurfaceLoss 임포트
-from loss import AdaptiveWingLoss, get_differentiable_coords, AutoScaledCurvatureSurfaceLoss, compute_structural_loss, dynamic_focal_l1_loss
+# 🚀 변경점: 이름이 경량화된 CurvatureSurfaceLoss 임포트
+from loss import AdaptiveWingLoss, get_differentiable_coords, CurvatureSurfaceLoss, compute_structural_loss, dynamic_focal_l1_loss
 from util import main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate
 
@@ -205,10 +205,8 @@ def train(args):
         
     model.apply(weight_init)
     
-    # 🚀 [신규 추가] 자동 스케일링이 탑재된 표면 곡률 로스 초기화
-    # 목표 체급(1.53)에 맞춰 자동으로 스케일을 펌핑해줍니다.
-    surface_criterion = AutoScaledCurvatureSurfaceLoss(
-        target_norm_val=1.53, 
+    # 🚀 [신규 추가] 순수 기하학 곡률 로스 초기화
+    surface_criterion = CurvatureSurfaceLoss(
         k_p2p=args.plane_knn if hasattr(args, 'plane_knn') else 5, 
         k_curv=15, 
         alpha=10.0
@@ -228,8 +226,18 @@ def train(args):
     print(f"\n=== [Phase 3] Start Training with Curriculum Learning ===")
     
     opt.zero_grad() 
-    
     best_val_mm = float('inf')
+
+    # =========================================================
+    # 🎯 [신규 추가] 4-Loss 통합 자동 스케일러 딕셔너리
+    # =========================================================
+    target_norm = 1.53
+    auto_scales = {
+        'heatmap': -1.0,
+        'coord': -1.0,
+        'surface': -1.0,
+        'struct': -1.0
+    }
 
     for epoch in range(args.epochs):
         model.train()
@@ -261,31 +269,31 @@ def train(args):
                 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                 loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
-                
-                # 🚀 변경점: 곡률 기반 하이브리드 로스 계산 (자동 스케일 적용됨)
                 loss_surface = surface_criterion(pred_coords, augmented_landmark, points_for_coords)
-                
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
                 # =========================================================
-                # ⚖️ [Scale Normalization] 스케일 정규화 (황금 밸런스 적용)
+                # ⚖️ [Auto-Scaler 작동 로직] 첫 배치의 Raw 값을 바탕으로 배수 고정
                 # =========================================================
-                # 목표 체급: 약 1.53 수준으로 모두 통일
-                norm_heatmap = loss_heatmap * 0.3   # 5.199 * 0.3  ≈ 1.55
-                norm_coord   = loss_coord   * 1.0   # 1.533 * 1.0  = 1.53 (기준점)
-                # 🚀 변경점: 수동 펌핑(35.0) 제거. surface_criterion이 스스로 1.53으로 맞춰 반환합니다.
-                norm_surface = loss_surface         
-                norm_struct  = loss_struct  * 5     # 0.327 * 4.7  ≈ 1.53
-                
-                # 🔍 첫 번째 에폭, 첫 번째 배치에서 순수 스케일 및 정규화 결과 출력
-                if epoch == 0 and i == 0:
+                if epoch == 0 and i == 0 and auto_scales['heatmap'] < 0:
+                    auto_scales['heatmap'] = target_norm / (loss_heatmap.item() + 1e-6)
+                    auto_scales['coord']   = target_norm / (loss_coord.item() + 1e-6)
+                    auto_scales['surface'] = target_norm / (loss_surface.item() + 1e-6)
+                    auto_scales['struct']  = target_norm / (loss_struct.item() + 1e-6)
+                    
                     print(f"\n=========================================")
-                    print(f" 🔍 [Raw Loss Scale Check]")
-                    print(f"  - Heatmap : {loss_heatmap.item():.6f}  (Norm: {norm_heatmap.item():.6f})")
-                    print(f"  - Coord   : {loss_coord.item():.6f}  (Norm: {norm_coord.item():.6f})")
-                    print(f"  - Surface : {loss_surface.item():.6f}  (Norm: {norm_surface.item():.6f})")
-                    print(f"  - Struct  : {loss_struct.item():.6f}  (Norm: {norm_struct.item():.6f})")
+                    print(f" 🎯 [Global Auto-Scaler] 4-Loss 황금 밸런스 자동 세팅 완료! (Target Norm: {target_norm})")
+                    print(f"  - Heatmap : Raw {loss_heatmap.item():.5f} -> 곱해질 배수: x{auto_scales['heatmap']:.3f}")
+                    print(f"  - Coord   : Raw {loss_coord.item():.5f} -> 곱해질 배수: x{auto_scales['coord']:.3f}")
+                    print(f"  - Surface : Raw {loss_surface.item():.5f} -> 곱해질 배수: x{auto_scales['surface']:.3f}")
+                    print(f"  - Struct  : Raw {loss_struct.item():.5f} -> 곱해질 배수: x{auto_scales['struct']:.3f}")
                     print(f"=========================================\n")
+
+                # 구해진 자동 배수를 곱하여 정규화(Normalization) 완료
+                norm_heatmap = loss_heatmap * auto_scales['heatmap']
+                norm_coord   = loss_coord   * auto_scales['coord']
+                norm_surface = loss_surface * auto_scales['surface']         
+                norm_struct  = loss_struct  * auto_scales['struct']
                 # =========================================================
 
                 # =========================================================
@@ -307,22 +315,14 @@ def train(args):
                         # 2. 이 3개의 합이 딱 '0.95(95%)'가 되도록 맞춰줍니다.
                         rand_weights = (rand_weights / rand_weights.sum()) * 0.95
                         
-                        # 3. 히트맵은 0.05 고정, 나머지는 0.95를 나눠가진 값을 곱해줍니다. (정규화된 로스 사용)
+                        # 3. 히트맵은 0.05 고정, 나머지는 0.95를 나눠가진 값을 곱해줍니다. 
                         total_loss = (0.05 * norm_heatmap + 
                                       rand_weights[0] * norm_coord + 
                                       rand_weights[1] * norm_surface + 
                                       rand_weights[2] * norm_struct)
-                
-                #else:
-                    #rand_weights = torch.rand(4).to(device)
-
-                    #total_loss = ( rand_weights[0] * norm_heatmap + 
-                    #               rand_weights[1] * norm_coord + 
-                    #               rand_weights[2] * norm_surface + 
-                    #               rand_weights[3] * norm_struct)
-                  
-                    # (선택) 터미널 화면 출력을 위해 weights 변수를 예쁘게 다시 조립해 줍니다.
-                    weights = torch.tensor([rand_weights[0], rand_weights[1], rand_weights[2], rand_weights[3]])
+                        
+                        # (선택) 터미널 화면 출력을 위해 weights 변수를 조립
+                        weights = torch.tensor([0.05, rand_weights[0], rand_weights[1], rand_weights[2]])
                 # =========================================================
                 
                 loss = total_loss / accum_steps
@@ -382,21 +382,17 @@ def train(args):
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                     loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=args.focal_gamma)
-                    
-                    # 🚀 변경점: Val 루프에서도 클래스 기반 로스 호출
                     loss_surface = surface_criterion(pred_coords, landmark_normal, points_for_coords)
-                    
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
-                    # Val 루프도 동일한 정규화 상수 적용
-                    norm_heatmap = loss_heatmap * 0.3
-                    norm_coord   = loss_coord   * 1.0
-                    # 🚀 변경점: 수동 펌핑(37.0) 제거
-                    norm_surface = loss_surface 
-                    norm_struct  = loss_struct  * 4.7
+                    # 🚀 Val 루프에도 Train에서 고정된 동일한 정규화 배수 적용
+                    norm_heatmap = loss_heatmap * auto_scales['heatmap']
+                    norm_coord   = loss_coord   * auto_scales['coord']
+                    norm_surface = loss_surface * auto_scales['surface'] 
+                    norm_struct  = loss_struct  * auto_scales['struct']
                     
                     # =========================================================
                     # 🚀 Val 루프 Loss 스위칭 로직 (정규화된 변수 norm_* 사용)

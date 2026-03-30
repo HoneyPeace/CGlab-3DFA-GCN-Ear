@@ -71,42 +71,24 @@ def find_knn_points(pred_coords, points, k=10):
 # (기존 compute_point_to_plane_loss를 완전히 대체 및 업그레이드)
 # =====================================================================
 
-class AutoScaledCurvatureSurfaceLoss(nn.Module):
-    def __init__(self, target_norm_val=1.88, k_p2p=5, k_curv=15, alpha=10.0):
-        """
-        target_norm_val: 첫 배치에서 Raw Loss를 이 값에 맞춰 자동으로 배수(Scale Factor)를 고정합니다. (ex: PAConv 로그 기준 1.88)
-        k_p2p: Point-to-Plane 평면 투영 및 법선 추출용 (좁은 영역, 기본 5)
-        k_curv: 곡률(Surface Variation) 계산용 (넓은 영역, 기본 15)
-        alpha: 곡률이 극심한 곳(이륜/대이륜)의 오차에 부여할 페널티 가중치
-        """
+class CurvatureSurfaceLoss(nn.Module):
+    def __init__(self, k_p2p=5, k_curv=15, alpha=10.0):
         super().__init__()
-        self.target_norm_val = target_norm_val
         self.k_p2p = k_p2p
         self.k_curv = k_curv
         self.alpha = alpha
-        
-        # 모델의 버퍼로 등록 (저장/로드 시 유지되며 역전파되지 않음, 초기값 -1)
-        self.register_buffer('scale_factor', torch.tensor(-1.0))
 
     def forward(self, pred_coords, gt_coords, points):
-        # ---------------------------------------------------------
-        # 1. P2P 투영용 법선 추출 (k_p2p 사용: 좁은 영역)
-        # ---------------------------------------------------------
-        # GT 표면 주변의 좁은 이웃을 찾아 정확한 평면 법선을 구합니다.
+        # 1. P2P 투영용 법선 추출 (좁은 영역)
         knn_p2p_gt = find_knn_points(gt_coords, points, self.k_p2p)
         center_p2p_gt = knn_p2p_gt.mean(dim=2, keepdim=True)
         
         centered_p2p_gt = knn_p2p_gt - center_p2p_gt
         cov_p2p_gt = torch.matmul(centered_p2p_gt.transpose(2, 3), centered_p2p_gt)
         _, eigvec_p2p_gt = torch.linalg.eigh(cov_p2p_gt)
-        
-        # 평면에 수직인 법선 벡터 (가장 작은 고윳값 방향)
         normal_gt = eigvec_p2p_gt[..., 0] 
 
-        # ---------------------------------------------------------
-        # 2. 곡률(Surface Variation) 추출 (k_curv 사용: 넓은 영역)
-        # ---------------------------------------------------------
-        # 예측점과 GT점 각각에 대해 조금 더 넓은 영역의 형태(곡률)를 파악합니다.
+        # 2. 곡률 추출 (넓은 영역)
         knn_curv_pred = find_knn_points(pred_coords, points, self.k_curv)
         knn_curv_gt = find_knn_points(gt_coords, points, self.k_curv)
 
@@ -122,49 +104,26 @@ class AutoScaledCurvatureSurfaceLoss(nn.Module):
         eigval_curv_pred, _ = torch.linalg.eigh(cov_curv_pred)
         eigval_curv_gt, _ = torch.linalg.eigh(cov_curv_gt)
 
-        # 표면 변화량 c 계산 (0 ~ 0.33)
         sum_eig_pred = torch.sum(eigval_curv_pred, dim=-1) + 1e-6
         sum_eig_gt = torch.sum(eigval_curv_gt, dim=-1) + 1e-6
 
         c_pred = eigval_curv_pred[..., 0] / sum_eig_pred
         c_gt = eigval_curv_gt[..., 0] / sum_eig_gt
 
-        # [VRAM 최적화] GT 관련 연산은 역전파를 차단하여 메모리를 절약합니다.
         c_gt = c_gt.detach()
         normal_gt = normal_gt.detach()
         center_p2p_gt = center_p2p_gt.squeeze(2).detach()
 
-        # ---------------------------------------------------------
         # 3. 로스 조합
-        # ---------------------------------------------------------
-        # [Loss A] 곡률 일관성 (예측된 점 주변의 뾰족함이 실제 뾰족함과 일치하는가)
         loss_curvature = F.l1_loss(c_pred, c_gt)
-
-        # [Loss B] 곡률 가중치 P2P (뾰족한 능선에 있을수록 P2P 오차 폭발)
         vector_to_plane = pred_coords - center_p2p_gt
         p2p_distance = torch.abs(torch.sum(vector_to_plane * normal_gt, dim=-1))
         
         weight_curv = 1.0 + self.alpha * c_gt
         loss_p2p_weighted = (p2p_distance * weight_curv).mean()
 
-        # 순수 기하학적 오차 합산
-        raw_surface_loss = loss_p2p_weighted + loss_curvature
-
-        # ---------------------------------------------------------
-        # 4. [핵심] 첫 배치 자동 스케일링 고정 로직
-        # ---------------------------------------------------------
-        if self.training and self.scale_factor.item() < 0:
-            # 첫 번째 배치의 raw_loss를 기준으로 타겟 스케일에 맞추기 위한 상수 도출
-            calculated_scale = self.target_norm_val / (raw_surface_loss.item() + 1e-6)
-            self.scale_factor.fill_(calculated_scale)
-            print(f"\n[Auto-Scaler] Surface Loss 상수 자동 세팅 완료: x{self.scale_factor.item():.2f}")
-            print(f" -> Raw: {raw_surface_loss.item():.5f} => Target: {self.target_norm_val}\n")
-
-        # 평가 모드가 먼저 돌 경우를 대비해 abs() 처리 후 스케일 팩터 곱셈
-        final_loss = raw_surface_loss * torch.abs(self.scale_factor)
-        
-        return final_loss
-
+        # 순수 기하학적 Raw 오차만 반환
+        return loss_p2p_weighted + loss_curvature
 
 # =====================================================================
 # 구조적 위상 로스 (Structural / Pairwise Distance Loss)
