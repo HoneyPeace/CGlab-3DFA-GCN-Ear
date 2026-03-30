@@ -110,7 +110,7 @@ class Stage_PA(nn.Module):
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             self.nbr_embed = nn.Sequential(
-                nn.Linear(6, nbr_hid_dim // 2, bias=False),  
+                nn.Linear(10, nbr_hid_dim // 2, bias=False),  
                 nn.BatchNorm1d(nbr_hid_dim // 2, momentum=cp_bn_momentum),
                 args.act(),
                 nn.Linear(nbr_hid_dim // 2, nbr_hid_dim, bias=False),
@@ -192,14 +192,27 @@ class Stage_PA(nn.Module):
         pe = xyz_knn - xyz.unsqueeze(2)
 
         if self.first:
-            nbr = pe.clone()
-            x_knn = index_points(x, knn)
-            nbr = torch.cat([nbr, x_knn], dim=-1).view(-1, 6) 
+            # 1. 상대좌표 (pe): (B, N, K, 3)
+            nbr_rel = pe.clone() 
+            
+            # 2. 중심점/이웃좌표 (x_knn): (B, N, K, 3)
+            x_knn = index_points(x, knn) 
+            
+            # 3. 거리 차이 (dist): (B, N, K, 1)
+            # L2 Norm을 계산하여 거리 정보를 명시적으로 추출
+            dist = torch.norm(nbr_rel, dim=-1, keepdim=True) 
+            
+            # 4. 방향 벡터 (vector): (B, N, K, 3)
+            # 상대좌표를 거리로 나누어 정규화된 방향 정보만 추출 (Zero division 방지 위해 1e-8 추가)
+            vector = nbr_rel / (dist + 1e-8)
+            
+            # 🔥 [10채널 완성] 3(상대) + 3(중심) + 1(거리) + 3(벡터) = 10
+            nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
+            
             nbr_embed_func = lambda t: self.nbr_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
             nbr = checkpoint(nbr_embed_func, nbr) if self.training and self.cp else nbr_embed_func(nbr)
             nbr = self.nbr_proj(nbr)
-            # 👇 여기서 드디어 순수 3차원 x가 현재 Stage 차원(예: 64차원)으로 변환됩니다!
-            x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1) 
+            x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1)
 
         # 🌟🌟🌟 [궁극의 Residual Concat Deep Fusion] 🌟🌟🌟
         if prior_heatmap is not None:
