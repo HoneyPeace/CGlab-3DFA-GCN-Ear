@@ -93,9 +93,16 @@ class Stage_PA(nn.Module):
 
         dim = args.dims[depth]
         
-        # 🔥 [Deep Fusion] 각 Stage의 차원(dim)에 맞게 힌트를 변환해주는 전용 어댑터!
+        # 🔥 [Deep Fusion] 각 Stage의 차원에 맞게 히트맵 힌트를 변환해주는 전용 어댑터
         self.prior_proj = nn.Sequential(
             nn.Linear(args.num_classes, dim, bias=False),
+            nn.BatchNorm1d(dim, momentum=args.bn_momentum),
+            args.act()
+        )
+        
+        # 🚀 [Concat Fusion] 단순 덧셈 대신, 2배로 늘어난 채널(dim * 2)을 최적의 비율로 다시 압축해주는 믹서기 장착!
+        self.fusion_mlp = nn.Sequential(
+            nn.Linear(dim * 2, dim, bias=False),
             nn.BatchNorm1d(dim, momentum=args.bn_momentum),
             args.act()
         )
@@ -164,7 +171,6 @@ class Stage_PA(nn.Module):
             self.sub_stage = Stage_PA(args, depth + 1)
 
     # 🔥 prior_heatmap 입력 추가
-# 🔥 prior_heatmap 입력 추가
     def forward(self, x, xyz, prev_knn, indices, pts_list, prior_heatmap=None, sub_spa=None, sub_sem=None):
         B, N_in, C_in = x.shape
         
@@ -182,8 +188,6 @@ class Stage_PA(nn.Module):
         knn = indices.pop()
         B, N, C = x.shape
 
-        # ❌ [여기 있던 기존 Deep Fusion 코드를 아래로 내립니다] ❌
-
         xyz_knn = index_points(xyz, knn)
         pe = xyz_knn - xyz.unsqueeze(2)
 
@@ -197,11 +201,19 @@ class Stage_PA(nn.Module):
             # 👇 여기서 드디어 순수 3차원 x가 현재 Stage 차원(예: 64차원)으로 변환됩니다!
             x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1) 
 
-        # 🌟🌟🌟 [Deep Fusion 올바른 주입 위치] 🌟🌟🌟
-        # x가 현재 Stage의 차원(64, 128, 256 등)과 완벽하게 똑같아진 이 타이밍에 힌트를 섞어줍니다!
+        # 🌟🌟🌟 [궁극의 Residual Concat Deep Fusion] 🌟🌟🌟
         if prior_heatmap is not None:
+            # 1. 힌트를 64(또는 현재 차원)으로 변환
             p_feat = self.prior_proj(prior_heatmap.view(-1, prior_heatmap.shape[-1])).view(B, N, -1)
-            x = x + p_feat  
+            
+            # 2. 3D 기하학(x)과 히트맵 위치(p_feat)를 나란히 이어붙임 (dim*2)
+            fused = torch.cat([x, p_feat], dim=-1)
+            
+            # 3. 믹서기가 둘을 비교해서 "미세 조정값(Residual)"을 계산함!
+            mixed_residual = self.fusion_mlp(fused.view(-1, fused.shape[-1])).view(B, N, -1)
+            
+            # 4. 원래의 안전한 3D 고속도로(x)에 미세 조정값(+)을 더해줌!
+            x = x + mixed_residual
         # 🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟
 
         pe = pe.view(-1, 3)
