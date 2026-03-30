@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: eval_all.py
-@Description: Evaluation script with Quantitative Heatmap Metrics & DeepPA Support
+@Description: Evaluation script with Quantitative Heatmap Metrics & DeepLA Offset Support
 '''
 
 from __future__ import print_function, division
@@ -159,7 +159,7 @@ if args.model == 'PAConv':
     print(">>> [INFO] 🧠 PAConv 백본을 로드합니다.")
 elif args.model == 'DeepLA':
     model = DeepLA_Wrapper(args, args.landmark_num).to(device)
-    print(">>> [INFO] 🚀 DeepLA-Net 백본을 로드합니다.")
+    print(">>> [INFO] 🚀 DeepLA-Net 백본을 로드합니다. (오프셋 모드 적용)")
 elif args.model == 'DeepPA':
     model = DeepPA_Wrapper(args, args.landmark_num).to(device)
     print(">>> [INFO] 🔥 DeepPA (PAConv-Guided) 백본을 로드합니다.")
@@ -206,20 +206,48 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         start_time = time.time()
 
         point_input = point_norm.permute(0, 2, 1)
-        
-        # =========================================================
-        # 🚀 DeepPA 스위칭 로직 (Forward Pass)
-        # =========================================================
-        if args.model == 'DeepPA':
-            prior_hint = paconv_prior(point_input)
-            pred_heatmap_raw = model(point_input, prior_heatmap=prior_hint) # (B, K, N)
-        else:
-            pred_heatmap_raw = model(point_input) # (B, K, N)
-        # =========================================================
-            
-        pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)      # 시각화 및 IoU용 (B, N, K)
+        points_for_coords = point_norm
 
-        pred_landmark_norm = get_differentiable_coords(point_norm, pred_heatmap_raw, k=args.k_softargmax)
+        # =========================================================
+        # 🚀 평가 로직 (오프셋 vs 히트맵 스위칭)
+        # =========================================================
+        if args.model == 'DeepLA':
+            # 1. 오프셋 랜드마크 추출
+            pred_offsets = model(point_input)
+            pred_votes = points_for_coords.unsqueeze(2) + pred_offsets
+            pred_landmark_norm = pred_votes.mean(dim=1) 
+            
+            # 오프셋 모드에서는 히트맵 메트릭을 강제로 0으로 처리 (측정 불가)
+            cos_sim_k = torch.zeros((B, args.landmark_num)).to(device)
+            iou_k = torch.zeros((B, args.landmark_num)).to(device)
+            pred_heatmap = torch.zeros((B, N, args.landmark_num)).to(device)
+            
+        else:
+            # 2. 기존 히트맵 랜드마크 추출 (DeepPA, PAConv 등)
+            if args.model == 'DeepPA':
+                prior_hint = paconv_prior(point_input)
+                pred_heatmap_raw = model(point_input, prior_heatmap=prior_hint)
+            else:
+                pred_heatmap_raw = model(point_input)
+                
+            pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)
+            pred_landmark_norm = get_differentiable_coords(point_norm, pred_heatmap_raw, k=args.k_softargmax)
+            
+            # 히트맵 정량 평가 로직
+            pred_vec = pred_heatmap.permute(0, 2, 1) 
+            gt_vec = gt_heatmap.permute(0, 2, 1)     
+            
+            cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
+            
+            threshold = 0.1
+            pred_mask = (pred_heatmap > threshold).float() 
+            gt_mask = (gt_heatmap > threshold).float()     
+            
+            intersection_k = (pred_mask * gt_mask).sum(dim=1) 
+            union_k = (pred_mask + gt_mask).clamp(0, 1).sum(dim=1)
+            iou_k = ((intersection_k + 1e-6) / (union_k + 1e-6)) * 100.0
+        # =========================================================
+
         pred_landmark = (pred_landmark_norm * scale) + centroid
 
         if device.type == 'cuda':
@@ -227,31 +255,14 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         end_time = time.time()
         time_list.append(end_time - start_time)
 
-        # -----------------------------------------------------------
-        # 히트맵 정량 평가 (Per-Landmark Calculation)
-        # -----------------------------------------------------------
-        pred_vec = pred_heatmap.permute(0, 2, 1) 
-        gt_vec = gt_heatmap.permute(0, 2, 1)     
-        
-        cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
-        
         cos_sim_list.append(cos_sim_k.mean().item()) 
         per_landmark_cos_sim_list.append(cos_sim_k.cpu().numpy()) 
-
-        threshold = 0.1
-        pred_mask = (pred_heatmap > threshold).float() 
-        gt_mask = (gt_heatmap > threshold).float()     
-        
-        intersection_k = (pred_mask * gt_mask).sum(dim=1) 
-        union_k = (pred_mask + gt_mask).clamp(0, 1).sum(dim=1)
-        
-        iou_k = ((intersection_k + 1e-6) / (union_k + 1e-6)) * 100.0
         
         iou_list.append(iou_k.mean().item()) 
         per_landmark_iou_list.append(iou_k.cpu().numpy()) 
-        # -----------------------------------------------------------
 
-        if idx % 40 == 0:
+        # 오프셋 모드가 아닐 때만 히트맵 시각화 이미지 저장
+        if idx % 40 == 0 and args.model != 'DeepLA':
             points_np = point[0].cpu().numpy()
             heatmap_np = pred_heatmap[0].cpu().numpy()
             for lm_idx in range(heatmap_np.shape[1]):
@@ -272,7 +283,7 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         np.savetxt(os.path.join(asc_save_dir, f"pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
 # -----------------------------------------------------------------------------
-# 5. 결과 집계 및 텍스트 파일 저장
+# 5. 결과 집계 및 텍스트 파일 저장 (기존 포맷 완벽 복구)
 # -----------------------------------------------------------------------------
 if len(per_landmark_me_list) > 0:
     per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) 
@@ -281,22 +292,29 @@ if len(per_landmark_me_list) > 0:
     average_me = np.mean(lm_means)
     std_me = np.mean(lm_stds)
     
-    per_landmark_cos_array = np.vstack(per_landmark_cos_sim_list) 
-    lm_cos_means = np.mean(per_landmark_cos_array, axis=0)
-    lm_cos_stds = np.std(per_landmark_cos_array, axis=0)
-    
-    per_landmark_iou_array = np.vstack(per_landmark_iou_list) 
-    lm_iou_means = np.mean(per_landmark_iou_array, axis=0)
-    lm_iou_stds = np.std(per_landmark_iou_array, axis=0)
-    
+    if args.model != 'DeepLA':
+        per_landmark_cos_array = np.vstack(per_landmark_cos_sim_list) 
+        lm_cos_means = np.mean(per_landmark_cos_array, axis=0)
+        lm_cos_stds = np.std(per_landmark_cos_array, axis=0)
+        
+        per_landmark_iou_array = np.vstack(per_landmark_iou_list) 
+        lm_iou_means = np.mean(per_landmark_iou_array, axis=0)
+        lm_iou_stds = np.std(per_landmark_iou_array, axis=0)
+    else:
+        # 오프셋 모드일 때는 히트맵 메트릭 0 처리
+        lm_cos_means = np.zeros(args.landmark_num)
+        lm_cos_stds = np.zeros(args.landmark_num)
+        lm_iou_means = np.zeros(args.landmark_num)
+        lm_iou_stds = np.zeros(args.landmark_num)
 else:
     average_me, std_me = 0.0, 0.0
     lm_means, lm_stds = np.array([]), np.array([])
     lm_cos_means, lm_cos_stds = np.array([]), np.array([])
     lm_iou_means, lm_iou_stds = np.array([]), np.array([])
 
-sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
-sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
+# 기존 SR 측정 복구
+sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100 if len(me_list) > 0 else 0.0
+sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100 if len(me_list) > 0 else 0.0
 
 avg_cos_sim = np.mean(cos_sim_list) if len(cos_sim_list) > 0 else 0.0
 avg_iou = np.mean(iou_list) if len(iou_list) > 0 else 0.0
@@ -310,6 +328,12 @@ if args.accumulation_steps > 1:
 else:
     batch_str_log = f"{args.batch_size}"
 
+# train_len 변수가 파일 앞부분에서 생성되지 않았을 경우를 대비한 예외 처리
+try:
+    train_len_log = train_len
+except NameError:
+    train_len_log = "Unknown"
+
 with open(result_txt_path, "w") as f:
     f.write(f"==========================================\n")
     f.write(f"   Evaluation Result: {args.exp_name}\n")
@@ -319,7 +343,7 @@ with open(result_txt_path, "w") as f:
     f.write(f" Data Type   : {args.Eval_DataType}\n")
     user_comment = args.user_tag if args.user_tag else "None"
     f.write(f" User Comment: {user_comment}\n")
-    f.write(f" Train Data  : {train_len} samples\n")
+    f.write(f" Train Data  : {train_len_log} samples\n")
     f.write(f" Batch Size  : {batch_str_log}\n")
     f.write(f" Num Points  : {args.num_points}\n")
     f.write(f"------------------------------------------\n")
@@ -330,8 +354,12 @@ with open(result_txt_path, "w") as f:
     f.write(f" Avg Time   : {avg_time:.2f} ms/sample\n")
     f.write(f"------------------------------------------\n")
     f.write(f" [Heatmap Quantitative Evaluation (Global)]\n")
-    f.write(f" Cosine Sim : {avg_cos_sim:.2f} % (Distribution Match)\n")
-    f.write(f" mIoU       : {avg_iou:.2f} % (Region Overlap @ 0.1)\n")
+    if args.model == 'DeepLA':
+        f.write(f" Cosine Sim : N/A (Offset Model)\n")
+        f.write(f" mIoU       : N/A (Offset Model)\n")
+    else:
+        f.write(f" Cosine Sim : {avg_cos_sim:.2f} % (Distribution Match)\n")
+        f.write(f" mIoU       : {avg_iou:.2f} % (Region Overlap @ 0.1)\n")
     f.write(f"==========================================\n")
     
     if len(per_landmark_me_list) > 0:
@@ -344,19 +372,24 @@ with open(result_txt_path, "w") as f:
         for i in range(lm_means.shape[0]):
             f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
         
-        f.write("\n>>> Per-landmark Cosine Sim (Mean ± Std):\n")
-        for i in range(lm_cos_means.shape[0]):
-            f.write(f"    LM {i+1:02d}: {lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f} %\n")
+        if args.model != 'DeepLA':
+            f.write("\n>>> Per-landmark Cosine Sim (Mean ± Std):\n")
+            for i in range(lm_cos_means.shape[0]):
+                f.write(f"    LM {i+1:02d}: {lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f} %\n")
 
-        f.write("\n>>> Per-landmark mIoU (Mean ± Std) @ Th=0.1:\n")
-        for i in range(lm_iou_means.shape[0]):
-            f.write(f"    LM {i+1:02d}: {lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f} %\n")
+            f.write("\n>>> Per-landmark mIoU (Mean ± Std) @ Th=0.1:\n")
+            for i in range(lm_iou_means.shape[0]):
+                f.write(f"    LM {i+1:02d}: {lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f} %\n")
 
         f.write(f"    ------------------------------------\n")
         f.write(f"    All (ME) : {average_me:.3f} ± {std_me:.3f} mm\n")
 
+# 기존 콘솔 Print 복구
 print(f"\n[Done] Results saved to: {run_root}")
-print(f"      Filename: {filename}")
+print(f"       Filename: {filename}")
 print(f"Average ME: {average_me:.4f} ± {std_me:.4f}")
-print(f"Cosine Sim: {avg_cos_sim:.2f}% | mIoU: {avg_iou:.2f}%")
+if args.model == 'DeepLA':
+    print(f"Cosine Sim: N/A | mIoU: N/A (Offset Model)")
+else:
+    print(f"Cosine Sim: {avg_cos_sim:.2f}% | mIoU: {avg_iou:.2f}%")
 print(f"Avg Time  : {avg_time:.2f} ms")

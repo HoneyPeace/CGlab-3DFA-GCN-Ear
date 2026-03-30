@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
-from deepla_semseg import DeepLA_semseg
+# 🌟 [수정] 변경된 offset 모델 임포트
+from deepla_semseg import DeepLA_offset 
 
-# ==========================================
 import sys
 from pathlib import Path
-# ==========================================
 
 current_dir = Path(__file__).resolve().parent
 sys.path.append(str(current_dir / "utils" / "pointnet2_ops_lib"))
@@ -40,18 +39,15 @@ def farthest_point_sample(xyz, npoint):
         return centroids
 
 class DeepLA_Wrapper(nn.Module):
-    # [수정] train.py에서 landmark_num을 던져도 받을 수 있게 파라미터 복구
     def __init__(self, args, landmark_num=None):
         super(DeepLA_Wrapper, self).__init__()
         
         class Config: pass
         self.dl_args = dl_args = Config()
         
-        # 🔗 landmark_num이 들어오면 그것을 쓰고, 아니면 args에서 추출
         dl_args.num_classes = landmark_num if landmark_num is not None else args.landmark_num   
         num_points = args.num_points
         
-        # 🔗 My_args.py 완벽 연동
         dl_args.num_classes = args.landmark_num   
         num_points = args.num_points              
         
@@ -60,17 +56,9 @@ class DeepLA_Wrapper(nn.Module):
         dl_args.head_dim = 256    
         dl_args.mlp_ratio = 1.0               
         
-        # ==========================================
-        #  DeepLA-Net 스케일 설정 (여기서 depths만 바꾸면 모든게 자동!)
-        # ==========================================
+        # DeepLA-24 (현재 사용중)
+        dl_args.depths = [4, 4, 12, 4]         
         
-        # [Option 1] DeepLA-24 (현재 사용중)
-        #dl_args.depths = [4, 4, 12, 4]         
-        
-        # [Option 2] DeepLA-120 (필요 시 위 줄을 주석하고 아래 줄 주석 해제)
-        dl_args.depths = [20, 20, 60, 20] 
-        
-        # [자동화] 층 수에 따라 Gradient Checkpointing 자동 판단!
         total_depth = sum(dl_args.depths)
         if total_depth >= 120:
             dl_args.use_cp = True
@@ -97,7 +85,9 @@ class DeepLA_Wrapper(nn.Module):
         
         self.k = dl_args.ks[0]
         self.stage_count = len(dl_args.depths)
-        self.model = DeepLA_semseg(dl_args)
+        
+        # 🌟 [수정] 오프셋 모델로 교체
+        self.model = DeepLA_offset(dl_args)
 
     def forward(self, x):
         B, C, N = x.shape
@@ -141,7 +131,10 @@ class DeepLA_Wrapper(nn.Module):
         indices = up_idx_list + down_knn_list
         
         out = self.model(xyz, feature, indices)
+        
+        # 🌟 [수정] 훈련 중일 때는 offsets, spa, sem을 모두 반환
         if isinstance(out, tuple):
-            out = out[0]
-            
-        return out.permute(0, 2, 1).contiguous()
+            offsets, spa, sem = out
+            return offsets, spa, sem  # offsets shape: (B, N, K, 3)
+        else:
+            return out # 평가 시에는 offsets만 반환

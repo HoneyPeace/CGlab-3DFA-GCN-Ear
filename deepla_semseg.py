@@ -27,6 +27,7 @@ def checkpoint(function, *args, **kwargs):
         return torch_checkpoint(function, *args, **kwargs)
 
 class VFR(nn.Module):
+    # ... (기존 VFR 코드 완벽 동일) ...
     def __init__(self, in_dim, out_dim, bn_momentum, init=0.):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim, bias=False)
@@ -41,6 +42,7 @@ class VFR(nn.Module):
         return x
 
 class FFN(nn.Module):
+    # ... (기존 FFN 코드 완벽 동일) ...
     def __init__(self, in_dim, mlp_ratio, bn_momentum, act, init=0.):
         super().__init__()
         hid_dim = round(in_dim * mlp_ratio)
@@ -58,6 +60,7 @@ class FFN(nn.Module):
         return x
 
 class ResLFE_Block(nn.Module):
+    # ... (기존 ResLFE_Block 코드 완벽 동일) ...
     def __init__(self, dim, depth, drop_path, mlp_ratio, bn_momentum, act):
         super().__init__()
         self.depth = depth
@@ -81,6 +84,7 @@ class ResLFE_Block(nn.Module):
         return x
 
 class Stage(nn.Module):
+    # ... (기존 Stage 코드 완벽 동일. spa, sem 로스 계산 로직 유지됨) ...
     def __init__(self, args, depth=0):
         super().__init__()
         self.depth = depth
@@ -95,7 +99,7 @@ class Stage(nn.Module):
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             self.nbr_embed = nn.Sequential(
-                nn.Linear(6, nbr_hid_dim // 2, bias=False),  # [FIX] 7 -> 6 (XYZ 데이터용)
+                nn.Linear(6, nbr_hid_dim // 2, bias=False), 
                 nn.BatchNorm1d(nbr_hid_dim // 2, momentum=cp_bn_momentum),
                 args.act(),
                 nn.Linear(nbr_hid_dim // 2, nbr_hid_dim, bias=False),
@@ -174,7 +178,7 @@ class Stage(nn.Module):
         if self.first:
             nbr = pe.clone()
             x_knn = index_points(x, knn)
-            nbr = torch.cat([nbr, x_knn], dim=-1).view(-1, 6) # [FIX] 7 -> 6
+            nbr = torch.cat([nbr, x_knn], dim=-1).view(-1, 6)
             nbr_embed_func = lambda t: self.nbr_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
             nbr = checkpoint(nbr_embed_func, nbr) if self.training and self.cp else nbr_embed_func(nbr)
             nbr = self.nbr_proj(nbr)
@@ -210,7 +214,6 @@ class Stage(nn.Module):
             sub_x = None
             self.spa, self.sem = sub_spa, sub_sem
 
-        # [FIX] 논리적 오류(크래시)를 수정하여 완벽한 U-Net 디코더 구조 구현
         x = self.postproj(x.view(-1, x.shape[-1])).view(B, N, -1)
         sub_x = sub_x + x if sub_x is not None else x
         sub_x = self.drop(sub_x)
@@ -221,19 +224,24 @@ class Stage(nn.Module):
 
         return sub_x, sub_spa, sub_sem
 
-class DeepLA_semseg(nn.Module):
+
+# 🌟 [수정] 클래스 이름을 DeepLA_offset으로 변경하고 회귀용 헤드로 교체
+class DeepLA_offset(nn.Module):
     def __init__(self, args):
         super().__init__()
+        self.num_classes = args.num_classes # 랜드마크 개수 저장
         args.cp_bn_momentum = 1 - (1 - args.bn_momentum)**0.5
         self.stage = Stage(args)
-        self.seg_head = nn.Sequential(
+        
+        # 🌟 [핵심] 히트맵(1차원 확률)이 아닌 3D 벡터(dx, dy, dz)를 예측하는 오프셋 헤드
+        self.offset_head = nn.Sequential(
             nn.BatchNorm1d(args.head_dim, momentum=args.bn_momentum),
             args.act(),
             nn.Linear(args.head_dim, args.head_dim//2),
             nn.BatchNorm1d(args.head_dim//2, momentum=args.bn_momentum),
             args.act(),
-            nn.Dropout(0.5),
-            nn.Linear(args.head_dim//2, args.num_classes)
+            nn.Dropout(0.3), # 회귀(Regression)이므로 Dropout을 약간 낮춰 안정성 확보
+            nn.Linear(args.head_dim//2, args.num_classes * 3) # 출력 차원: 랜드마크 수 * 3차원
         )
         self.apply(self._init_weights)
 
@@ -245,9 +253,14 @@ class DeepLA_semseg(nn.Module):
 
     def forward(self, xyz, x, indices, pts_list=None):
         indices = indices[:]
+        
+        # 1. 인코더-디코더 통과 (spa, sem 로스 계산은 내부에서 알아서 수행됨)
         x, spa, sem = self.stage(x, xyz, None, indices, pts_list)
         B, N, C = x.shape
-        x = self.seg_head(x.view(-1, C)).view(B, N, -1)
+        
+        # 2. 오프셋 계산 및 형태 변환 (B, N, K, 3)
+        offsets = self.offset_head(x.view(-1, C)).view(B, N, self.num_classes, 3)
+        
         if self.training:
-            return x, spa, sem
-        return x
+            return offsets, spa, sem # 기존 보조 로스들을 그대로 리턴
+        return offsets
