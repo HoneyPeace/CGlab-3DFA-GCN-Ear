@@ -255,17 +255,37 @@ def train(args):
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
                 # =========================================================
-                # 🚀 Loss 스위칭 로직 (PAConv_heat vs DeepPA/DeepLA)
+                # ⚖️ [Scale Normalization] 스케일 정규화 (황금 밸런스 적용)
+                # =========================================================
+                # 목표 체급: 약 1.53 수준으로 모두 통일
+                norm_heatmap = loss_heatmap * 0.3   # 5.199 * 0.3  ≈ 1.55
+                norm_coord   = loss_coord   * 1.0   # 1.533 * 1.0  = 1.53 (기준점)
+                norm_surface = loss_surface * 35.0  # 0.041 * 37.0 ≈ 1.51
+                norm_struct  = loss_struct  * 5   # 0.327 * 4.7  ≈ 1.53
+                
+                # 🔍 첫 번째 에폭, 첫 번째 배치에서 순수 스케일 및 정규화 결과 출력
+                if epoch == 0 and i == 0:
+                    print(f"\n=========================================")
+                    print(f" 🔍 [Raw Loss Scale Check]")
+                    print(f"  - Heatmap : {loss_heatmap.item():.6f}  (Norm: {norm_heatmap.item():.6f})")
+                    print(f"  - Coord   : {loss_coord.item():.6f}  (Norm: {norm_coord.item():.6f})")
+                    print(f"  - Surface : {loss_surface.item():.6f}  (Norm: {norm_surface.item():.6f})")
+                    print(f"  - Struct  : {loss_struct.item():.6f}  (Norm: {norm_struct.item():.6f})")
+                    print(f"=========================================\n")
+                # =========================================================
+
+                # =========================================================
+                # 🚀 Loss 스위칭 로직 (정규화된 변수 norm_* 사용)
                 # =========================================================
                 if args.model == 'PAConv_heat':
                     # 🔥 무조건 히트맵만 100% 학습!
                     weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
-                    total_loss = loss_heatmap
+                    total_loss = norm_heatmap
                 else:
                     stage1_epochs = args.epochs // 5 
                     if epoch < stage1_epochs:
                         weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
-                        total_loss = loss_heatmap
+                        total_loss = norm_heatmap
                     else:
                         # 1. 나머지 3개의 로스를 위한 랜덤 가중치를 뽑습니다.
                         rand_weights = torch.rand(3).to(device)
@@ -273,11 +293,11 @@ def train(args):
                         # 2. 이 3개의 합이 딱 '0.95(95%)'가 되도록 맞춰줍니다.
                         rand_weights = (rand_weights / rand_weights.sum()) * 0.95
                         
-                        # 3. 히트맵은 0.05 고정, 나머지는 0.95를 나눠가진 값을 곱해줍니다.
-                        total_loss = (0.05 * loss_heatmap + 
-                                      rand_weights[0] * loss_coord + 
-                                      rand_weights[1] * loss_surface + 
-                                      rand_weights[2] * loss_struct)
+                        # 3. 히트맵은 0.05 고정, 나머지는 0.95를 나눠가진 값을 곱해줍니다. (정규화된 로스 사용)
+                        total_loss = (0.05 * norm_heatmap + 
+                                      rand_weights[0] * norm_coord + 
+                                      rand_weights[1] * norm_surface + 
+                                      rand_weights[2] * norm_struct)
                         
                         # (선택) 터미널 화면 출력을 위해 weights 변수를 예쁘게 다시 조립해 줍니다.
                         weights = torch.tensor([0.05, rand_weights[0], rand_weights[1], rand_weights[2]])
@@ -346,17 +366,23 @@ def train(args):
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
+                    # Val 루프도 동일한 정규화 상수 적용
+                    norm_heatmap = loss_heatmap * 0.3
+                    norm_coord   = loss_coord   * 1.0
+                    norm_surface = loss_surface * 37.0
+                    norm_struct  = loss_struct  * 4.7
+                    
                     # =========================================================
-                    # 🚀 Val 루프 Loss 스위칭 로직
+                    # 🚀 Val 루프 Loss 스위칭 로직 (정규화된 변수 norm_* 사용)
                     # =========================================================
                     if args.model == 'PAConv_heat':
-                        total_loss = loss_heatmap
+                        total_loss = norm_heatmap
                     else:
                         stage1_epochs = args.epochs // 5
                         if epoch < stage1_epochs:
-                            total_loss = loss_heatmap
+                            total_loss = norm_heatmap
                         else:
-                            total_loss = 0.25 * loss_heatmap + 0.25 * loss_coord + 0.25 * loss_surface + 0.25 * loss_struct
+                            total_loss = 0.25 * norm_heatmap + 0.25 * norm_coord + 0.25 * norm_surface + 0.25 * norm_struct
                     # =========================================================
 
                     val_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
