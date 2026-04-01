@@ -205,11 +205,14 @@ def train(args):
         
     model.apply(weight_init)
     
-    # 🚀 [신규 추가] 순수 기하학 곡률 로스 초기화
+    # =========================================================
+    # 🚀 [신규 연동] My_args.py의 인자들을 받아 하이브리드 표면 로스 초기화
+    # =========================================================
     surface_criterion = CurvatureSurfaceLoss(
         k_p2p=args.plane_knn if hasattr(args, 'plane_knn') else 5, 
-        k_curv=15, 
-        alpha=10.0
+        k_curv=args.curv_knn if hasattr(args, 'curv_knn') else 30, 
+        alpha=args.curv_alpha if hasattr(args, 'curv_alpha') else 10.0,
+        dir_weight=args.dir_weight if hasattr(args, 'dir_weight') else 1.0
     ).to(device)
 
     if args.loss == 'adaptive_wing': criterion = AdaptiveWingLoss()
@@ -229,7 +232,7 @@ def train(args):
     best_val_mm = float('inf')
 
     # =========================================================
-    # 🎯 [신규 추가] 4-Loss 통합 자동 스케일러 딕셔너리
+    # 🎯 4-Loss 통합 자동 스케일러 딕셔너리
     # =========================================================
     target_norm = 1.53
     auto_scales = {
@@ -265,10 +268,11 @@ def train(args):
                     pred_heatmap = model(point_input)
                 
                 points_for_coords = point_input.permute(0, 2, 1)
-                pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
+                # Soft-argmax도 args 연동
+                pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax if hasattr(args, 'k_softargmax') else 10)
                 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
+                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma if hasattr(args, 'focal_gamma') else 2.0)
                 loss_surface = surface_criterion(pred_coords, augmented_landmark, points_for_coords)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
@@ -378,10 +382,10 @@ def train(args):
                         pred_heatmap = model(point_input)
                     
                     points_for_coords = point_input.permute(0, 2, 1)
-                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
+                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax if hasattr(args, 'k_softargmax') else 10)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=args.focal_gamma)
+                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=args.focal_gamma if hasattr(args, 'focal_gamma') else 2.0)
                     loss_surface = surface_criterion(pred_coords, landmark_normal, points_for_coords)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     

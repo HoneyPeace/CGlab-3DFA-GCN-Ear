@@ -67,19 +67,21 @@ def find_knn_points(pred_coords, points, k=10):
     return knn_points
 
 # =====================================================================
-# [신규 추가] 자동 스케일링이 탑재된 곡률 기반 하이브리드 표면 로스
-# (기존 compute_point_to_plane_loss를 완전히 대체 및 업그레이드)
+# [신규 추가] 단위 통일(Unit-Aligned) 및 방향성(Eigenvector)이 결합된 하이브리드 표면 로스
 # =====================================================================
 
 class CurvatureSurfaceLoss(nn.Module):
-    def __init__(self, k_p2p=5, k_curv=15, alpha=10.0):
+    def __init__(self, k_p2p=5, k_curv=30, alpha=10.0, dir_weight=1.0):
         super().__init__()
         self.k_p2p = k_p2p
         self.k_curv = k_curv
         self.alpha = alpha
+        self.dir_weight = dir_weight # 방향성 로스 가중치
 
     def forward(self, pred_coords, gt_coords, points):
+        # -------------------------------------------------------------
         # 1. P2P 투영용 법선 추출 (좁은 영역)
+        # -------------------------------------------------------------
         knn_p2p_gt = find_knn_points(gt_coords, points, self.k_p2p)
         center_p2p_gt = knn_p2p_gt.mean(dim=2, keepdim=True)
         
@@ -88,7 +90,9 @@ class CurvatureSurfaceLoss(nn.Module):
         _, eigvec_p2p_gt = torch.linalg.eigh(cov_p2p_gt)
         normal_gt = eigvec_p2p_gt[..., 0] 
 
-        # 2. 곡률 추출 (넓은 영역)
+        # -------------------------------------------------------------
+        # 2. 공분산 행렬 생성 및 고유 분해 (넓은 영역)
+        # -------------------------------------------------------------
         knn_curv_pred = find_knn_points(pred_coords, points, self.k_curv)
         knn_curv_gt = find_knn_points(gt_coords, points, self.k_curv)
 
@@ -101,29 +105,51 @@ class CurvatureSurfaceLoss(nn.Module):
         cov_curv_pred = torch.matmul(centered_curv_pred.transpose(2, 3), centered_curv_pred)
         cov_curv_gt = torch.matmul(centered_curv_gt.transpose(2, 3), centered_curv_gt)
 
-        eigval_curv_pred, _ = torch.linalg.eigh(cov_curv_pred)
-        eigval_curv_gt, _ = torch.linalg.eigh(cov_curv_gt)
+        eigval_pred, eigvec_pred = torch.linalg.eigh(cov_curv_pred)
+        eigval_gt, eigvec_gt = torch.linalg.eigh(cov_curv_gt)
 
-        sum_eig_pred = torch.sum(eigval_curv_pred, dim=-1) + 1e-6
-        sum_eig_gt = torch.sum(eigval_curv_gt, dim=-1) + 1e-6
+        # -------------------------------------------------------------
+        # 3. 곡률 크기 (Magnitude) 추출
+        # -------------------------------------------------------------
+        sum_eig_pred = torch.sum(eigval_pred, dim=-1) + 1e-6
+        sum_eig_gt = torch.sum(eigval_gt, dim=-1) + 1e-6
 
-        c_pred = eigval_curv_pred[..., 0] / sum_eig_pred
-        c_gt = eigval_curv_gt[..., 0] / sum_eig_gt
+        c_pred = eigval_pred[..., 0] / sum_eig_pred
+        c_gt = eigval_gt[..., 0] / sum_eig_gt
 
+        # -------------------------------------------------------------
+        # 4. 가장 큰 아이겐벡터의 코사인 유사도 방향성(Direction) 추출
+        # -------------------------------------------------------------
+        primary_dir_pred = eigvec_pred[..., 2] # (B, K_lm, 3)
+        primary_dir_gt = eigvec_gt[..., 2].detach() # (B, K_lm, 3)
+
+        # PCA 부호 모호성(Sign Ambiguity) 해결을 위한 절댓값 코사인 유사도
+        cos_sim = torch.abs(torch.sum(primary_dir_pred * primary_dir_gt, dim=-1))
+
+        # -------------------------------------------------------------
+        # 5. 🌟 최종 Loss 조합 (단위 통일: 모든 무차원을 mm 거리의 페널티로 흡수)
+        # -------------------------------------------------------------
         c_gt = c_gt.detach()
         normal_gt = normal_gt.detach()
         center_p2p_gt = center_p2p_gt.squeeze(2).detach()
 
-        # 3. 로스 조합
-        loss_curvature = F.l1_loss(c_pred, c_gt)
+        # [1] 무차원(Dimensionless) 오차들 계산 (비율 & 각도)
+        diff_curvature = torch.abs(c_pred - c_gt)  # 곡률 형태 오차 (0 ~ 1)
+        diff_direction = 1.0 - cos_sim             # 곡선 방향 오차 (0 ~ 1)
+
+        # [2] 물리적 거리(Length) 오차 계산 (mm 단위)
         vector_to_plane = pred_coords - center_p2p_gt
         p2p_distance = torch.abs(torch.sum(vector_to_plane * normal_gt, dim=-1))
-        
-        weight_curv = 1.0 + self.alpha * c_gt
-        loss_p2p_weighted = (p2p_distance * weight_curv).mean()
 
-        # 순수 기하학적 Raw 오차만 반환
-        return loss_p2p_weighted + loss_curvature
+        # [3] 단일 단위로의 융합 (Unit Alignment)
+        # 무차원 오차들을 P2P 거리(mm)를 뻥튀기하는 '페널티 가중치'로 묶어버립니다.
+        # 수식: 거리(mm) * (1 + 알파*곡률오차 + 베타*방향오차)
+        weight_multiplier = 1.0 + (self.alpha * diff_curvature) + (self.dir_weight * diff_direction)
+        
+        # 🌟 최종 반환: 오직 '거리 차원(mm)' 하나만을 가지는 통합 로스
+        loss_unified = (p2p_distance * weight_multiplier).mean()
+
+        return loss_unified
 
 # =====================================================================
 # 구조적 위상 로스 (Structural / Pairwise Distance Loss)

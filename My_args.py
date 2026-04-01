@@ -97,3 +97,7 @@ parser.add_argument('--plane_knn', type=int, default=5, help='K points for Local
 
 parser.add_argument('--focal_gamma', type=float, default=2.0, help='Gamma for dynamic focal loss')
 parser.add_argument('--focal_max', type=float, default=5.0, help='Max clamp for focal weights')
+
+parser.add_argument('--curv_knn', type=int, default=30, help='K points for Macroscopic Curvature & Direction estimation')
+parser.add_argument('--curv_alpha', type=float, default=10.0, help='Penalty multiplier for curvature magnitude error')
+parser.add_argument('--dir_weight', type=float, default=1.0, help='Penalty multiplier for eigenvector direction error')
