@@ -160,6 +160,16 @@ def train(args):
     train_len = len(train_dataset)
     paths = get_experiment_paths(args, train_len)
 
+    # 📝 [신규 추가] TXT 로그 파일 초기화
+    log_file_path = os.path.join(paths['root'], 'training_log.txt')
+    with open(log_file_path, 'w') as f:
+        f.write(f"Experiment ID: {paths['root'].split('/')[-1]}\n")
+        f.write(f"Model Backbone: {args.model}\n")
+        f.write(f"Dataset: Train({args.train_dataset_name}) / Test({args.test_dataset_name})\n")
+        f.write("="*160 + "\n")
+        f.write(f"{'Epoch':<6} | {'T_Loss':<8} | {'T_HM':<8} | {'T_Crd':<8} | {'T_Srf':<8} | {'T_Str':<8} | {'T_mm':<6} || {'V_Loss':<8} | {'V_HM':<8} | {'V_Crd':<8} | {'V_Srf':<8} | {'V_Str':<8} | {'V_mm':<6} || {'W_HM':<6} | {'W_Crd':<6} | {'W_Srf':<6} | {'W_Str':<6}\n")
+        f.write("="*160 + "\n")
+
     print("=== [Phase 2.6] Backing up Data ===")
     process_data_storage(train_dataset, "train", paths)
     process_data_storage(test_dataset, "test", paths)
@@ -292,6 +302,10 @@ def train(args):
                     print(f"  - Surface : Raw {loss_surface.item():.5f} -> 곱해질 배수: x{auto_scales['surface']:.3f}")
                     print(f"  - Struct  : Raw {loss_struct.item():.5f} -> 곱해질 배수: x{auto_scales['struct']:.3f}")
                     print(f"=========================================\n")
+
+                    # 로그 파일에도 Auto-Scaler 배수 기록
+                    with open(log_file_path, 'a') as f:
+                        f.write(f"\n[Auto-Scaler Weights] Heatmap: x{auto_scales['heatmap']:.3f} | Coord: x{auto_scales['coord']:.3f} | Surface: x{auto_scales['surface']:.3f} | Struct: x{auto_scales['struct']:.3f}\n\n")
 
                 # 구해진 자동 배수를 곱하여 정규화(Normalization) 완료
                 norm_heatmap = loss_heatmap * auto_scales['heatmap']
@@ -431,26 +445,37 @@ def train(args):
         v_mm   = val_mm / num_val_batches
 
         # -------------------------------------------------------------
-        # [PRINT] 
+        # [PRINT & LOGGING to TXT] 
         # -------------------------------------------------------------
         print(f" [Train] 전체 Loss: {t_loss:.4f} | HM: {t_hm:.4f} | Crd: {t_crd:.4f} | Srf: {t_srf:.4f} | Struct: {t_str:.4f} | mm: {t_mm:.2f}")
         print(f" [Val]   전체 Loss: {v_loss:.4f} | HM: {v_hm:.4f} | Crd: {v_crd:.4f} | Srf: {v_srf:.4f} | Struct: {v_str:.4f} | mm: {v_mm:.2f}")
         
-        # 🚀 에폭별 로스 반영률(%) 모니터링 출력 스위칭
+        # 🚀 에폭별 로스 반영률(%) 모니터링 출력 스위칭 및 가중치 추출
         if args.model == 'PAConv_heat':
+            w_hm, w_crd, w_srf, w_str = 1.0, 0.0, 0.0, 0.0
             print(f" 📊 [로스 반영률] Heatmap: 100% (오직 히트맵 정답지 구축 중! 🎯)")
         else:
-            stage1_epochs = args.epochs // 5
-            if epoch < stage1_epochs:
+            if epoch < (args.epochs // 5):
+                w_hm, w_crd, w_srf, w_str = 1.0, 0.0, 0.0, 0.0
                 print(f" 📊 [로스 반영률] Heatmap: 100% | Coord: 0% | Surface: 0% | Struct: 0%  (Stage 1: 번역기 집중 학습 🔥)")
             else:
                 w_np = weights.detach().cpu().numpy()
-                print(f" 📊 [로스 반영률] Heatmap: {w_np[0]*100:.1f}% | Coord: {w_np[1]*100:.1f}% | Surface: {w_np[2]*100:.1f}% | Struct: {w_np[3]*100:.1f}%  (Stage 2: 4-Loss RLW 완전 해방 🌪️)")
+                w_hm, w_crd, w_srf, w_str = w_np[0], w_np[1], w_np[2], w_np[3]
+                print(f" 📊 [로스 반영률] Heatmap: {w_hm*100:.1f}% | Coord: {w_crd*100:.1f}% | Surface: {w_srf*100:.1f}% | Struct: {w_str*100:.1f}%  (Stage 2: 4-Loss RLW 완전 해방 🌪️)")
+
+        # 📝 매 에폭마다 텍스트 파일에 기록 덧붙이기 (Append)
+        with open(log_file_path, 'a') as f:
+            log_line = f"{epoch+1:<6d} | {t_loss:<8.4f} | {t_hm:<8.4f} | {t_crd:<8.4f} | {t_srf:<8.4f} | {t_str:<8.4f} | {t_mm:<6.2f} || {v_loss:<8.4f} | {v_hm:<8.4f} | {v_crd:<8.4f} | {v_srf:<8.4f} | {v_str:<8.4f} | {v_mm:<6.2f} || {w_hm:<6.3f} | {w_crd:<6.3f} | {w_srf:<6.3f} | {w_str:<6.3f}\n"
+            f.write(log_line)
 
         # 🏆 베스트 모델 저장 로직
         if v_mm < best_val_mm:
             best_val_mm = v_mm
             print(f" 🌟 [Best Model Saved] 최고 성능 갱신! 오차: {best_val_mm:.4f} mm")
+            
+            with open(log_file_path, 'a') as f:
+                f.write(f"  >>> *** Epoch {epoch+1}: Best Model Saved! (Val Error: {best_val_mm:.4f} mm) ***\n")
+                
             best_save_path = os.path.join(paths['models'], 'model_best.t7')
             torch.save(model.state_dict(), best_save_path)
 
