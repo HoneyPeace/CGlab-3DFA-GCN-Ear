@@ -40,19 +40,13 @@ def farthest_point_sample(xyz, npoint):
         return centroids
 
 class DeepLA_Wrapper(nn.Module):
-    # [수정] train.py에서 landmark_num을 던져도 받을 수 있게 파라미터 복구
     def __init__(self, args, landmark_num=None):
         super(DeepLA_Wrapper, self).__init__()
         
         class Config: pass
         self.dl_args = dl_args = Config()
         
-        # 🔗 landmark_num이 들어오면 그것을 쓰고, 아니면 args에서 추출
         dl_args.num_classes = landmark_num if landmark_num is not None else args.landmark_num   
-        num_points = args.num_points
-        
-        # 🔗 My_args.py 완벽 연동
-        dl_args.num_classes = args.landmark_num   
         num_points = args.num_points              
         
         dl_args.bn_momentum = 0.1
@@ -60,21 +54,16 @@ class DeepLA_Wrapper(nn.Module):
         dl_args.head_dim = 256    
         dl_args.mlp_ratio = 1.0               
         
-        # ==========================================
-        #  DeepLA-Net 스케일 설정 (여기서 depths만 바꾸면 모든게 자동!)
-        # ==========================================
+        # [Option 1] DeepLA-24
+        # dl_args.depths = [4, 4, 12, 4]         
         
-        # [Option 1] DeepLA-24 (현재 사용중)
-        #dl_args.depths = [4, 4, 12, 4]         
-        
-        # [Option 2] DeepLA-120 (필요 시 위 줄을 주석하고 아래 줄 주석 해제)
+        # [Option 2] DeepLA-120
         dl_args.depths = [20, 20, 60, 20] 
         
-        # [자동화] 층 수에 따라 Gradient Checkpointing 자동 판단!
         total_depth = sum(dl_args.depths)
         if total_depth >= 120:
             dl_args.use_cp = True
-            print(f">>> [INFO] 120층 이상({total_depth}층) 감지! OOM 방지를 위해 Gradient Checkpointing(use_cp)을 자동 활성화합니다.")
+            print(f">>> [INFO] 120층 이상({total_depth}층) 감지! OOM 방지를 위해 Gradient Checkpointing을 자동 활성화합니다.")
         else:
             dl_args.use_cp = False
             print(f">>> [INFO] {total_depth}층 감지! 최고 속도 유지를 위해 Gradient Checkpointing을 비활성화합니다.")
@@ -95,14 +84,20 @@ class DeepLA_Wrapper(nn.Module):
             
         dl_args.ns = [num_points, num_points // 4, num_points // 16, num_points // 64]
         
+        # 🌟 [신규 추가] 6채널 입력을 deepla_semseg 내부로 전달하기 위한 세팅
+        dl_args.in_channels = getattr(args, 'in_channels', 3)
+        
         self.k = dl_args.ks[0]
         self.stage_count = len(dl_args.depths)
         self.model = DeepLA_semseg(dl_args)
 
     def forward(self, x):
         B, C, N = x.shape
-        xyz = x.permute(0, 2, 1).contiguous()
-        feature = xyz  
+        
+        # 🌟 [핵심 보호막] 거리 계산은 무조건 앞의 3채널(xyz)만 사용!
+        xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
+        # 🌟 모델 내부로 들어가는 피처는 6채널 전체 보존!
+        feature = x.permute(0, 2, 1).contiguous()  
         device = x.device
         
         up_idx_list = []

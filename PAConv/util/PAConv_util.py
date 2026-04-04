@@ -17,12 +17,15 @@ def knn(x, k):
 
 def get_graph_feature(x, k=20, idx=None):
     """
-    x: input points (B, C, N)
-    return: edge features (B, 2*C, N, K)
+    x: input points (B, C, N) - 3채널 또는 6채널 입력
+    return: edge features (B, 10, N, K) 또는 (B, 16, N, K)
     """
-    batch_size, num_dims, num_points = x.size()         # (B, C, N)
+    batch_size, C_in, num_points = x.size()             # C_in은 3 또는 6
+    
+    # 🌟 KNN 거리 계산은 무조건 앞의 3채널(순수 xyz 물리 좌표)로만 수행!
+    xyz = x[:, :3, :]
     if idx is None:
-        idx, _ = knn(x, k=k)                            # idx: (B, N, K)
+        idx, _ = knn(xyz, k=k)                          # idx: (B, N, K)
 
     device = x.device
     
@@ -30,65 +33,75 @@ def get_graph_feature(x, k=20, idx=None):
     idx = idx + idx_base                                # (B, N, K) + base offset
     idx = idx.view(-1)                                  # (B*N*K,)
 
-    x = x.transpose(2, 1).contiguous()                  # (B, N, C)
-    feature = x.view(batch_size * num_points, -1)[idx, :]   # (B*N*K, C) 인덱싱
-    feature = feature.view(batch_size, num_points, k, num_dims)  # (B, N, K, C) = neighbor
+    x_trans = x.transpose(2, 1).contiguous()            # (B, N, C_in)
+    
+    # (B, N, K, C_in) 형태로 이웃 점과 중심 점 전개
+    neighbor = x_trans.view(batch_size * num_points, -1)[idx, :]   
+    neighbor = neighbor.view(batch_size, num_points, k, C_in)  
+    center = x_trans.view(batch_size, num_points, 1, C_in).repeat(1, 1, k, 1)  
 
-    x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)  # center: (B, N, K, C)
+    # 물리 좌표(xyz) 추출 및 거리 계산
+    neighbor_xyz = neighbor[..., :3]
+    center_xyz = center[..., :3]
+    relative_xyz = neighbor_xyz - center_xyz
+    dist = torch.linalg.vector_norm(relative_xyz, dim=3, keepdim=True)
 
-    dist = torch.linalg.vector_norm(feature - x, dim = 3, keepdim=True)
-    #feature = torch.cat((feature - x, x), dim=3)  # (B, N, K, 2*C) 6채널
-    feature = torch.cat((feature - x, feature, x, dist), dim=3)  # 결과: (B, N, K, 10) 10채널
-    """
-    feature = torch.cat((
-        feature - x,  # (B, N, K, 3)
-        feature,      # (B, N, K, 3)
-        x,            # (B, N, K, 3)
-        dist          # (B, N, K, 1)
-    ), dim=3)         # 결과: (B, N, K, 10)
-    """
-    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 10, N, K)
+    # 🌟 6채널(좌표+방향) 처리 로직
+    if C_in == 6:
+        neighbor_v = neighbor[..., 3:]
+        center_v = center[..., 3:]
+        relative_v = neighbor_v - center_v # 이웃으로 갈 때 곡률의 꺾임 정도
+        
+        # 16채널 조립: 상대위치(3) + 이웃위치(3) + 중심위치(3) + 거리(1) + 중심방향(3) + 방향꺾임(3)
+        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, center_v, relative_v), dim=3)
+    else:
+        # 기존 10채널 조립
+        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist), dim=3)
+
+    return feature.permute(0, 3, 1, 2).contiguous()     # (B, feature_C, N, K)
 
 
 def get_scorenet_input(x, idx, k):
+    batch_size, C_in, num_points = x.size()
 
-    batch_size = x.size(0)                                # B
-    num_points = x.size(2)                                # N
-    x = x.view(batch_size, -1, num_points)                # (B, C, N)
-
-    device = torch.device('cuda')  # 기존 코드 유지
+    device = x.device  
 
     idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points  # (B,1,1)
     idx = idx + idx_base                                 # (B, N, K)
     idx = idx.view(-1)                                   # (B*N*K,)
 
-    _, num_dims, _ = x.size()                            # num_dims = C (=3)
+    x_trans = x.transpose(2, 1).contiguous()                   # (B, N, C_in)
+    neighbor = x_trans.view(batch_size * num_points, -1)[idx, :]\
+                .view(batch_size, num_points, k, C_in)   # (B, N, K, C_in)
+    center = x_trans.view(batch_size, num_points, 1, C_in)\
+             .repeat(1, 1, k, 1)                         # (B, N, K, C_in)
+             
+    # 물리 좌표(xyz) 추출 및 거리 계산
+    neighbor_xyz = neighbor[..., :3]
+    center_xyz = center[..., :3]
+    relative_xyz = neighbor_xyz - center_xyz
+    dist = torch.linalg.vector_norm(relative_xyz, dim=3, keepdim=True)
 
-    x = x.transpose(2, 1).contiguous()                   # (B, N, C)
-    neighbor = x.view(batch_size * num_points, -1)[idx, :]\
-                .view(batch_size, num_points, k, num_dims)   # (B, N, K, C)
-    center = x.view(batch_size, num_points, 1, num_dims)\
-             .repeat(1, 1, k, 1)                         # (B, N, K, C)
-    dist = torch.linalg.vector_norm(neighbor - center, dim = 3, keepdim=True)
-    #feature = torch.cat((neighbor - center, neighbor), dim=3)  # (B, N, K, 2*C) 6채널
-    feature = torch.cat((neighbor - center, neighbor, center, dist), dim=3)  # 결과: (B, N, K, 10) 10채널
-    """
-    feature = torch.cat((
-        neighbor - center, # (B, N, K, 3)
-        neighbor,          # (B, N, K, 3)
-        center,            # (B, N, K, 3)
-        dist               # (B, N, K, 1)
-    ), dim=3)              # 결과: (B, N, K, 10)
-    """
-    return feature.permute(0, 3, 1, 2).contiguous()     # (B, 2*C, N, K) = (B, 6, N, K)
+    # 🌟 6채널(좌표+방향) 처리 로직
+    if C_in == 6:
+        neighbor_v = neighbor[..., 3:]
+        center_v = center[..., 3:]
+        relative_v = neighbor_v - center_v # 이웃으로 갈 때 곡률의 꺾임 정도
+        
+        # 16채널 조립: 상대위치(3) + 이웃위치(3) + 중심위치(3) + 거리(1) + 중심방향(3) + 방향꺾임(3)
+        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, center_v, relative_v), dim=3)
+    else:
+        # 기존 10채널 조립
+        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist), dim=3)
+
+    return feature.permute(0, 3, 1, 2).contiguous()     # (B, feature_C, N, K)
 
 
 
 def feat_trans_dgcnn(point_input, kernel, m):
     """transforming features using weight matrices"""
-    # following get_graph_feature in DGCNN: torch.cat((neighbor - center, neighbor), dim=3)
+    # point_input은 6채널이든 3채널이든 이 행렬 곱셈 레이어에서는 알아서 처리됩니다.
     B, _, N = point_input.size()                          # point_input: (B, Cin, N)
-    # kernel: (2*Cin, m*Cout)  으로 초기화되어 있음
 
     point_output = torch.matmul(
         point_input.permute(0, 2, 1).repeat(1, 1, 2),     # (B, N, 2*Cin)
@@ -105,7 +118,6 @@ def feat_trans_dgcnn(point_input, kernel, m):
 
 def feat_trans_pointnet(point_input, kernel, m):
     """transforming features using weight matrices"""
-    # no feature concat, following PointNet
     B, _, N = point_input.size()  # b, cin, n
     point_output = torch.matmul(point_input.permute(0, 2, 1), kernel).view(B, N, m, -1)  # b,n,m,cout
     return point_output
@@ -125,12 +137,12 @@ class ScoreNet(nn.Module):
                 self.mlp_bns_nohidden = nn.BatchNorm2d(out_channel)
 
         else:
-            self.mlp_convs_hidden.append(nn.Conv2d(in_channel, hidden_unit[0], 1, bias=False))  # from in_channel to first hidden
+            self.mlp_convs_hidden.append(nn.Conv2d(in_channel, hidden_unit[0], 1, bias=False))  
             self.mlp_bns_hidden.append(nn.BatchNorm2d(hidden_unit[0]))
-            for i in range(1, len(hidden_unit)):  # from 2nd hidden to next hidden to last hidden
+            for i in range(1, len(hidden_unit)):  
                 self.mlp_convs_hidden.append(nn.Conv2d(hidden_unit[i - 1], hidden_unit[i], 1, bias=False))
                 self.mlp_bns_hidden.append(nn.BatchNorm2d(hidden_unit[i]))
-            self.mlp_convs_hidden.append(nn.Conv2d(hidden_unit[-1], out_channel, 1, bias=not last_bn))  # from last hidden to out_channel
+            self.mlp_convs_hidden.append(nn.Conv2d(hidden_unit[-1], out_channel, 1, bias=not last_bn))  
             self.mlp_bns_hidden.append(nn.BatchNorm2d(out_channel))
 
     def forward(self, xyz, calc_scores='softmax', bias=0):
@@ -144,20 +156,20 @@ class ScoreNet(nn.Module):
                 scores = self.mlp_convs_nohidden(scores)                         # (B,out_ch,N,K)
         else:
             for i, conv in enumerate(self.mlp_convs_hidden):
-                if i == len(self.mlp_convs_hidden)-1:  # if the output layer, no ReLU
+                if i == len(self.mlp_convs_hidden)-1:  
                     if self.last_bn:
                         bn = self.mlp_bns_hidden[i]
-                        scores = bn(conv(scores))      # (B,out_ch,N,K)
+                        scores = bn(conv(scores))      
                     else:
-                        scores = conv(scores)          # (B,out_ch,N,K)
+                        scores = conv(scores)          
                 else:
                     bn = self.mlp_bns_hidden[i]
-                    scores = F.relu(bn(conv(scores)))  # (B,hidden_ch,N,K)
+                    scores = F.relu(bn(conv(scores)))  
 
         if calc_scores == 'softmax':
-            scores = F.softmax(scores, dim=1)+bias      # (B,out_ch,N,K)
+            scores = F.softmax(scores, dim=1)+bias      
         elif calc_scores == 'sigmoid':
-            scores = torch.sigmoid(scores)+bias         # (B,out_ch,N,K)
+            scores = torch.sigmoid(scores)+bias         
         else:
             raise ValueError('Not Implemented!')
 

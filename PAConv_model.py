@@ -25,15 +25,14 @@ class PAConv(nn.Module):
         #기존은 10차원에서 6차원으로 변경 <-- 06.07: 차원 수 의심으로 인한 변경
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices
         
-        self.scorenet2 = ScoreNet(10, self.m2, hidden_unit=self.hidden[0])
-        self.scorenet3 = ScoreNet(10, self.m3, hidden_unit=self.hidden[1])
-        self.scorenet4 = ScoreNet(10, self.m4, hidden_unit=self.hidden[2])
-        self.scorenet5 = ScoreNet(10, self.m5, hidden_unit=self.hidden[3])
+        # 🌟 [신규 추가] 입력이 6채널이면 16채널 기하학 피처, 아니면 10채널
+        in_channels = getattr(args, 'in_channels', 3)
+        self.edge_channels = 16 if in_channels == 6 else 10
         
-        #self.scorenet2 = ScoreNet(6, self.m2, hidden_unit=self.hidden[0])
-        #self.scorenet3 = ScoreNet(6, self.m3, hidden_unit=self.hidden[1])
-        #self.scorenet4 = ScoreNet(6, self.m4, hidden_unit=self.hidden[2])
-        #self.scorenet5 = ScoreNet(6, self.m5, hidden_unit=self.hidden[3])
+        self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
+        self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])
+        self.scorenet4 = ScoreNet(self.edge_channels, self.m4, hidden_unit=self.hidden[2])
+        self.scorenet5 = ScoreNet(self.edge_channels, self.m5, hidden_unit=self.hidden[3])
         
         i2 = 64       # channel dim of input_2nd
         o2 = i3 = 64  # channel dim of output_2st and input_3rd
@@ -67,10 +66,10 @@ class PAConv(nn.Module):
         self.bn7 = nn.BatchNorm1d(256, momentum=0.1)
         self.bn8 = nn.BatchNorm1d(128, momentum=0.1)
 
-        self.conv1 = nn.Sequential(nn.Conv2d(10, 64, kernel_size=1, bias=True),     # 10 18
+        # 🌟 첫 레이어도 다이나믹하게 10/16 채널 호환
+        self.conv1 = nn.Sequential(nn.Conv2d(self.edge_channels, 64, kernel_size=1, bias=True), 
                                    nn.BatchNorm2d(64, momentum=0.1))
-        #self.conv1 = nn.Sequential(nn.Conv2d(6, 64, kernel_size=1, bias=True),     # 6 18
-        #                           nn.BatchNorm2d(64, momentum=0.1))
+                                   
         self.convt = nn.Sequential(nn.Conv1d(64*5, 1024, kernel_size=1, bias=False),
                                    self.bnt)
 
@@ -87,51 +86,56 @@ class PAConv(nn.Module):
         
     def forward(self, x):
         B, C, N = x.size()
-        idx, _ = knn(x, k=self.k)
-        xyz = get_scorenet_input(x, k=self.k, idx=idx)  # ScoreNet input
-        # use MLP at the 1st layer, same with DGCNN
-        x = get_graph_feature(x, k=self.k, idx=idx)
+        
+        # 🌟 [핵심 보호막] KNN 거리 계산은 무조건 앞의 3채널(순수 xyz 물리 좌표)로만 수행!
+        physical_xyz = x[:, :3, :].contiguous()
+        idx, _ = knn(physical_xyz, k=self.k)
+        
+        # 🌟 [다이나믹 16채널 조립] PAConv_util에 전체(6채널) 데이터를 넘겨서 16채널 엣지 피처 생성
+        scorenet_input = get_scorenet_input(x, k=self.k, idx=idx)  # ScoreNet input
+        x_edge_feat = get_graph_feature(x, k=self.k, idx=idx)
 
-        x = F.relu(self.conv1(x))
-        x1 = x.max(dim=-1, keepdim=False)[0]
-        # replace the last 4 DGCNN-EdgeConv with PAConv:
+        x_out = F.relu(self.conv1(x_edge_feat))
+        x1 = x_out.max(dim=-1, keepdim=False)[0]
+        
         """CUDA implementation of PAConv: (presented in the supplementary material of the paper)"""
         """feature transformation:"""
         x2, center2 = feat_trans_dgcnn(point_input=x1, kernel=self.matrice2, m=self.m2)
-        score2 = self.scorenet2(xyz, calc_scores=self.calc_scores, bias=0)
+        score2 = self.scorenet2(scorenet_input, calc_scores=self.calc_scores, bias=0)
         """assemble with scores:"""
-        x = assemble_dgcnn(score=score2, point_input=x2, center_input=center2, knn_idx=idx, aggregate='sum')
-        x2 = F.relu(self.bn2(x))
+        x_asm = assemble_dgcnn(score=score2, point_input=x2, center_input=center2, knn_idx=idx, aggregate='sum')
+        x2 = F.relu(self.bn2(x_asm))
 
         x3, center3 = feat_trans_dgcnn(point_input=x2, kernel=self.matrice3, m=self.m3)
-        score3 = self.scorenet3(xyz, calc_scores=self.calc_scores, bias=0)
-        x = assemble_dgcnn(score=score3, point_input=x3, center_input=center3, knn_idx=idx, aggregate='sum')
-        x3 = F.relu(self.bn3(x))
+        score3 = self.scorenet3(scorenet_input, calc_scores=self.calc_scores, bias=0)
+        x_asm = assemble_dgcnn(score=score3, point_input=x3, center_input=center3, knn_idx=idx, aggregate='sum')
+        x3 = F.relu(self.bn3(x_asm))
 
         x4, center4 = feat_trans_dgcnn(point_input=x3, kernel=self.matrice4, m=self.m4)
-        score4 = self.scorenet4(xyz, calc_scores=self.calc_scores, bias=0)
-        x = assemble_dgcnn(score=score4, point_input=x4, center_input=center4, knn_idx=idx, aggregate='sum')
-        x4 = F.relu(self.bn4(x))
+        score4 = self.scorenet4(scorenet_input, calc_scores=self.calc_scores, bias=0)
+        x_asm = assemble_dgcnn(score=score4, point_input=x4, center_input=center4, knn_idx=idx, aggregate='sum')
+        x4 = F.relu(self.bn4(x_asm))
 
         x5, center5 = feat_trans_dgcnn(point_input=x4, kernel=self.matrice5, m=self.m5)
-        score5 = self.scorenet5(xyz, calc_scores=self.calc_scores, bias=0)
-        x = assemble_dgcnn(score=score5, point_input=x5, center_input=center5, knn_idx=idx, aggregate='sum')
-        x5 = F.relu(self.bn5(x))
+        score5 = self.scorenet5(scorenet_input, calc_scores=self.calc_scores, bias=0)
+        x_asm = assemble_dgcnn(score=score5, point_input=x5, center_input=center5, knn_idx=idx, aggregate='sum')
+        x5 = F.relu(self.bn5(x_asm))
 
         xx = torch.cat((x1, x2, x3, x4, x5), dim=1)
 
         xc = F.relu(self.convt(xx))
         xc = F.adaptive_max_pool1d(xc, 1).view(B, -1)
         cls = xc.view(B, 1024, 1).repeat(1, 1, N)
-        x = torch.cat((xx, cls), dim=1)
-        x = F.relu(self.conv6(x))
-        x = self.dp1(x)
-        x = F.relu(self.conv7(x))
-        x = self.dp2(x)
-        x = F.relu(self.conv8(x))
+        x_concat = torch.cat((xx, cls), dim=1)
+        
+        x_res = F.relu(self.conv6(x_concat))
+        x_res = self.dp1(x_res)
+        x_res = F.relu(self.conv7(x_res))
+        x_res = self.dp2(x_res)
+        x_res = F.relu(self.conv8(x_res))
+        
         """ Output the heatmap regression result: """
-        x = self.conv9(x) # 06.11 추가 모델 출력 후 softmax 적용 확인
-        x = F.softmax(x, dim=1)  # 06.11 추가 모델 출력 후 softmax 적용 확인
-        return x
-
-
+        x_res = self.conv9(x_res) 
+        x_res = F.softmax(x_res, dim=1)  
+        
+        return x_res

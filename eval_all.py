@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: eval_all.py
-@Description: Evaluation script with Quantitative Heatmap Metrics & DeepPA Support
+@Description: Evaluation script with Quantitative Heatmap Metrics & DeepPA Support & 🌟 6-Channel Compatibility
 '''
 
 from __future__ import print_function, division
@@ -46,6 +46,7 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
     ]
     for pos, elev, azim, title in views:
         ax = fig.add_subplot(pos, projection='3d')
+        # 🌟 시각화는 앞의 3채널(xyz)만 사용하도록 보장
         ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=heatmap, cmap='jet', s=15, alpha=0.8)
         ax.view_init(elev=elev, azim=azim)
         ax.set_title(title)
@@ -100,10 +101,22 @@ print(f"Loading Model: {args.model_epoch}")
 print(f"Loading Data : {data_dir}")
 
 # -----------------------------------------------------------------------------
-# 2. 데이터 로드
+# 2. 데이터 로드 (🌟 6채널 다이나믹 스위칭 적용)
 # -----------------------------------------------------------------------------
 try:
-    shape_sample = np.load(os.path.join(data_dir, f"shape_{args.Eval_DataType}.npy"), allow_pickle=True)
+    in_channels = getattr(args, 'in_channels', 3)
+    
+    # 백업 폴더에는 항상 shape_test.npy 이름으로 저장되므로 이름 고정! (내용물은 6채널)
+    shape_filename = f"shape_{args.Eval_DataType}.npy"
+    
+    if in_channels == 6:
+        print(f">>> [INFO] 🎯 6-Channel Mode: Loading Geometric Features from backed up {shape_filename}")
+    else:
+        print(f">>> [INFO] 🧊 3-Channel Mode: Loading Standard XYZ from {shape_filename}")
+        
+    shape_sample = np.load(os.path.join(data_dir, shape_filename), allow_pickle=True)
+        
+    shape_sample = np.load(os.path.join(data_dir, shape_filename), allow_pickle=True)
     landmark_all = np.load(os.path.join(data_dir, f"landmark_{args.Eval_DataType}.npy"), allow_pickle=True)
     heatmap_sample = np.load(os.path.join(data_dir, f"Heat_data_{args.Eval_DataType}.npy"), allow_pickle=True)
     
@@ -146,7 +159,6 @@ if args.model == 'DeepPA':
     print(">>> [Prior Load] Loading Pre-trained PAConv (0.3mm SOTA) for DeepPA Eval...")
     paconv_prior = PAConv(args, args.landmark_num).to(device)
     
-    # train.py와 동일한 PAConv 가중치 절대 경로
     best_paconv_path = os.path.join("..", "PAConv_model", "model_epoch_500.t7") 
     paconv_prior.load_state_dict(torch.load(best_paconv_path, map_location=device))
     paconv_prior.eval()
@@ -167,7 +179,6 @@ else:
     print(f"Error: 지원하지 않는 모델입니다 -> {args.model}")
     sys.exit(1)
 
-# 평가할 모델 파일 로드
 model.load_state_dict(torch.load(model_path, map_location=device))
 model.eval()
 
@@ -194,21 +205,31 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
     real_name = name_sample[idx]
     
     B, N, C = point.shape
-    centroid = torch.mean(point, axis=1, keepdim=True)
-    point_centered = point - centroid
+    
+    # 🌟 [핵심 보호막] 정규화(Normalization)는 오직 순수 3D 좌표(xyz)로만 계산!
+    point_xyz = point[:, :, :3]
+    centroid = torch.mean(point_xyz, axis=1, keepdim=True)
+    point_centered = point_xyz - centroid
     m = torch.max(torch.sqrt(torch.sum(point_centered ** 2, axis=2)), axis=1)[0]
     scale = m.view(-1, 1, 1)
-    point_norm = point_centered / scale 
+    point_norm_xyz = point_centered / scale 
+    
+    # 🌟 6채널일 경우 정규화된 xyz 뒤에 방향 벡터를 다시 조립
+    if C == 6:
+        point_dir = point[:, :, 3:]
+        point_norm = torch.cat([point_norm_xyz, point_dir], dim=-1)
+    else:
+        point_norm = point_norm_xyz
     
     with torch.no_grad():
         if device.type == 'cuda':
             torch.cuda.synchronize()
         start_time = time.time()
 
-        point_input = point_norm.permute(0, 2, 1)
+        point_input = point_norm.permute(0, 2, 1).contiguous()
         
         # =========================================================
-        # 🚀 DeepPA 스위칭 로직 (Forward Pass)
+        # 🚀 모델 Forward Pass (6채널 완벽 호환)
         # =========================================================
         if args.model == 'DeepPA':
             prior_hint = paconv_prior(point_input)
@@ -219,7 +240,8 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
             
         pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)      # 시각화 및 IoU용 (B, N, K)
 
-        pred_landmark_norm = get_differentiable_coords(point_norm, pred_heatmap_raw, k=args.k_softargmax)
+        # 🌟 랜드마크 투영은 순수 3차원 물리 공간(xyz)에서만 수행!
+        pred_landmark_norm = get_differentiable_coords(point_norm_xyz, pred_heatmap_raw, k=args.k_softargmax)
         pred_landmark = (pred_landmark_norm * scale) + centroid
 
         if device.type == 'cuda':
@@ -252,7 +274,7 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         # -----------------------------------------------------------
 
         if idx % 40 == 0:
-            points_np = point[0].cpu().numpy()
+            points_np = point_xyz[0].cpu().numpy() # 🌟 시각화용 3D 좌표 보장
             heatmap_np = pred_heatmap[0].cpu().numpy()
             for lm_idx in range(heatmap_np.shape[1]):
                  save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], 
@@ -322,6 +344,7 @@ with open(result_txt_path, "w") as f:
     f.write(f" Train Data  : {train_len} samples\n")
     f.write(f" Batch Size  : {batch_str_log}\n")
     f.write(f" Num Points  : {args.num_points}\n")
+    f.write(f" In Channels : {in_channels}\n")
     f.write(f"------------------------------------------\n")
     f.write(f" Average ME : {average_me:.4f} mm\n")
     f.write(f" Average Std: {std_me:.4f} mm\n")

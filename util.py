@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: util.py
-@Description: Includes Partition Logic, Name Saving & FPS Progress Bar (C++ Accelerated).
+@Description: Includes Partition Logic, Name Saving & FPS Progress Bar, and 🌟 6-Channel Geometric Feature Pre-computation.
 '''
 
 import os 
@@ -55,7 +55,6 @@ def read_ply_files_from_folder(folder_path):
 
     for f in tqdm(files, desc="Loading Shapes", unit="file"):
         try:
-            # 파일명 추출 (확장자 제거)
             basename = os.path.splitext(os.path.basename(f))[0]
             name_list.append(basename)
 
@@ -88,7 +87,6 @@ def read_asc_files_from_folder(folder_path):
 # 1. Shape Data Load (partition 인자 유지)
 # -----------------------------------------------------------------------------
 def load_shape_data(dataset, data_root, partition=None):
-    # 1. Partition에 따른 폴더 우선 탐색
     target_folder_name = None
     if partition == 'train':
         target_folder_name = 'train' 
@@ -102,7 +100,6 @@ def load_shape_data(dataset, data_root, partition=None):
             if len(shapes) > 0:
                 return shapes, names
 
-    # 2. 기존 데이터셋 이름 하드코딩 처리 (Legacy Support)
     dataset_dir = os.path.join(data_root, dataset)
 
     if dataset == 'Ear296_Korean':
@@ -135,7 +132,6 @@ def load_shape_data(dataset, data_root, partition=None):
 # 2. Landmark Position Load (partition 인자 유지)
 # -----------------------------------------------------------------------------
 def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
-    # 1. Partition에 따른 폴더 우선 탐색
     target_folder_name = None
     if partition == 'train':
         target_folder_name = 'train'
@@ -150,7 +146,6 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
                 print(f">> Loaded {len(lms)} landmarks from [{target_folder_name}] directly.")
                 return lms
 
-    # 2. 기존 로직
     dataset_dir = os.path.join(data_root, dataset)
     
     if 'Ear' in dataset:
@@ -164,7 +159,6 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
             landmarks = read_asc_files_from_folder(target_folder)
             if landmarks: return landmarks
 
-        # [Fallback] Index 기반
         print(">> .asc files missing. Falling back to Index-based derivation.")
         index_path = os.path.join(data_root, 'Ear296_Korean', 'template_registered_data_mat', 'Ear296_Korean.mat')
         if not os.path.exists(index_path):
@@ -239,17 +233,12 @@ def get_dists(points1, points2):
     dists = torch.where(dists < 0, torch.ones_like(dists) * 1e-7, dists)
     return torch.sqrt(dists).float()
 
-# ==========================================================
-# [수정됨] C++ 커널을 연동한 초고속 FPS 래퍼 함수
-# ==========================================================
 def fps(xyz, M):
     if USE_CPP_FPS_UTIL and xyz.is_cuda:
-        # C++ 커널 활용 (0.001초 컷)
         xyz = xyz.contiguous()
         idx = fps_cpp(xyz, M)
         return idx.long()
     else:
-        # 기존 PyTorch 반복문 로직 (안전장치용 백업)
         device = xyz.device
         B, N, C = xyz.shape
         centroids = torch.zeros(size=(B, M), dtype=torch.long).to(device)
@@ -349,8 +338,50 @@ def get_3D_FAN_NME(pred_landmark, gt_landmark):
     NME = torch.mean(NME_single)
     return NME, NME_single
 
+# =============================================================================
+# 🌟 [신규 추가] Offline 6-Channel (좌표+주방향) 피처 생성기 (OOM 방지용 배치 처리)
+# =============================================================================
+def compute_principal_directions(shapes, k=15):
+    """
+    모든 샘플링된 3D 좌표에 대해 k-NN을 수행하여 주방향 벡터(Principal Direction)를 추출합니다.
+    GPU VRAM OOM(Out of Memory) 방지를 위해 배치(Batch) 단위로 쪼개서 연산합니다.
+    """
+    dirs_list = []
+    batch_size = 32 # VRAM 안전선
+    
+    for i in tqdm(range(0, len(shapes), batch_size), desc="   Calc 6-Ch Geometrics"):
+        batch_shapes = shapes[i:i+batch_size]
+        shapes_tensor = torch.tensor(np.array(batch_shapes), dtype=torch.float32).to(device)
+        B, N, _ = shapes_tensor.shape
+        
+        # 1. K-NN 거리 계산 및 이웃 추출
+        dist_matrix = torch.cdist(shapes_tensor, shapes_tensor)
+        _, knn_indices = torch.topk(dist_matrix, k, dim=2, largest=False)
+        
+        idx_expanded = knn_indices.unsqueeze(-1).expand(-1, -1, -1, 3)
+        shapes_expanded = shapes_tensor.unsqueeze(1).expand(-1, N, -1, -1)
+        knn_points = torch.gather(shapes_expanded, 2, idx_expanded)
+        
+        # 2. 공분산 행렬 생성 및 고유값 분해
+        center = knn_points.mean(dim=2, keepdim=True)
+        centered = knn_points - center
+        cov = torch.matmul(centered.transpose(2, 3), centered)
+        _, eigvec = torch.linalg.eigh(cov)
+        
+        # 3. 가장 긴 축(주방향) 추출
+        principal_dir = eigvec[..., 2]
+        
+        # 4. 방향성 통일 (부호 모호성 제거)
+        dot_product = torch.sum(principal_dir * center.squeeze(2), dim=-1, keepdim=True)
+        principal_dir = principal_dir * torch.sign(dot_product)
+        
+        # 결과를 리스트에 안전하게 저장 (CPU 메모리로 이동)
+        dirs_list.extend(principal_dir.cpu().numpy())
+        
+    return dirs_list
+
 # -----------------------------------------------------------------------------
-# Main Sampling Function (수정 유지: partition 처리 및 name 저장)
+# Main Sampling Function (수정 유지: partition 처리 및 🌟 6채널 저장 로직 추가)
 # -----------------------------------------------------------------------------
 def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data', partition=None):
     # 파일명 접미사 설정
@@ -385,6 +416,16 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
         print("Sampling failed or empty.")
         return
 
+    # 🌟 [신규 핵심 추가] 6채널(xyz + v_x,v_y,v_z) 데이터 오프라인 베이킹
+    print('   Baking 6-Channel Geometric Features (Principal Directions)...')
+    principal_dirs = compute_principal_directions(shape_sample, k=15)
+    
+    shape_6ch_sample = []
+    for i in range(len(shape_sample)):
+        # (2048, 3) 과 (2048, 3) 을 이어붙여 (2048, 6) 텐서로 결합
+        shape_6ch = np.concatenate([shape_sample[i], principal_dirs[i]], axis=-1)
+        shape_6ch_sample.append(shape_6ch)
+
     # 5. Save
     save_base_dir = os.path.join(data_root, f"{dataset}-npy")
     os.makedirs(save_base_dir, exist_ok=True)
@@ -392,6 +433,10 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
     print(f"   Saving to: {save_base_dir} (Suffix: _{suffix})")
     np.save(os.path.join(save_base_dir, f'Heat_data_{suffix}.npy'), Heat_data_sample)
     np.save(os.path.join(save_base_dir, f'shape_{suffix}.npy'),      shape_sample)
+    
+    # 🌟 6채널 전용 NPY 파일 저장! (train.py에서 args.in_channels가 6일 때 이걸 읽게 됩니다)
+    np.save(os.path.join(save_base_dir, f'shape_6ch_{suffix}.npy'),  shape_6ch_sample) 
+    
     np.save(os.path.join(save_base_dir, f'landmark_{suffix}.npy'),   landmark_position_sample)
     
     # [추가됨] 이름 저장

@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2)
 @File: My_args.py
-@Description: Added --train_len for explicit folder finding.
+@Description: Added --train_len for explicit folder finding, Focal loss params, and --in_channels for 6-dim geometric features.
 '''
 
 import argparse
@@ -30,13 +30,16 @@ parser.add_argument('--test_dataset_name', type=str, default='', help='Test data
 parser.add_argument('--data_root', type=str, default='../data', help='Root directory of data')
 parser.add_argument('--output_root', type=str, default='../results', help='Root directory for results')
 
+# 🌟 [신규 추가] 입력 채널 설정 (3채널: 순수 xyz / 6채널: xyz + 주방향 벡터)
+parser.add_argument('--in_channels', type=int, default=3, help='Input channels: 3 for (x,y,z), 6 for (x,y,z, vx,vy,vz)')
+
 # =============================================================================
 # [2] 학습 설정 (Train Args)
 # =============================================================================
 parser.add_argument('--eval', type=str2bool, default=False, help='evaluate the model')
 parser.add_argument('--batch_size', type=int, default=32, metavar='batch_size', help='Size of batch')
 parser.add_argument('--test_batch_size', type=int, default=1, metavar='batch_size', help='Size of batch')
-parser.add_argument('--epochs', type=int, default=250, metavar='N', help='number of episode to train')
+parser.add_argument('--epochs', type=int, default=500, metavar='N', help='number of episode to train')
 parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
 parser.add_argument('--accumulation_steps', type=int, default=1, help='Gradient Accumulation Steps')
 
@@ -83,21 +86,21 @@ parser.add_argument('--run_id', type=str, default='', help='Load specific run fr
 parser.add_argument('--use_split_dataset', type=str2bool, default=True, help='Use split dataset mode')
 parser.add_argument('--user_tag', type=str, default='', help='Custom tag added to the folder name')
 
-# [추가됨] 평가 시 폴더명을 정확히 찾기 위해 사용 (학습 데이터 개수)
-# 예: train.py가 train2290 으로 저장했다면 여기도 2290을 적어야 함
-parser.add_argument('--train_len', type=int, default=2290, help='Number of training samples used in folder name')
+# 평가 시 폴더명을 정확히 찾기 위해 사용 (학습 데이터 개수)
+parser.add_argument('--train_len', type=int, default=203, help='Number of training samples used in folder name')
 
 # =============================================================================
-# [새로 추가] 하이브리드 로스 & 3D 투영 하이퍼파라미터
+# [7] 하이브리드 로스 & 3D 투영 하이퍼파라미터
 # =============================================================================
 parser.add_argument('--alpha_init', type=float, default=0.5, help='Initial weight for Coordinate L1 Loss')
 parser.add_argument('--beta_init', type=float, default=0.1, help='Initial weight for Point-to-Plane Surface Loss')
 parser.add_argument('--k_softargmax', type=int, default=10, help='Top-K points used for Soft-argmax')
 parser.add_argument('--plane_knn', type=int, default=5, help='K points for Local Tangent Plane estimation')
 
-parser.add_argument('--focal_gamma', type=float, default=2.0, help='Gamma for dynamic focal loss')
-parser.add_argument('--focal_max', type=float, default=5.0, help='Max clamp for focal weights')
-
 parser.add_argument('--curv_knn', type=int, default=30, help='K points for Macroscopic Curvature & Direction estimation')
 parser.add_argument('--curv_alpha', type=float, default=10.0, help='Penalty multiplier for curvature magnitude error')
 parser.add_argument('--dir_weight', type=float, default=1.0, help='Penalty multiplier for eigenvector direction error')
+
+# 🎯 다이나믹 포칼 로스 인자 (이미 잘 들어가 있습니다!)
+parser.add_argument('--focal_gamma', type=float, default=1.0, help='Gamma for dynamic focal loss')
+parser.add_argument('--focal_max', type=float, default=5.0, help='Max clamp for focal weights')

@@ -93,14 +93,12 @@ class Stage_PA(nn.Module):
 
         dim = args.dims[depth]
         
-        # 🔥 [Deep Fusion] 각 Stage의 차원에 맞게 히트맵 힌트를 변환해주는 전용 어댑터
         self.prior_proj = nn.Sequential(
             nn.Linear(args.num_classes, dim, bias=False),
             nn.BatchNorm1d(dim, momentum=args.bn_momentum),
             args.act()
         )
         
-        # 🚀 [Concat Fusion] 단순 덧셈 대신, 2배로 늘어난 채널(dim * 2)을 최적의 비율로 다시 압축해주는 믹서기 장착!
         self.fusion_mlp = nn.Sequential(
             nn.Linear(dim * 2, dim, bias=False),
             nn.BatchNorm1d(dim, momentum=args.bn_momentum),
@@ -109,8 +107,13 @@ class Stage_PA(nn.Module):
 
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
+            
+            # 🌟 [신규 추가] args.in_channels가 6이면 16채널 피처, 아니면 10채널을 받도록 자동 조정
+            in_channels = getattr(args, 'in_channels', 3)
+            in_feat_dim = 16 if in_channels == 6 else 10
+            
             self.nbr_embed = nn.Sequential(
-                nn.Linear(10, nbr_hid_dim // 2, bias=False),  
+                nn.Linear(in_feat_dim, nbr_hid_dim // 2, bias=False),  
                 nn.BatchNorm1d(nbr_hid_dim // 2, momentum=cp_bn_momentum),
                 args.act(),
                 nn.Linear(nbr_hid_dim // 2, nbr_hid_dim, bias=False),
@@ -170,7 +173,6 @@ class Stage_PA(nn.Module):
         if not self.last:
             self.sub_stage = Stage_PA(args, depth + 1)
 
-    # 🔥 prior_heatmap 입력 추가
     def forward(self, x, xyz, prev_knn, indices, pts_list, prior_heatmap=None, sub_spa=None, sub_sem=None):
         B, N_in, C_in = x.shape
         
@@ -181,7 +183,6 @@ class Stage_PA(nn.Module):
             x_vfr = index_points(self.vfr(x, prev_knn), ids)
             x = x_skip + x_vfr
             
-            # 🔥 [Deep Fusion] 3D 좌표가 줄어들 때, 힌트(prior)도 똑같은 비율과 위치로 압축!
             if prior_heatmap is not None:
                 prior_heatmap = index_points(prior_heatmap, ids)
             
@@ -192,42 +193,33 @@ class Stage_PA(nn.Module):
         pe = xyz_knn - xyz.unsqueeze(2)
 
         if self.first:
-            # 1. 상대좌표 (pe): (B, N, K, 3)
             nbr_rel = pe.clone() 
-            
-            # 2. 중심점/이웃좌표 (x_knn): (B, N, K, 3)
             x_knn = index_points(x, knn) 
-            
-            # 3. 거리 차이 (dist): (B, N, K, 1)
-            # L2 Norm을 계산하여 거리 정보를 명시적으로 추출
             dist = torch.norm(nbr_rel, dim=-1, keepdim=True) 
-            
-            # 4. 방향 벡터 (vector): (B, N, K, 3)
-            # 상대좌표를 거리로 나누어 정규화된 방향 정보만 추출 (Zero division 방지 위해 1e-8 추가)
             vector = nbr_rel / (dist + 1e-8)
             
-            # 🔥 [10채널 완성] 3(상대) + 3(중심) + 1(거리) + 3(벡터) = 10
-            nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
+            # 🌟 [신규 추가] 6채널(좌표+주방향) 입력일 경우의 16채널 피처 조립 로직
+            if C_in == 6:
+                center_v = x[:, :, 3:].unsqueeze(2) # 중심점 방향 벡터 (B, N, 1, 3)
+                neighbor_v = x_knn[:, :, :, 3:]     # 이웃점 방향 벡터 (B, N, K, 3)
+                relative_v = neighbor_v - center_v  # 곡률의 꺾임 정도 (B, N, K, 3)
+                
+                # 3(상대위치) + 6(좌표+방향) + 1(거리) + 3(방향) + 3(상대곡률) = 16채널!
+                nbr = torch.cat([nbr_rel, x_knn, dist, vector, relative_v], dim=-1).view(-1, 16) 
+            else:
+                # 3채널(기본) 입력일 경우 기존 10채널 로직 유지
+                nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
             
             nbr_embed_func = lambda t: self.nbr_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
             nbr = checkpoint(nbr_embed_func, nbr) if self.training and self.cp else nbr_embed_func(nbr)
             nbr = self.nbr_proj(nbr)
             x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1)
 
-        # 🌟🌟🌟 [궁극의 Residual Concat Deep Fusion] 🌟🌟🌟
         if prior_heatmap is not None:
-            # 1. 힌트를 64(또는 현재 차원)으로 변환
             p_feat = self.prior_proj(prior_heatmap.view(-1, prior_heatmap.shape[-1])).view(B, N, -1)
-            
-            # 2. 3D 기하학(x)과 히트맵 위치(p_feat)를 나란히 이어붙임 (dim*2)
             fused = torch.cat([x, p_feat], dim=-1)
-            
-            # 3. 믹서기가 둘을 비교해서 "미세 조정값(Residual)"을 계산함!
             mixed_residual = self.fusion_mlp(fused.view(-1, fused.shape[-1])).view(B, N, -1)
-            
-            # 4. 원래의 안전한 3D 고속도로(x)에 미세 조정값(+)을 더해줌!
             x = x + mixed_residual
-        # 🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟🌟
 
         pe = pe.view(-1, 3)
         pe_embed_func = lambda t: self.pe_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
@@ -255,7 +247,6 @@ class Stage_PA(nn.Module):
                 sub_sem = [sem]
 
         if not self.last:
-            # 🔥 다음 모의고사 층으로 압축된 힌트를 계속 전달
             sub_x, sub_spa, sub_sem = self.sub_stage(x, xyz, knn, indices, pts_list, prior_heatmap, sub_spa, sub_sem)
         else:
             sub_x = None
@@ -275,7 +266,7 @@ class DeepPA_semseg(nn.Module):
     def __init__(self, args):
         super().__init__()
         args.cp_bn_momentum = 1 - (1 - args.bn_momentum)**0.5
-        self.stage = Stage_PA(args) # 🔥 Stage_PA 사용
+        self.stage = Stage_PA(args)
         self.seg_head = nn.Sequential(
             nn.BatchNorm1d(args.head_dim, momentum=args.bn_momentum),
             args.act(),
@@ -293,7 +284,6 @@ class DeepPA_semseg(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-    # 🔥 prior_heatmap 입력 파라미터 추가
     def forward(self, xyz, x, indices, prior_heatmap=None, pts_list=None):
         indices = indices[:]
         x, spa, sem = self.stage(x, xyz, None, indices, pts_list, prior_heatmap)

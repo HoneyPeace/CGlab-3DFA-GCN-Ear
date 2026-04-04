@@ -94,8 +94,13 @@ class Stage(nn.Module):
         dim = args.dims[depth]
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
+            
+            # 🌟 [신규 추가] 6채널이 들어오면 피처를 12채널(상대위치3+입력6+방향변화3)로 동적 확장
+            in_channels = getattr(args, 'in_channels', 3)
+            in_feat_dim = 12 if in_channels == 6 else 6
+            
             self.nbr_embed = nn.Sequential(
-                nn.Linear(6, nbr_hid_dim // 2, bias=False),  # [FIX] 7 -> 6 (XYZ 데이터용)
+                nn.Linear(in_feat_dim, nbr_hid_dim // 2, bias=False), 
                 nn.BatchNorm1d(nbr_hid_dim // 2, momentum=cp_bn_momentum),
                 args.act(),
                 nn.Linear(nbr_hid_dim // 2, nbr_hid_dim, bias=False),
@@ -172,9 +177,20 @@ class Stage(nn.Module):
         pe = xyz_knn - xyz.unsqueeze(2)
 
         if self.first:
-            nbr = pe.clone()
+            nbr_rel = pe.clone()
             x_knn = index_points(x, knn)
-            nbr = torch.cat([nbr, x_knn], dim=-1).view(-1, 6) # [FIX] 7 -> 6
+            
+            # 🌟 [다이나믹 6/12채널 조립]
+            if C_in == 6:
+                center_v = x[:, :, 3:].unsqueeze(2) 
+                neighbor_v = x_knn[:, :, :, 3:]    
+                relative_v = neighbor_v - center_v  
+                # 상대위치(3) + 6채널입력(6) + 방향변화(3) = 12채널!
+                nbr = torch.cat([nbr_rel, x_knn, relative_v], dim=-1).view(-1, 12) 
+            else:
+                # 3채널(기본) 입력 시 6채널 유지
+                nbr = torch.cat([nbr_rel, x_knn], dim=-1).view(-1, 6) 
+                
             nbr_embed_func = lambda t: self.nbr_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
             nbr = checkpoint(nbr_embed_func, nbr) if self.training and self.cp else nbr_embed_func(nbr)
             nbr = self.nbr_proj(nbr)
@@ -210,7 +226,6 @@ class Stage(nn.Module):
             sub_x = None
             self.spa, self.sem = sub_spa, sub_sem
 
-        # [FIX] 논리적 오류(크래시)를 수정하여 완벽한 U-Net 디코더 구조 구현
         x = self.postproj(x.view(-1, x.shape[-1])).view(B, N, -1)
         sub_x = sub_x + x if sub_x is not None else x
         sub_x = self.drop(sub_x)

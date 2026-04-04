@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + Curriculum Learning + DeepPA Switching + PAConv_heat Support + Best Model Saving + Global Auto-Scaled 4-Loss
+@Description: Gradient Accumulation + Curriculum Learning + DeepPA Switching + PAConv_heat Support + Best Model Saving + Global Auto-Scaled 4-Loss + 🌟 6-Channel Direct Pipeline
 '''
 
 import os
@@ -20,7 +20,6 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-# 🚀 변경점: 이름이 경량화된 CurvatureSurfaceLoss 임포트
 from loss import AdaptiveWingLoss, get_differentiable_coords, CurvatureSurfaceLoss, compute_structural_loss, dynamic_focal_l1_loss
 from util import main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate
@@ -147,20 +146,19 @@ def train(args):
     print("=== [Phase 2] Loading Data ===")
     
     if MODE == "SPLIT":
-        full_dataset = FaceLandmarkData(data_root=args.data_root, partition='trainval', data=args.train_dataset_name)
+        full_dataset = FaceLandmarkData(data_root=args.data_root, partition='trainval', data=args.train_dataset_name, in_channels=args.in_channels)
         train_size = int(len(full_dataset) * 0.7)
         test_size = len(full_dataset) - train_size
         torch.manual_seed(args.dataset_seed)
         train_dataset, test_dataset = torch.utils.data.random_split(full_dataset, [train_size, test_size])
     else:
-        train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name)
-        test_dataset = FaceLandmarkData(data_root=args.data_root, partition='test', data=args.test_dataset_name)
+        train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name, in_channels=args.in_channels)
+        test_dataset = FaceLandmarkData(data_root=args.data_root, partition='test', data=args.test_dataset_name, in_channels=args.in_channels)
 
     print("=== [Phase 2.5] Creating Experiment Paths ===")
     train_len = len(train_dataset)
     paths = get_experiment_paths(args, train_len)
 
-    # 📝 [신규 추가] TXT 로그 파일 초기화
     log_file_path = os.path.join(paths['root'], 'training_log.txt')
     with open(log_file_path, 'w') as f:
         f.write(f"Experiment ID: {paths['root'].split('/')[-1]}\n")
@@ -181,9 +179,6 @@ def train(args):
 
     print(f"\n>>> [Model Init] Selected Backbone: {args.model}")
     
-    # =========================================================
-    # 🧊 DeepPA 전용: 얼려진 PAConv Prior 모델 로드
-    # =========================================================
     if args.model == 'DeepPA':
         print(">>> [Prior Load] Loading Pre-trained PAConv (0.3mm SOTA)...")
         paconv_prior = PAConv(args, args.landmark_num).to(device)
@@ -199,9 +194,7 @@ def train(args):
             param.requires_grad = False 
     else:
         paconv_prior = None
-    # =========================================================
 
-    # 🚀 메인 학습 모델 스위칭 로직 (PAConv_heat 추가)
     if args.model == 'PAConv' or args.model == 'PAConv_heat':
         model = PAConv(args, args.landmark_num).to(device)
         if args.model == 'PAConv_heat':
@@ -215,14 +208,11 @@ def train(args):
         
     model.apply(weight_init)
     
-    # =========================================================
-    # 🚀 [신규 연동] My_args.py의 인자들을 받아 하이브리드 표면 로스 초기화
-    # =========================================================
     surface_criterion = CurvatureSurfaceLoss(
-        k_p2p=args.plane_knn if hasattr(args, 'plane_knn') else 5, 
-        k_curv=args.curv_knn if hasattr(args, 'curv_knn') else 30, 
-        alpha=args.curv_alpha if hasattr(args, 'curv_alpha') else 10.0,
-        dir_weight=args.dir_weight if hasattr(args, 'dir_weight') else 1.0
+        k_p2p=args.plane_knn, 
+        k_curv=args.curv_knn, 
+        alpha=args.curv_alpha,
+        dir_weight=args.dir_weight
     ).to(device)
 
     if args.loss == 'adaptive_wing': criterion = AdaptiveWingLoss()
@@ -241,9 +231,6 @@ def train(args):
     opt.zero_grad() 
     best_val_mm = float('inf')
 
-    # =========================================================
-    # 🎯 4-Loss 통합 자동 스케일러 딕셔너리
-    # =========================================================
     target_norm = 1.53
     auto_scales = {
         'heatmap': -1.0,
@@ -261,14 +248,15 @@ def train(args):
                 point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
                 with torch.no_grad():
-                    centroid_tmp = torch.mean(point, axis=1, keepdim=True)
-                    batch_m = torch.max(torch.sqrt(torch.sum((point - centroid_tmp) ** 2, axis=2)), axis=1)[0]
+                    point_xyz = point[:, :, :3]
+                    centroid_tmp = torch.mean(point_xyz, axis=1, keepdim=True)
+                    batch_m = torch.max(torch.sqrt(torch.sum((point_xyz - centroid_tmp) ** 2, axis=2)), axis=1)[0]
                     avg_m = torch.mean(batch_m).item()
 
                 point_normal, landmark_normal = normalize_data(point, landmark)
                 point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                 
-                point_input = point_normal.permute(0, 2, 1)
+                point_input = point_normal.permute(0, 2, 1).contiguous()
                 
                 if args.model == 'DeepPA':
                     with torch.no_grad():
@@ -277,48 +265,59 @@ def train(args):
                 else:
                     pred_heatmap = model(point_input)
                 
-                points_for_coords = point_input.permute(0, 2, 1)
-                # Soft-argmax도 args 연동
-                pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax if hasattr(args, 'k_softargmax') else 10)
+                points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
+                
+                pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
                 
                 loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma if hasattr(args, 'focal_gamma') else 2.0)
+                loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                 loss_surface = surface_criterion(pred_coords, augmented_landmark, points_for_coords)
                 loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                 
                 # =========================================================
-                # ⚖️ [Auto-Scaler 작동 로직] 첫 배치의 Raw 값을 바탕으로 배수 고정
+                # ⚖️ [Auto-Scaler 작동 로직] 모델에 따른 다이나믹 분기 처리
                 # =========================================================
                 if epoch == 0 and i == 0 and auto_scales['heatmap'] < 0:
-                    auto_scales['heatmap'] = target_norm / (loss_heatmap.item() + 1e-6)
-                    auto_scales['coord']   = target_norm / (loss_coord.item() + 1e-6)
-                    auto_scales['surface'] = target_norm / (loss_surface.item() + 1e-6)
-                    auto_scales['struct']  = target_norm / (loss_struct.item() + 1e-6)
-                    
-                    print(f"\n=========================================")
-                    print(f" 🎯 [Global Auto-Scaler] 4-Loss 황금 밸런스 자동 세팅 완료! (Target Norm: {target_norm})")
-                    print(f"  - Heatmap : Raw {loss_heatmap.item():.5f} -> 곱해질 배수: x{auto_scales['heatmap']:.3f}")
-                    print(f"  - Coord   : Raw {loss_coord.item():.5f} -> 곱해질 배수: x{auto_scales['coord']:.3f}")
-                    print(f"  - Surface : Raw {loss_surface.item():.5f} -> 곱해질 배수: x{auto_scales['surface']:.3f}")
-                    print(f"  - Struct  : Raw {loss_struct.item():.5f} -> 곱해질 배수: x{auto_scales['struct']:.3f}")
-                    print(f"=========================================\n")
+                    if args.model in ['PAConv', 'PAConv_heat']:
+                        # 🔥 PAConv일 때는 스케일러를 1.0으로 고정하여 원본 Loss 값 그대로 사용!
+                        auto_scales['heatmap'] = 1.0
+                        auto_scales['coord']   = 1.0
+                        auto_scales['surface'] = 1.0
+                        auto_scales['struct']  = 1.0
+                        
+                        print(f"\n=========================================")
+                        print(f" 🎯 [Auto-Scaler Disabled] PAConv 모드: Loss 정규화를 비활성화합니다. (원본 스케일 유지)")
+                        print(f"=========================================\n")
 
-                    # 로그 파일에도 Auto-Scaler 배수 기록
-                    with open(log_file_path, 'a') as f:
-                        f.write(f"\n[Auto-Scaler Weights] Heatmap: x{auto_scales['heatmap']:.3f} | Coord: x{auto_scales['coord']:.3f} | Surface: x{auto_scales['surface']:.3f} | Struct: x{auto_scales['struct']:.3f}\n\n")
+                        with open(log_file_path, 'a') as f:
+                            f.write(f"\n[Auto-Scaler Disabled] PAConv Mode: All multipliers = x1.000\n\n")
+                    else:
+                        # 💧 DeepLA, DeepPA일 때는 4-Loss 밸런스 정규화 수행
+                        auto_scales['heatmap'] = target_norm / (loss_heatmap.item() + 1e-6)
+                        auto_scales['coord']   = target_norm / (loss_coord.item() + 1e-6)
+                        auto_scales['surface'] = target_norm / (loss_surface.item() + 1e-6)
+                        auto_scales['struct']  = target_norm / (loss_struct.item() + 1e-6)
+                        
+                        print(f"\n=========================================")
+                        print(f" 🎯 [Global Auto-Scaler] 4-Loss 황금 밸런스 자동 세팅 완료! (Target Norm: {target_norm})")
+                        print(f"  - Heatmap : Raw {loss_heatmap.item():.5f} -> 곱해질 배수: x{auto_scales['heatmap']:.3f}")
+                        print(f"  - Coord   : Raw {loss_coord.item():.5f} -> 곱해질 배수: x{auto_scales['coord']:.3f}")
+                        print(f"  - Surface : Raw {loss_surface.item():.5f} -> 곱해질 배수: x{auto_scales['surface']:.3f}")
+                        print(f"  - Struct  : Raw {loss_struct.item():.5f} -> 곱해질 배수: x{auto_scales['struct']:.3f}")
+                        print(f"=========================================\n")
 
-                # 구해진 자동 배수를 곱하여 정규화(Normalization) 완료
+                        with open(log_file_path, 'a') as f:
+                            f.write(f"\n[Auto-Scaler Weights] Heatmap: x{auto_scales['heatmap']:.3f} | Coord: x{auto_scales['coord']:.3f} | Surface: x{auto_scales['surface']:.3f} | Struct: x{auto_scales['struct']:.3f}\n\n")
+
                 norm_heatmap = loss_heatmap * auto_scales['heatmap']
                 norm_coord   = loss_coord   * auto_scales['coord']
                 norm_surface = loss_surface * auto_scales['surface']         
                 norm_struct  = loss_struct  * auto_scales['struct']
-                # =========================================================
 
                 # =========================================================
-                # 🚀 Loss 스위칭 로직 (정규화된 변수 norm_* 사용)
+                # 🚀 Loss 스위칭 로직 
                 # =========================================================
                 if args.model == 'PAConv_heat':
-                    # 🔥 무조건 히트맵만 100% 학습!
                     weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                     total_loss = norm_heatmap
                 else:
@@ -327,21 +326,13 @@ def train(args):
                         weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                         total_loss = norm_heatmap
                     else:
-                        # 1. 나머지 3개의 로스를 위한 랜덤 가중치를 뽑습니다.
                         rand_weights = torch.rand(3).to(device)
-                        
-                        # 2. 이 3개의 합이 딱 '0.95(95%)'가 되도록 맞춰줍니다.
                         rand_weights = (rand_weights / rand_weights.sum()) * 0.95
-                        
-                        # 3. 히트맵은 0.05 고정, 나머지는 0.95를 나눠가진 값을 곱해줍니다. 
                         total_loss = (0.05 * norm_heatmap + 
                                       rand_weights[0] * norm_coord + 
                                       rand_weights[1] * norm_surface + 
                                       rand_weights[2] * norm_struct)
-                        
-                        # (선택) 터미널 화면 출력을 위해 weights 변수를 조립
                         weights = torch.tensor([0.05, rand_weights[0], rand_weights[1], rand_weights[2]])
-                # =========================================================
                 
                 loss = total_loss / accum_steps
                 loss.backward()
@@ -382,39 +373,37 @@ def train(args):
                 for i, (point, landmark, seg) in vepoch:
                     point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
-                    centroid_tmp = torch.mean(point, axis=1, keepdim=True)
-                    batch_m = torch.max(torch.sqrt(torch.sum((point - centroid_tmp) ** 2, axis=2)), axis=1)[0]
+                    point_xyz = point[:, :, :3]
+                    centroid_tmp = torch.mean(point_xyz, axis=1, keepdim=True)
+                    batch_m = torch.max(torch.sqrt(torch.sum((point_xyz - centroid_tmp) ** 2, axis=2)), axis=1)[0]
                     avg_m = torch.mean(batch_m).item()
 
                     point_normal, landmark_normal = normalize_data(point, landmark)
-                    point_input = point_normal.permute(0, 2, 1)
+                    point_input = point_normal.permute(0, 2, 1).contiguous()
                     
                     if args.model == 'DeepPA':
-                        prior_hint = paconv_prior(point_input)
+                        prior_hint = paconv_prior(point_input) 
                         pred_heatmap = model(point_input, prior_heatmap=prior_hint)
                     else:
                         pred_heatmap = model(point_input)
                     
-                    points_for_coords = point_input.permute(0, 2, 1)
-                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax if hasattr(args, 'k_softargmax') else 10)
+                    points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
+                    
+                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=args.focal_gamma if hasattr(args, 'focal_gamma') else 2.0)
+                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=args.focal_gamma)
                     loss_surface = surface_criterion(pred_coords, landmark_normal, points_for_coords)
                     loss_struct = compute_structural_loss(pred_coords, landmark_normal)
                     
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
-                    # 🚀 Val 루프에도 Train에서 고정된 동일한 정규화 배수 적용
                     norm_heatmap = loss_heatmap * auto_scales['heatmap']
                     norm_coord   = loss_coord   * auto_scales['coord']
                     norm_surface = loss_surface * auto_scales['surface'] 
                     norm_struct  = loss_struct  * auto_scales['struct']
                     
-                    # =========================================================
-                    # 🚀 Val 루프 Loss 스위칭 로직 (정규화된 변수 norm_* 사용)
-                    # =========================================================
                     if args.model == 'PAConv_heat':
                         total_loss = norm_heatmap
                     else:
@@ -423,7 +412,6 @@ def train(args):
                             total_loss = norm_heatmap
                         else:
                             total_loss = 0.25 * norm_heatmap + 0.25 * norm_coord + 0.25 * norm_surface + 0.25 * norm_struct
-                    # =========================================================
 
                     val_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
                     val_hm   += loss_heatmap.item()
@@ -450,7 +438,6 @@ def train(args):
         print(f" [Train] 전체 Loss: {t_loss:.4f} | HM: {t_hm:.4f} | Crd: {t_crd:.4f} | Srf: {t_srf:.4f} | Struct: {t_str:.4f} | mm: {t_mm:.2f}")
         print(f" [Val]   전체 Loss: {v_loss:.4f} | HM: {v_hm:.4f} | Crd: {v_crd:.4f} | Srf: {v_srf:.4f} | Struct: {v_str:.4f} | mm: {v_mm:.2f}")
         
-        # 🚀 에폭별 로스 반영률(%) 모니터링 출력 스위칭 및 가중치 추출
         if args.model == 'PAConv_heat':
             w_hm, w_crd, w_srf, w_str = 1.0, 0.0, 0.0, 0.0
             print(f" 📊 [로스 반영률] Heatmap: 100% (오직 히트맵 정답지 구축 중! 🎯)")
@@ -463,7 +450,6 @@ def train(args):
                 w_hm, w_crd, w_srf, w_str = w_np[0], w_np[1], w_np[2], w_np[3]
                 print(f" 📊 [로스 반영률] Heatmap: {w_hm*100:.1f}% | Coord: {w_crd*100:.1f}% | Surface: {w_srf*100:.1f}% | Struct: {w_str*100:.1f}%  (Stage 2: 4-Loss RLW 완전 해방 🌪️)")
 
-        # 📝 매 에폭마다 텍스트 파일에 기록 덧붙이기 (Append)
         with open(log_file_path, 'a') as f:
             log_line = f"{epoch+1:<6d} | {t_loss:<8.4f} | {t_hm:<8.4f} | {t_crd:<8.4f} | {t_srf:<8.4f} | {t_str:<8.4f} | {t_mm:<6.2f} || {v_loss:<8.4f} | {v_hm:<8.4f} | {v_crd:<8.4f} | {v_srf:<8.4f} | {v_str:<8.4f} | {v_mm:<6.2f} || {w_hm:<6.3f} | {w_crd:<6.3f} | {w_srf:<6.3f} | {w_str:<6.3f}\n"
             f.write(log_line)
@@ -479,7 +465,6 @@ def train(args):
             best_save_path = os.path.join(paths['models'], 'model_best.t7')
             torch.save(model.state_dict(), best_save_path)
 
-        # 기존 10주기마다 중간 백업 저장
         if (epoch + 1) % 10 == 0:
             filename = f'model_epoch_{epoch+1}.t7'
             save_path = os.path.join(paths['models'], filename)

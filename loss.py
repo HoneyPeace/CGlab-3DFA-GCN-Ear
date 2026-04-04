@@ -66,8 +66,35 @@ def find_knn_points(pred_coords, points, k=10):
     
     return knn_points
 
+# 🌟 [신규 추가] 16채널 확장을 위한 입력 포인트 기하학 피처(주방향) 추출기
+# 전처리 단계(Offline Pre-computation)에서 NPY 파일을 구울 때 호출하여 사용합니다.
+def compute_input_geometric_features(points, k=15):
+    """
+    모든 입력 포인트(B, N, 3)에 대해 주변 k개의 점을 모아 
+    공분산 행렬을 구하고, 주방향(Principal Direction) 벡터를 추출합니다.
+    """
+    B, N, _ = points.shape
+    
+    # 1. 이웃 점 추출 (B, N, k, 3)
+    knn_points = find_knn_points(points, points, k=k)
+    
+    # 2. 공분산 행렬 및 아이겐 분해
+    center = knn_points.mean(dim=2, keepdim=True)
+    centered = knn_points - center
+    cov = torch.matmul(centered.transpose(2, 3), centered)
+    _, eigvec = torch.linalg.eigh(cov)
+    
+    # 3. 가장 큰 아이겐벡터 (주방향 능선 벡터) 추출 -> (B, N, 3)
+    principal_dir = eigvec[..., 2]
+    
+    # 4. PCA 부호 모호성(Sign Ambiguity) 해결 (바깥쪽 방향으로 통일)
+    dot_product = torch.sum(principal_dir * center.squeeze(2), dim=-1, keepdim=True)
+    principal_dir = principal_dir * torch.sign(dot_product)
+    
+    return principal_dir # (B, N, 3)
+
 # =====================================================================
-# [신규 추가] 단위 통일(Unit-Aligned) 및 방향성(Eigenvector)이 결합된 하이브리드 표면 로스
+# [업그레이드 완료] 단위 통일(Unit-Aligned) 및 방향성(Eigenvector) 결합 하이브리드 표면 로스
 # =====================================================================
 
 class CurvatureSurfaceLoss(nn.Module):
@@ -142,8 +169,6 @@ class CurvatureSurfaceLoss(nn.Module):
         p2p_distance = torch.abs(torch.sum(vector_to_plane * normal_gt, dim=-1))
 
         # [3] 단일 단위로의 융합 (Unit Alignment)
-        # 무차원 오차들을 P2P 거리(mm)를 뻥튀기하는 '페널티 가중치'로 묶어버립니다.
-        # 수식: 거리(mm) * (1 + 알파*곡률오차 + 베타*방향오차)
         weight_multiplier = 1.0 + (self.alpha * diff_curvature) + (self.dir_weight * diff_direction)
         
         # 🌟 최종 반환: 오직 '거리 차원(mm)' 하나만을 가지는 통합 로스
@@ -161,15 +186,9 @@ def compute_structural_loss(pred_coords, gt_coords):
     pred_coords: (B, K_lm, 3)
     gt_coords: (B, K_lm, 3)
     """
-    # 1. 예측된 랜드마크들 사이의 모든 쌍(Pairwise) 거리 계산 -> (B, K_lm, K_lm)
     pred_dist_matrix = torch.cdist(pred_coords, pred_coords)
-    
-    # 2. 실제 정답 랜드마크들 사이의 모든 쌍 거리 계산 -> (B, K_lm, K_lm)
     gt_dist_matrix = torch.cdist(gt_coords, gt_coords)
-    
-    # 3. 예측 거리와 실제 거리의 차이(절댓값) 평균 반환
     loss_struct = F.l1_loss(pred_dist_matrix, gt_dist_matrix)
-    
     return loss_struct
 
 def dynamic_focal_l1_loss(pred_coords, gt_coords, gamma=2.0):
@@ -177,21 +196,11 @@ def dynamic_focal_l1_loss(pred_coords, gt_coords, gamma=2.0):
     [CVPR 2022+ 트렌드] 배치의 평균 오차를 동적 기준선으로 삼아,
     평균보다 못 맞추는 악성 랜드마크에 기하급수적 패널티를 부여하는 로스
     """
-    # 1. 40개 랜드마크의 L1 오차 계산 -> (B, 40)
     l1_errors = torch.norm(pred_coords - gt_coords, p=1, dim=-1)
-    
-    # 2. 현재 배치의 '평균 오차'를 동적 기준선(Dynamic Threshold)으로 설정
-    # detach()를 붙여서 기준선 자체로는 역전파가 흐르지 않게 고정
     dynamic_threshold = l1_errors.mean().detach() + 1e-5
     
-    # 3. 평균 대비 얼마나 더 틀렸는지 비율을 구하고, gamma 제곱으로 휘어버림 (Focal 효과)
-    # 에러가 평균보다 크면(비율 > 1) 패널티 폭발, 평균보다 작으면(비율 < 1) 패널티 축소
     focal_weights = torch.pow(l1_errors.detach() / dynamic_threshold, gamma)
-    
-    # 4. 가중치가 너무 폭발해서 NaN 에러가 나는 것을 방지 (최대 5배까지만 허용)
     focal_weights = torch.clamp(focal_weights, min=0.1, max=5.0)
     
-    # 5. 기존 L1 오차에 동적 가중치 곱하기
     weighted_loss = (l1_errors * focal_weights).mean()
-    
     return weighted_loss
