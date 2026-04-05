@@ -52,7 +52,7 @@ class DeepPA_Wrapper(nn.Module):
         dl_args.head_dim = 256    
         dl_args.mlp_ratio = 1.0               
         
-        dl_args.depths = [4, 4, 12, 4] 
+        dl_args.depths = [20, 20, 60, 20] 
         
         total_depth = sum(dl_args.depths)
         if total_depth >= 120:
