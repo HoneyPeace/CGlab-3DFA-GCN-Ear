@@ -108,9 +108,9 @@ class Stage_PA(nn.Module):
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             
-            # 🌟 [신규 추가] args.in_channels가 6이면 16채널 피처, 아니면 10채널을 받도록 자동 조정
+            # 🔥 [Ablation] 6채널 입력 시 '13채널'로 뼈대 고정!
             in_channels = getattr(args, 'in_channels', 3)
-            in_feat_dim = 16 if in_channels == 6 else 10
+            in_feat_dim = 13 if in_channels == 6 else 10
             
             self.nbr_embed = nn.Sequential(
                 nn.Linear(in_feat_dim, nbr_hid_dim // 2, bias=False),  
@@ -198,14 +198,10 @@ class Stage_PA(nn.Module):
             dist = torch.norm(nbr_rel, dim=-1, keepdim=True) 
             vector = nbr_rel / (dist + 1e-8)
             
-            # 🌟 [신규 추가] 6채널(좌표+주방향) 입력일 경우의 16채널 피처 조립 로직
+            # 🔥 [Ablation] 6채널 입력 시 '13채널' 엣지 사용 (방향 꺾임 제외)
             if C_in == 6:
-                center_v = x[:, :, 3:].unsqueeze(2) # 중심점 방향 벡터 (B, N, 1, 3)
-                neighbor_v = x_knn[:, :, :, 3:]     # 이웃점 방향 벡터 (B, N, K, 3)
-                relative_v = neighbor_v - center_v  # 곡률의 꺾임 정도 (B, N, K, 3)
-                
-                # 3(상대위치) + 6(좌표+방향) + 1(거리) + 3(방향) + 3(상대곡률) = 16채널!
-                nbr = torch.cat([nbr_rel, x_knn, dist, vector, relative_v], dim=-1).view(-1, 16) 
+                # 13채널 조립: 상대위치(3) + 6채널입력(6) + 거리(1) + 위치벡터(3) = 13채널
+                nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 13) 
             else:
                 # 3채널(기본) 입력일 경우 기존 10채널 로직 유지
                 nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 

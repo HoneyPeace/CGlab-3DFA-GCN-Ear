@@ -95,9 +95,9 @@ class Stage(nn.Module):
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             
-            # 🌟 [신규 추가] 6채널이 들어오면 피처를 12채널(상대위치3+입력6+방향변화3)로 동적 확장
+            # 🔥 [Ablation] 6채널 입력 시 '9채널' 뼈대 고정! (상대위치3 + 입력6 = 9채널, 방향꺾임 제외)
             in_channels = getattr(args, 'in_channels', 3)
-            in_feat_dim = 12 if in_channels == 6 else 6
+            in_feat_dim = 9 if in_channels == 6 else 6
             
             self.nbr_embed = nn.Sequential(
                 nn.Linear(in_feat_dim, nbr_hid_dim // 2, bias=False), 
@@ -180,13 +180,10 @@ class Stage(nn.Module):
             nbr_rel = pe.clone()
             x_knn = index_points(x, knn)
             
-            # 🌟 [다이나믹 6/12채널 조립]
+            # 🔥 [Ablation] 6채널 입력 시 '9채널' 엣지 사용 (방향 꺾임 제외)
             if C_in == 6:
-                center_v = x[:, :, 3:].unsqueeze(2) 
-                neighbor_v = x_knn[:, :, :, 3:]    
-                relative_v = neighbor_v - center_v  
-                # 상대위치(3) + 6채널입력(6) + 방향변화(3) = 12채널!
-                nbr = torch.cat([nbr_rel, x_knn, relative_v], dim=-1).view(-1, 12) 
+                # 9채널 조립: 상대위치(3) + 6채널입력(6)
+                nbr = torch.cat([nbr_rel, x_knn], dim=-1).view(-1, 9) 
             else:
                 # 3채널(기본) 입력 시 6채널 유지
                 nbr = torch.cat([nbr_rel, x_knn], dim=-1).view(-1, 6) 

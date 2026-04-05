@@ -54,10 +54,7 @@ class DeepLA_Wrapper(nn.Module):
         dl_args.head_dim = 256    
         dl_args.mlp_ratio = 1.0               
         
-        # [Option 1] DeepLA-24
-        # dl_args.depths = [4, 4, 12, 4]         
-        
-        # [Option 2] DeepLA-120
+        # 🔥 [강제 고정] 무조건 120층! (DeepLA의 진정한 파워)
         dl_args.depths = [20, 20, 60, 20] 
         
         total_depth = sum(dl_args.depths)
@@ -84,7 +81,7 @@ class DeepLA_Wrapper(nn.Module):
             
         dl_args.ns = [num_points, num_points // 4, num_points // 16, num_points // 64]
         
-        # 🌟 [신규 추가] 6채널 입력을 deepla_semseg 내부로 전달하기 위한 세팅
+        # 🌟 6채널 입력을 deepla_semseg 내부로 전달하기 위한 세팅
         dl_args.in_channels = getattr(args, 'in_channels', 3)
         
         self.k = dl_args.ks[0]

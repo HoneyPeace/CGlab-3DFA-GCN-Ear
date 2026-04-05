@@ -27,7 +27,7 @@ class PAConv(nn.Module):
         
         # 🌟 [신규 추가] 입력이 6채널이면 16채널 기하학 피처, 아니면 10채널
         in_channels = getattr(args, 'in_channels', 3)
-        self.edge_channels = 16 if in_channels == 6 else 10
+        self.edge_channels = 13 if in_channels == 6 else 10
         
         self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
         self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])

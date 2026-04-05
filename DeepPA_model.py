@@ -52,7 +52,7 @@ class DeepPA_Wrapper(nn.Module):
         dl_args.head_dim = 256    
         dl_args.mlp_ratio = 1.0               
         
-        dl_args.depths = [4, 4, 12, 4] 
+        dl_args.depths = [20, 20, 60, 20] 
         
         total_depth = sum(dl_args.depths)
         if total_depth >= 120:
@@ -76,27 +76,19 @@ class DeepPA_Wrapper(nn.Module):
             
         dl_args.ns = [num_points, num_points // 4, num_points // 16, num_points // 64]
         
-        # 🌟 [신규 추가] 6채널 입력을 deeppa_semseg 내부로 전달하기 위한 세팅
         dl_args.in_channels = getattr(args, 'in_channels', 3)
         
         self.k = dl_args.ks[0]
         self.stage_count = len(dl_args.depths)
         
-        # 🔥 [수정됨] 껍데기 믹서기 삭제! 오직 DeepPA_semseg 심장부만 장착!
         self.model = DeepPA_semseg(dl_args)
-
 
     def forward(self, x, prior_heatmap=None):
         B, C, N = x.shape
         
-        # 🌟 [핵심 수정] 6채널 처리: 좌표(xyz)와 신경망 피처(feature)의 엄격한 분리!
-        # 기하학적 거리 계산(KNN, FPS)을 위해 무조건 앞의 3채널(x, y, z)만 뜯어냅니다.
         xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
-        
-        # 신경망 내부 연산으로 흘려보낼 피처는 6채널 전체(또는 3채널)를 그대로 사용합니다.
         feature = x.permute(0, 2, 1).contiguous() 
         
-        # 🔥 [핵심 추가] PAConv 힌트도 DeepLA 내부 연산(B, N, C)에 맞게 형태를 돌려줌
         if prior_heatmap is not None:
             prior_heatmap = prior_heatmap.permute(0, 2, 1).contiguous()
             
@@ -104,7 +96,6 @@ class DeepPA_Wrapper(nn.Module):
         up_idx_list = []
         down_knn_list = []
         
-        # 다운샘플링과 거리 계산은 무조건 순수 3D 좌표인 cur_xyz(앞의 3채널)만 사용합니다.
         cur_xyz = xyz
         
         for d in range(self.stage_count):
@@ -140,7 +131,6 @@ class DeepPA_Wrapper(nn.Module):
         down_knn_list = down_knn_list[::-1]
         indices = up_idx_list + down_knn_list
         
-        # 🔥 메인 두뇌(self.model)에 순수 3차원 좌표(xyz)와 6채널 전체 피처(feature)를 각각 분리해서 투입!
         out = self.model(xyz, feature, indices, prior_heatmap=prior_heatmap)
         
         if isinstance(out, tuple):
