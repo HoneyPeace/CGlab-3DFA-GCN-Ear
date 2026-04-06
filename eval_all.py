@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: eval_all.py
-@Description: Evaluation script with Quantitative Heatmap Metrics & DeepPA Support
+@Description: Evaluation script with Quantitative Heatmap Metrics & DeepPA Support & 95%ile Metrics
 '''
 
 from __future__ import print_function, division
@@ -272,34 +272,43 @@ for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc="Eval
         np.savetxt(os.path.join(asc_save_dir, f"pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
 # -----------------------------------------------------------------------------
-# 5. 결과 집계 및 텍스트 파일 저장
+# 5. 결과 집계 및 텍스트 파일 저장 (95%ile 추가)
 # -----------------------------------------------------------------------------
 if len(per_landmark_me_list) > 0:
     per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) 
     lm_means = np.mean(per_landmark_me_array, axis=0)
     lm_stds = np.std(per_landmark_me_array, axis=0)
+    lm_me_95 = np.percentile(per_landmark_me_array, 95, axis=0) # 하위 95% (95% 보장 에러컷)
+    
     average_me = np.mean(lm_means)
     std_me = np.mean(lm_stds)
+    me_95_global = np.percentile(me_list, 95) # 전체 샘플 기준 95% 보장 에러컷
     
     per_landmark_cos_array = np.vstack(per_landmark_cos_sim_list) 
     lm_cos_means = np.mean(per_landmark_cos_array, axis=0)
     lm_cos_stds = np.std(per_landmark_cos_array, axis=0)
+    lm_cos_5 = np.percentile(per_landmark_cos_array, 5, axis=0) # 최악의 하위 5% (95% 보장 유사도)
     
     per_landmark_iou_array = np.vstack(per_landmark_iou_list) 
     lm_iou_means = np.mean(per_landmark_iou_array, axis=0)
     lm_iou_stds = np.std(per_landmark_iou_array, axis=0)
+    lm_iou_5 = np.percentile(per_landmark_iou_array, 5, axis=0) # 최악의 하위 5% (95% 보장 mIoU)
     
 else:
-    average_me, std_me = 0.0, 0.0
-    lm_means, lm_stds = np.array([]), np.array([])
-    lm_cos_means, lm_cos_stds = np.array([]), np.array([])
-    lm_iou_means, lm_iou_stds = np.array([]), np.array([])
+    average_me, std_me, me_95_global = 0.0, 0.0, 0.0
+    lm_means, lm_stds, lm_me_95 = np.array([]), np.array([]), np.array([])
+    lm_cos_means, lm_cos_stds, lm_cos_5 = np.array([]), np.array([]), np.array([])
+    lm_iou_means, lm_iou_stds, lm_iou_5 = np.array([]), np.array([]), np.array([])
 
 sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
 sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
 
 avg_cos_sim = np.mean(cos_sim_list) if len(cos_sim_list) > 0 else 0.0
+cos_sim_5_global = np.percentile(cos_sim_list, 5) if len(cos_sim_list) > 0 else 0.0
+
 avg_iou = np.mean(iou_list) if len(iou_list) > 0 else 0.0
+iou_5_global = np.percentile(iou_list, 5) if len(iou_list) > 0 else 0.0
+
 avg_time = np.mean(time_list) * 1000.0 if len(time_list) > 0 else 0.0
 
 filename = f"ME{average_me:.4f}_std{std_me:.4f}.txt"
@@ -323,40 +332,40 @@ with open(result_txt_path, "w") as f:
     f.write(f" Batch Size  : {batch_str_log}\n")
     f.write(f" Num Points  : {args.num_points}\n")
     f.write(f"------------------------------------------\n")
-    f.write(f" Average ME : {average_me:.4f} mm\n")
-    f.write(f" Average Std: {std_me:.4f} mm\n")
+    f.write(f" Average ME : {average_me:.4f} ± {std_me:.4f} mm\n")
+    f.write(f" 95%ile ME  : {me_95_global:.4f} mm (95% of data is better than this)\n")
     f.write(f" SR @ 10mm  : {sr_10:.2f} %\n")
     f.write(f" SR @ 5mm   : {sr_5:.2f} %\n")
     f.write(f" Avg Time   : {avg_time:.2f} ms/sample\n")
     f.write(f"------------------------------------------\n")
     f.write(f" [Heatmap Quantitative Evaluation (Global)]\n")
-    f.write(f" Cosine Sim : {avg_cos_sim:.2f} % (Distribution Match)\n")
-    f.write(f" mIoU       : {avg_iou:.2f} % (Region Overlap @ 0.1)\n")
+    f.write(f" Cosine Sim : {avg_cos_sim:.2f} % | 95%ile(Bot 5%): {cos_sim_5_global:.2f} %\n")
+    f.write(f" mIoU       : {avg_iou:.2f} % | 95%ile(Bot 5%): {iou_5_global:.2f} %\n")
     f.write(f"==========================================\n")
     
     if len(per_landmark_me_list) > 0:
         f.write("\n>>> Top 5 Hardest Landmarks (by ME):\n")
         worst_indices = np.argsort(lm_means)[::-1][:5]
         for i in worst_indices:
-            f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
+            f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm | 95%ile: {lm_me_95[i]:.3f} mm\n")
         
-        f.write("\n>>> Per-landmark ME (Mean ± Std):\n")
+        f.write("\n>>> Per-landmark ME (Mean ± Std | 95%ile):\n")
         for i in range(lm_means.shape[0]):
-            f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm\n")
+            f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm | 95%ile: {lm_me_95[i]:.3f} mm\n")
         
-        f.write("\n>>> Per-landmark Cosine Sim (Mean ± Std):\n")
+        f.write("\n>>> Per-landmark Cosine Sim (Mean ± Std | 95%ile(Bot 5%)):\n")
         for i in range(lm_cos_means.shape[0]):
-            f.write(f"    LM {i+1:02d}: {lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f} %\n")
+            f.write(f"    LM {i+1:02d}: {lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f} % | 95%ile: {lm_cos_5[i]:.2f} %\n")
 
-        f.write("\n>>> Per-landmark mIoU (Mean ± Std) @ Th=0.1:\n")
+        f.write("\n>>> Per-landmark mIoU (Mean ± Std | 95%ile(Bot 5%)) @ Th=0.1:\n")
         for i in range(lm_iou_means.shape[0]):
-            f.write(f"    LM {i+1:02d}: {lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f} %\n")
+            f.write(f"    LM {i+1:02d}: {lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f} % | 95%ile: {lm_iou_5[i]:.2f} %\n")
 
         f.write(f"    ------------------------------------\n")
         f.write(f"    All (ME) : {average_me:.3f} ± {std_me:.3f} mm\n")
 
 print(f"\n[Done] Results saved to: {run_root}")
 print(f"      Filename: {filename}")
-print(f"Average ME: {average_me:.4f} ± {std_me:.4f}")
+print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
 print(f"Cosine Sim: {avg_cos_sim:.2f}% | mIoU: {avg_iou:.2f}%")
 print(f"Avg Time  : {avg_time:.2f} ms")

@@ -290,10 +290,16 @@ def train(args):
                 # ⚖️ [Auto-Scaler 작동 로직] 첫 배치의 Raw 값을 바탕으로 배수 고정
                 # =========================================================
                 if epoch == 0 and i == 0 and auto_scales['heatmap'] < 0:
-                    auto_scales['heatmap'] = target_norm / (loss_heatmap.item() + 1e-6)
-                    auto_scales['coord']   = target_norm / (loss_coord.item() + 1e-6)
-                    auto_scales['surface'] = target_norm / (loss_surface.item() + 1e-6)
-                    auto_scales['struct']  = target_norm / (loss_struct.item() + 1e-6)
+                    # 💧 DeepLA, DeepPA일 때는 4-Loss 밸런스 정규화 수행
+                    #auto_scales['heatmap'] = target_norm / (loss_heatmap.item() + 1e-6)
+                    #auto_scales['coord']   = target_norm / (loss_coord.item() + 1e-6)
+                    #auto_scales['surface'] = target_norm / (loss_surface.item() + 1e-6)
+                    #auto_scales['struct']  = target_norm / (loss_struct.item() + 1e-6)
+                    
+                    auto_scales['heatmap'] = loss_heatmap.item() + 1e-6
+                    auto_scales['coord']   = loss_coord.item() + 1e-6
+                    auto_scales['surface'] = loss_surface.item() + 1e-6
+                    auto_scales['struct']  = loss_struct.item() + 1e-6
                     
                     print(f"\n=========================================")
                     print(f" 🎯 [Global Auto-Scaler] 4-Loss 황금 밸런스 자동 세팅 완료! (Target Norm: {target_norm})")
