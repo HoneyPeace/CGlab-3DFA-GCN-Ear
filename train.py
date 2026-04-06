@@ -298,6 +298,11 @@ def train(args):
                         auto_scales['surface'] = target_norm / (loss_surface.item() + 1e-6)
                         auto_scales['struct']  = target_norm / (loss_struct.item() + 1e-6)
                         
+                        #auto_scales['heatmap'] = loss_heatmap.item() + 1e-6
+                        #auto_scales['coord']   = loss_coord.item() + 1e-6
+                        #auto_scales['surface'] = loss_surface.item() + 1e-6
+                        #auto_scales['struct']  = loss_struct.item() + 1e-6
+
                         print(f"\n=========================================")
                         print(f" 🎯 [Global Auto-Scaler] 4-Loss 황금 밸런스 자동 세팅 완료! (Target Norm: {target_norm})")
                         print(f"  - Heatmap : Raw {loss_heatmap.item():.5f} -> 곱해질 배수: x{auto_scales['heatmap']:.3f}")

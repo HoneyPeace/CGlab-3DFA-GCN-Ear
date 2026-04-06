@@ -86,11 +86,20 @@ class DeepPA_Wrapper(nn.Module):
     def forward(self, x, prior_heatmap=None):
         B, C, N = x.shape
         
-        xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
-        feature = x.permute(0, 2, 1).contiguous() 
+        # 🌟 [해결책 1. VRAM 및 연산 폭발 방지] 
+        # 거리 계산용 xyz는 미분 계산을 아예 안 하도록 강제로 끊어버립니다. (속도/메모리 최적화)
+        xyz = x[:, :3, :].permute(0, 2, 1).contiguous().detach()
         
+        # 🌟 [해결책 2. 경고 제거 및 120층 진짜 학습 활성화!]
+        # 모델 내부로 들어가는 피처에는 미분 꼬리표를 달아줍니다.
+        feature = x.permute(0, 2, 1).contiguous() 
+        if self.training:
+            feature.requires_grad_(True)  
+            
         if prior_heatmap is not None:
             prior_heatmap = prior_heatmap.permute(0, 2, 1).contiguous()
+            if self.training:
+                prior_heatmap.requires_grad_(True)
             
         device = x.device
         up_idx_list = []
