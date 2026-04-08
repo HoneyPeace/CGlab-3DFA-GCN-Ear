@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: util.py
-@Description: Includes Partition Logic, Name Saving & FPS Progress Bar, and 🌟 6-Channel Geometric Feature Pre-computation.
+@Description: Includes Partition Logic, Name Saving & FPS Progress Bar, and 🌟 7-Channel Geometric Feature (Eigenvector + Eigenvalue) Pre-computation.
 '''
 
 import os 
@@ -41,7 +41,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # [Helper] 파일 읽기 함수들 (Name 반환 유지)
 # -----------------------------------------------------------------------------
 def read_ply_files_from_folder(folder_path):
-    """ .ply 파일들을 읽어서 (Shape리스트, Name리스트) 튜플로 반환 """
     files = sorted(glob.glob(os.path.join(folder_path, "*.ply")))
     if len(files) == 0:
         files = sorted(glob.glob(os.path.join(folder_path, "*.obj"))) 
@@ -67,7 +66,6 @@ def read_ply_files_from_folder(folder_path):
     return shape_list, name_list
 
 def read_asc_files_from_folder(folder_path):
-    """ .asc 파일들을 읽어서 Landmark(L, 3) 리스트로 반환 """
     files = sorted(glob.glob(os.path.join(folder_path, "*.asc")))
     if len(files) == 0:
         return []
@@ -273,6 +271,7 @@ def random_sample(shape_all, Heat_data_all, num_points, rand_seed, sample_way, d
             
     return [], []
 
+# 🔥 복구된 평가/회귀 함수들 (절대 삭제 금지!)
 def get_rigid(src, dst):
     src_mean = src.mean(0)
     dst_mean = dst.mean(0)
@@ -339,17 +338,17 @@ def get_3D_FAN_NME(pred_landmark, gt_landmark):
     return NME, NME_single
 
 # =============================================================================
-# 🌟 [신규 추가] Offline 6-Channel (좌표+주방향) 피처 생성기 (OOM 방지용 배치 처리)
+# 🌟 [신규 업데이트] Offline 7-Channel 피처 생성기 (Eigenvector 3 + Eigenvalue 1)
 # =============================================================================
-def compute_principal_directions(shapes, k=15):
+def compute_geometric_features_7ch(shapes, k=15):
     """
-    모든 샘플링된 3D 좌표에 대해 k-NN을 수행하여 주방향 벡터(Principal Direction)를 추출합니다.
-    GPU VRAM OOM(Out of Memory) 방지를 위해 배치(Batch) 단위로 쪼개서 연산합니다.
+    모든 샘플링된 3D 좌표에 대해 k-NN을 수행하여 주방향 벡터와 곡률 크기를 추출합니다.
+    GPU VRAM OOM 방지를 위해 배치(Batch) 단위로 쪼개서 연산합니다.
     """
-    dirs_list = []
+    geom_list = []
     batch_size = 32 # VRAM 안전선
     
-    for i in tqdm(range(0, len(shapes), batch_size), desc="   Calc 6-Ch Geometrics"):
+    for i in tqdm(range(0, len(shapes), batch_size), desc="   Calc 7-Ch Geometrics"):
         batch_shapes = shapes[i:i+batch_size]
         shapes_tensor = torch.tensor(np.array(batch_shapes), dtype=torch.float32).to(device)
         B, N, _ = shapes_tensor.shape
@@ -362,53 +361,51 @@ def compute_principal_directions(shapes, k=15):
         shapes_expanded = shapes_tensor.unsqueeze(1).expand(-1, N, -1, -1)
         knn_points = torch.gather(shapes_expanded, 2, idx_expanded)
         
-        # 2. 공분산 행렬 생성 및 고유값 분해
+        # 2. 공분산 행렬 생성 및 아이겐 분해 (Eigen Decomposition)
         center = knn_points.mean(dim=2, keepdim=True)
         centered = knn_points - center
         cov = torch.matmul(centered.transpose(2, 3), centered)
-        _, eigvec = torch.linalg.eigh(cov)
+        eigval, eigvec = torch.linalg.eigh(cov)
         
-        # 3. 가장 긴 축(주방향) 추출
+        # 🔥 3. 아이겐벡터: 가장 긴 축(주방향) 추출 (3채널)
         principal_dir = eigvec[..., 2]
-        
-        # 4. 방향성 통일 (부호 모호성 제거)
         dot_product = torch.sum(principal_dir * center.squeeze(2), dim=-1, keepdim=True)
-        principal_dir = principal_dir * torch.sign(dot_product)
+        principal_dir = principal_dir * torch.sign(dot_product) # 부호 모호성 해결
         
-        # 결과를 리스트에 안전하게 저장 (CPU 메모리로 이동)
-        dirs_list.extend(principal_dir.cpu().numpy())
+        # 🔥 4. 아이겐밸류: 가장 작은 값을 이용해 곡률 크기 추출 (1채널)
+        sum_eig = torch.sum(eigval, dim=-1) + 1e-6
+        curvature = (eigval[..., 0] / sum_eig).unsqueeze(-1) 
         
-    return dirs_list
+        # 5. 방향(3) + 곡률(1) 병합하여 4채널 피처 생성
+        geom_features = torch.cat([principal_dir, curvature], dim=-1)
+        
+        geom_list.extend(geom_features.cpu().numpy())
+        
+    return geom_list
 
 # -----------------------------------------------------------------------------
-# Main Sampling Function (수정 유지: partition 처리 및 🌟 6채널 저장 로직 추가)
+# Main Sampling Function (7채널 병합 및 저장 로직 적용)
 # -----------------------------------------------------------------------------
 def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data', partition=None):
-    # 파일명 접미사 설정
     suffix = "sample" 
     if partition == 'train': suffix = "train"
     elif partition == 'test': suffix = "test"
 
     print(f'\n--- Processing: {dataset} [Partition: {partition if partition else "ALL"}] ---')
     
-    # 1. Load (이름 포함)
     shape_all, name_all = load_shape_data(dataset, data_root, partition)
-    
     if len(shape_all) == 0:
         print(f"   [Warning] No data found for partition '{partition}'. Skipping.")
         return
 
     print(f'   Loaded {len(shape_all)} shapes.')
 
-    # 2. Landmarks Load
     landmark_position_sample = load_landmark_position(dataset, data_root, (shape_all, name_all), partition)
     print(f'   Loaded {len(landmark_position_sample)} landmarks.')
 
-    # 3. Heatmap
     print('   Calculating Heatmaps...')
     Heat_data_all = calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma)
 
-    # 4. Sampling (Progress bar applied)
     Heat_data_sample, shape_sample = random_sample(shape_all, Heat_data_all,
                                                    num_points, seed, sample_way, dataset, data_root)
     
@@ -416,30 +413,26 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
         print("Sampling failed or empty.")
         return
 
-    # 🌟 [신규 핵심 추가] 6채널(xyz + v_x,v_y,v_z) 데이터 오프라인 베이킹
-    print('   Baking 6-Channel Geometric Features (Principal Directions)...')
-    principal_dirs = compute_principal_directions(shape_sample, k=15)
+    # 🌟 [핵심 파트] 7채널(XYZ 3 + 주방향 3 + 곡률 1) 데이터 오프라인 베이킹
+    print('   Baking 7-Channel Geometric Features (Eigenvectors & Eigenvalues)...')
+    geom_features = compute_geometric_features_7ch(shape_sample, k=15)
     
-    shape_6ch_sample = []
+    shape_7ch_sample = []
     for i in range(len(shape_sample)):
-        # (2048, 3) 과 (2048, 3) 을 이어붙여 (2048, 6) 텐서로 결합
-        shape_6ch = np.concatenate([shape_sample[i], principal_dirs[i]], axis=-1)
-        shape_6ch_sample.append(shape_6ch)
+        # (2048, 3) 과 (2048, 4) 를 이어붙여 최종 (2048, 7) 텐서로 결합
+        shape_7ch = np.concatenate([shape_sample[i], geom_features[i]], axis=-1)
+        shape_7ch_sample.append(shape_7ch)
 
-    # 5. Save
     save_base_dir = os.path.join(data_root, f"{dataset}-npy")
     os.makedirs(save_base_dir, exist_ok=True)
     
     print(f"   Saving to: {save_base_dir} (Suffix: _{suffix})")
     np.save(os.path.join(save_base_dir, f'Heat_data_{suffix}.npy'), Heat_data_sample)
-    np.save(os.path.join(save_base_dir, f'shape_{suffix}.npy'),      shape_sample)
     
-    # 🌟 6채널 전용 NPY 파일 저장! (train.py에서 args.in_channels가 6일 때 이걸 읽게 됩니다)
-    np.save(os.path.join(save_base_dir, f'shape_6ch_{suffix}.npy'),  shape_6ch_sample) 
+    # 모델(train.py, eval_all.py)에서 읽어들일 수 있도록 shape_{suffix}.npy 에 7채널 덮어쓰기
+    np.save(os.path.join(save_base_dir, f'shape_{suffix}.npy'),      shape_7ch_sample) 
     
     np.save(os.path.join(save_base_dir, f'landmark_{suffix}.npy'),   landmark_position_sample)
-    
-    # [추가됨] 이름 저장
     np.save(os.path.join(save_base_dir, f'name_{suffix}.npy'),       np.array(name_all))
 
     print("--- Done ---\n")

@@ -1,7 +1,7 @@
 """
-@Author: Yuan Wang (Modified by Researcher 2)
+@Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: augmentations.py
-@Description: 6-Channel (XYZ + Vectors) Aware Normalization & Augmentation
+@Description: 7-Channel (XYZ + Principal Direction + Curvature) Aware Normalization & Augmentation
 """
 
 import torch
@@ -15,7 +15,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def normalize_data(batch_data, landmark=None):
     B, N, C = batch_data.shape
     
-    # 🔥 1. 좌표(XYZ)와 방향벡터(V) 분리
+    # 🔥 1. 좌표(XYZ)와 나머지 기하 피처(방향/곡률) 분리
     xyz = batch_data[:, :, :3]
     
     # 2. 중심점(Centroid) 이동 및 균일 스케일(Uniform Scale) 정규화
@@ -25,11 +25,11 @@ def normalize_data(batch_data, landmark=None):
     m = m.view(-1, 1, 1)
     xyz = xyz / m
     
-    # 🔥 3. 6채널일 경우 벡터 다시 조립
-    # 균일 스케일과 이동은 벡터의 '방향'에 영향을 주지 않으므로 V는 원본 그대로 붙입니다!
-    if C == 6:
-        v = batch_data[:, :, 3:]
-        batch_data_out = torch.cat([xyz, v], dim=-1)
+    # 🔥 3. 6채널/7채널일 경우 벡터 및 곡률 다시 조립
+    # 균일 스케일과 중심점 이동은 3D 공간상의 '방향'이나 무차원 '곡률 비율'에 영향을 주지 않으므로 원본 그대로 붙입니다.
+    if C == 7 or C == 6:
+        geom = batch_data[:, :, 3:]
+        batch_data_out = torch.cat([xyz, geom], dim=-1)
     else:
         batch_data_out = xyz
     
@@ -63,15 +63,25 @@ class PointcloudScaleAndTranslate(object):
         # 2. 좌표(XYZ) 변환: 스케일 곱하기 + 이동량 더하기
         xyz = torch.mul(xyz, scale) + translate
         
-        # 🔥 3. 6채널일 경우 벡터(V) 정밀 보정 
-        if C == 6:
-            v = pc[:, :, 3:]
-            # [규칙 1] 모양이 찌그러지는 비율(scale)만큼 방향 벡터도 곱해서 휘어지게 함 (translate는 더하면 안 됨!)
+        # 🔥 3. 7채널(벡터+곡률) / 6채널(벡터) 정밀 보정 
+        if C == 7:
+            # 7채널 분리: 주방향(3), 곡률(1)
+            v = pc[:, :, 3:6]
+            curv = pc[:, :, 6:]
+            
+            # [방향 처리] 모양이 찌그러지는 비율만큼 방향 벡터도 곱해서 휘어지게 한 뒤 L2 정규화
             v = torch.mul(v, scale)
-            # [규칙 2] 벡터의 본질인 '순수 방향'을 유지하기 위해 길이를 다시 1로 깎아줌 (L2 정규화)
             v = F.normalize(v, p=2, dim=-1)
             
+            # [곡률 처리] 무차원 스칼라 값이므로 어떠한 왜곡도 가하지 않고 원본 그대로 병합
+            pc_out = torch.cat([xyz, v, curv], dim=-1)
+            
+        elif C == 6:
+            v = pc[:, :, 3:]
+            v = torch.mul(v, scale)
+            v = F.normalize(v, p=2, dim=-1)
             pc_out = torch.cat([xyz, v], dim=-1)
+            
         else:
             pc_out = xyz
         

@@ -81,8 +81,8 @@ class DeepLA_Wrapper(nn.Module):
             
         dl_args.ns = [num_points, num_points // 4, num_points // 16, num_points // 64]
         
-        # 🌟 6채널 입력을 deepla_semseg 내부로 전달하기 위한 세팅
-        dl_args.in_channels = getattr(args, 'in_channels', 3)
+        # 🔥 14채널 엣지 구성을 위한 7채널(XYZ 3 + 주방향 3 + 곡률 1) 입력 고정
+        dl_args.in_channels = 7
         
         self.k = dl_args.ks[0]
         self.stage_count = len(dl_args.depths)
@@ -91,10 +91,17 @@ class DeepLA_Wrapper(nn.Module):
     def forward(self, x):
         B, C, N = x.shape
         
-        # 🌟 [핵심 보호막] 거리 계산은 무조건 앞의 3채널(xyz)만 사용!
-        xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
-        # 🌟 모델 내부로 들어가는 피처는 6채널 전체 보존!
-        feature = x.permute(0, 2, 1).contiguous()  
+        # 🌟 [해결책 1. VRAM 및 연산 폭발 방지] 
+        # 거리 계산용 xyz는 미분 계산을 아예 안 하도록 강제로 끊어버립니다. (속도/메모리 최적화)
+        # KNN 및 FPS에는 순수물리좌표인 앞의 3채널만 사용됩니다.
+        xyz = x[:, :3, :].permute(0, 2, 1).contiguous().detach()
+        
+        # 🌟 [해결책 2. 경고 제거 및 120층 진짜 학습 활성화!]
+        # 모델 내부로 들어가는 피처에는 7채널 전체를 넘겨줍니다.
+        feature = x.permute(0, 2, 1).contiguous() 
+        if self.training:
+            feature.requires_grad_(True)
+            
         device = x.device
         
         up_idx_list = []

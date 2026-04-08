@@ -6,39 +6,35 @@ from PAConv.util.PAConv_util import knn, get_graph_feature, get_scorenet_input, 
 from PAConv.cuda_lib.functional import assign_score_withk as assemble_dgcnn
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-'''
-PAConv model from 
-Xu M, Ding R, Zhao H, et al. PAConv: Position Adaptive Convolution with Dynamic Kernel Assembling on Point Clouds. CVPR2021
-The following module is based on https://github.com/CVMI-Lab/PAConv
-'''
 class PAConv(nn.Module):
     def __init__(self, args, landmark_num):
         super(PAConv, self).__init__()
-        # baseline args:
         self.args = args
-        # PAConv args:
         self.k = args.k
         self.landmark_num = landmark_num
         self.calc_scores = args.calc_scores
         self.hidden = args.hidden
-
-        #기존은 10차원에서 6차원으로 변경 <-- 06.07: 차원 수 의심으로 인한 변경
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices
         
-        # 🌟 [신규 추가] 입력이 6채널이면 16채널 기하학 피처, 아니면 10채널
+        # 🌟 7채널(14엣지) 동기화
         in_channels = getattr(args, 'in_channels', 3)
-        self.edge_channels = 13 if in_channels == 6 else 10
+        if in_channels == 7:
+            self.edge_channels = 14
+        elif in_channels == 6:
+            self.edge_channels = 13
+        else:
+            self.edge_channels = 10
         
         self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
         self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])
         self.scorenet4 = ScoreNet(self.edge_channels, self.m4, hidden_unit=self.hidden[2])
         self.scorenet5 = ScoreNet(self.edge_channels, self.m5, hidden_unit=self.hidden[3])
         
-        i2 = 64       # channel dim of input_2nd
-        o2 = i3 = 64  # channel dim of output_2st and input_3rd
-        o3 = i4 = 64  # channel dim of output_3rd and input_4th
-        o4 = i5 = 64  # channel dim of output_4th and input_5th
-        o5 = 64       # channel dim of output_5th
+        i2 = 64       
+        o2 = i3 = 64  
+        o3 = i4 = 64  
+        o4 = i5 = 64  
+        o5 = 64       
 
         tensor2 = nn.init.kaiming_normal_(torch.empty(self.m2, i2 * 2, o2), nonlinearity='relu') \
             .permute(1, 0, 2).contiguous().view(i2 * 2, self.m2 * o2)
@@ -66,7 +62,6 @@ class PAConv(nn.Module):
         self.bn7 = nn.BatchNorm1d(256, momentum=0.1)
         self.bn8 = nn.BatchNorm1d(128, momentum=0.1)
 
-        # 🌟 첫 레이어도 다이나믹하게 10/16 채널 호환
         self.conv1 = nn.Sequential(nn.Conv2d(self.edge_channels, 64, kernel_size=1, bias=True), 
                                    nn.BatchNorm2d(64, momentum=0.1))
                                    
@@ -87,22 +82,17 @@ class PAConv(nn.Module):
     def forward(self, x):
         B, C, N = x.size()
         
-        # 🌟 [핵심 보호막] KNN 거리 계산은 무조건 앞의 3채널(순수 xyz 물리 좌표)로만 수행!
         physical_xyz = x[:, :3, :].contiguous()
         idx, _ = knn(physical_xyz, k=self.k)
         
-        # 🌟 [다이나믹 16채널 조립] PAConv_util에 전체(6채널) 데이터를 넘겨서 16채널 엣지 피처 생성
-        scorenet_input = get_scorenet_input(x, k=self.k, idx=idx)  # ScoreNet input
+        scorenet_input = get_scorenet_input(x, k=self.k, idx=idx)  
         x_edge_feat = get_graph_feature(x, k=self.k, idx=idx)
 
         x_out = F.relu(self.conv1(x_edge_feat))
         x1 = x_out.max(dim=-1, keepdim=False)[0]
         
-        """CUDA implementation of PAConv: (presented in the supplementary material of the paper)"""
-        """feature transformation:"""
         x2, center2 = feat_trans_dgcnn(point_input=x1, kernel=self.matrice2, m=self.m2)
         score2 = self.scorenet2(scorenet_input, calc_scores=self.calc_scores, bias=0)
-        """assemble with scores:"""
         x_asm = assemble_dgcnn(score=score2, point_input=x2, center_input=center2, knn_idx=idx, aggregate='sum')
         x2 = F.relu(self.bn2(x_asm))
 
@@ -134,7 +124,6 @@ class PAConv(nn.Module):
         x_res = self.dp2(x_res)
         x_res = F.relu(self.conv8(x_res))
         
-        """ Output the heatmap regression result: """
         x_res = self.conv9(x_res) 
         x_res = F.softmax(x_res, dim=1)  
         

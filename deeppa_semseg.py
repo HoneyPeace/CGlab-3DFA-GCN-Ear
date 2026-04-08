@@ -108,9 +108,14 @@ class Stage_PA(nn.Module):
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             
-            # 🔥 [Ablation] 6채널 입력 시 '13채널'로 뼈대 고정!
+            # 🌟 7채널(14엣지) 동기화
             in_channels = getattr(args, 'in_channels', 3)
-            in_feat_dim = 13 if in_channels == 6 else 10
+            if in_channels == 7:
+                in_feat_dim = 14
+            elif in_channels == 6:
+                in_feat_dim = 13
+            else:
+                in_feat_dim = 10
             
             self.nbr_embed = nn.Sequential(
                 nn.Linear(in_feat_dim, nbr_hid_dim // 2, bias=False),  
@@ -198,12 +203,12 @@ class Stage_PA(nn.Module):
             dist = torch.norm(nbr_rel, dim=-1, keepdim=True) 
             vector = nbr_rel / (dist + 1e-8)
             
-            # 🔥 [Ablation] 6채널 입력 시 '13채널' 엣지 사용 (방향 꺾임 제외)
-            if C_in == 6:
-                # 13채널 조립: 상대위치(3) + 6채널입력(6) + 거리(1) + 위치벡터(3) = 13채널
+            # 🔥 차원에 맞게 nbr 조립
+            if C_in == 7:
+                nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 14)
+            elif C_in == 6:
                 nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 13) 
             else:
-                # 3채널(기본) 입력일 경우 기존 10채널 로직 유지
                 nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
             
             nbr_embed_func = lambda t: self.nbr_embed(t).view(B, N, self.k, -1).max(dim=2)[0]

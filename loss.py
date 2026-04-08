@@ -66,8 +66,6 @@ def find_knn_points(pred_coords, points, k=10):
     
     return knn_points
 
-# 🌟 [신규 추가] 16채널 확장을 위한 입력 포인트 기하학 피처(주방향) 추출기
-# 전처리 단계(Offline Pre-computation)에서 NPY 파일을 구울 때 호출하여 사용합니다.
 def compute_input_geometric_features(points, k=15):
     """
     모든 입력 포인트(B, N, 3)에 대해 주변 k개의 점을 모아 
@@ -105,7 +103,8 @@ class CurvatureSurfaceLoss(nn.Module):
         self.alpha = alpha
         self.dir_weight = dir_weight # 방향성 로스 가중치
 
-    def forward(self, pred_coords, gt_coords, points):
+    # 🔥 disable_norm 인자 추가 완료!
+    def forward(self, pred_coords, gt_coords, points, disable_norm=False):
         # -------------------------------------------------------------
         # 1. P2P 투영용 법선 추출 (좁은 영역)
         # -------------------------------------------------------------
@@ -168,8 +167,11 @@ class CurvatureSurfaceLoss(nn.Module):
         vector_to_plane = pred_coords - center_p2p_gt
         p2p_distance = torch.abs(torch.sum(vector_to_plane * normal_gt, dim=-1))
 
-        # [3] 단일 단위로의 융합 (Unit Alignment)
-        weight_multiplier = 1.0 + (self.alpha * diff_curvature) + (self.dir_weight * diff_direction)
+        # 🔥 [3] 정규화 스위치 적용 로직 추가!
+        if disable_norm:
+            weight_multiplier = 1.0 # 1단계(PAConv) 학습 시에는 곡률/방향 페널티 없이 순수 거리만 줄임
+        else:
+            weight_multiplier = 1.0 + (self.alpha * diff_curvature) + (self.dir_weight * diff_direction)
         
         # 🌟 최종 반환: 오직 '거리 차원(mm)' 하나만을 가지는 통합 로스
         loss_unified = (p2p_distance * weight_multiplier).mean()

@@ -19,7 +19,8 @@ parser = argparse.ArgumentParser(description='3D Ear/Face Landmark Detection')
 # [1] 기본 설정 (Base Args)
 # =============================================================================
 parser.add_argument('--exp_name', type=str, default='Ear_Project_Final', metavar='N', help='Name of the experiment')
-parser.add_argument('--model', type=str, default='DeepLA', metavar='N', choices=['PAConv_heat', 'PAConv', 'DeepLA', 'DeepPA'], help='Model to use, [PAConv_heat, PAConv, DeepLA, DeepPA]')
+# 🔥 'deeppa_auto' 옵션 추가
+parser.add_argument('--model', type=str, default='DeepLA', metavar='N', choices=['PAConv_heat', 'PAConv', 'DeepLA', 'DeepPA', 'DeepPA_auto'], help='Model to use')
 parser.add_argument('--no_cuda', type=str2bool, default=False, help='enables CUDA training')
 parser.add_argument('--model_path', type=str, default='', metavar='N', help='Pretrained model path')
 
@@ -30,8 +31,8 @@ parser.add_argument('--test_dataset_name', type=str, default='', help='Test data
 parser.add_argument('--data_root', type=str, default='../data', help='Root directory of data')
 parser.add_argument('--output_root', type=str, default='../results', help='Root directory for results')
 
-# 🌟 [신규 추가] 입력 채널 설정 (3채널: 순수 xyz / 6채널: xyz + 주방향 벡터)
-parser.add_argument('--in_channels', type=int, default=3, help='Input channels: 3 for (x,y,z), 6 for (x,y,z, vx,vy,vz)')
+# 🌟 입력 채널 설정 (기본 7채널: xyz + 주방향 + 곡률)
+parser.add_argument('--in_channels', type=int, default=7, help='Input channels: 3 for (xyz), 7 for (xyz + principal_dir + curvature)')
 
 # =============================================================================
 # [2] 학습 설정 (Train Args)
@@ -40,6 +41,11 @@ parser.add_argument('--eval', type=str2bool, default=False, help='evaluate the m
 parser.add_argument('--batch_size', type=int, default=32, metavar='batch_size', help='Size of batch')
 parser.add_argument('--test_batch_size', type=int, default=1, metavar='batch_size', help='Size of batch')
 parser.add_argument('--epochs', type=int, default=500, metavar='N', help='number of episode to train')
+
+# 🔥 Auto 파이프라인 전용 에폭 설정 추가
+parser.add_argument('--paconv_epochs', type=int, default=500, help='PAConv stage epochs in auto mode')
+parser.add_argument('--deeppa_epochs', type=int, default=500, help='DeepPA stage epochs in auto mode')
+
 parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
 parser.add_argument('--accumulation_steps', type=int, default=1, help='Gradient Accumulation Steps')
 
@@ -85,8 +91,6 @@ parser.add_argument('--model_epoch', type=str, default="model_epoch_250.t7", hel
 parser.add_argument('--run_id', type=str, default='', help='Load specific run from backup (e.g., 1, 2)')
 parser.add_argument('--use_split_dataset', type=str2bool, default=True, help='Use split dataset mode')
 parser.add_argument('--user_tag', type=str, default='', help='Custom tag added to the folder name')
-
-# 평가 시 폴더명을 정확히 찾기 위해 사용 (학습 데이터 개수)
 parser.add_argument('--train_len', type=int, default=203, help='Number of training samples used in folder name')
 
 # =============================================================================
@@ -100,7 +104,5 @@ parser.add_argument('--plane_knn', type=int, default=5, help='K points for Local
 parser.add_argument('--curv_knn', type=int, default=30, help='K points for Macroscopic Curvature & Direction estimation')
 parser.add_argument('--curv_alpha', type=float, default=10.0, help='Penalty multiplier for curvature magnitude error')
 parser.add_argument('--dir_weight', type=float, default=1.0, help='Penalty multiplier for eigenvector direction error')
-
-# 🎯 다이나믹 포칼 로스 인자 (이미 잘 들어가 있습니다!)
 parser.add_argument('--focal_gamma', type=float, default=1.0, help='Gamma for dynamic focal loss')
 parser.add_argument('--focal_max', type=float, default=5.0, help='Max clamp for focal weights')

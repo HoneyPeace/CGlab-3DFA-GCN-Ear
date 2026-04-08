@@ -95,9 +95,8 @@ class Stage(nn.Module):
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             
-            # 🔥 [Ablation] 6채널 입력 시 '9채널' 뼈대 고정! (상대위치3 + 입력6 = 9채널, 방향꺾임 제외)
-            in_channels = getattr(args, 'in_channels', 3)
-            in_feat_dim = 9 if in_channels == 6 else 6
+            # 🔥 입력 7채널(XYZ 3 + 방향 3 + 곡률 1) 고정에 따른 14채널 엣지 피처 사용
+            in_feat_dim = 14
             
             self.nbr_embed = nn.Sequential(
                 nn.Linear(in_feat_dim, nbr_hid_dim // 2, bias=False), 
@@ -180,13 +179,12 @@ class Stage(nn.Module):
             nbr_rel = pe.clone()
             x_knn = index_points(x, knn)
             
-            # 🔥 [Ablation] 6채널 입력 시 '9채널' 엣지 사용 (방향 꺾임 제외)
-            if C_in == 6:
-                # 9채널 조립: 상대위치(3) + 6채널입력(6)
-                nbr = torch.cat([nbr_rel, x_knn], dim=-1).view(-1, 9) 
-            else:
-                # 3채널(기본) 입력 시 6채널 유지
-                nbr = torch.cat([nbr_rel, x_knn], dim=-1).view(-1, 6) 
+            # 🔥 14 채널을 위해 거리와 방향 벡터 추가 계산 (DeepPA와 동일한 조건)
+            dist = torch.norm(nbr_rel, dim=-1, keepdim=True) 
+            vector = nbr_rel / (dist + 1e-8)
+            
+            # 14채널 조립: 상대위치(3) + 7채널입력(7) + 거리(1) + 위치벡터(3) = 14채널
+            nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 14) 
                 
             nbr_embed_func = lambda t: self.nbr_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
             nbr = checkpoint(nbr_embed_func, nbr) if self.training and self.cp else nbr_embed_func(nbr)

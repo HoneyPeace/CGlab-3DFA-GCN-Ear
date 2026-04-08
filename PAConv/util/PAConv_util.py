@@ -11,13 +11,8 @@ def knn(x, k):
     return idx, pairwise_distance                        
 
 def get_graph_feature(x, k=20, idx=None):
-    """
-    x: input points (B, C, N) - 3채널 또는 6채널 입력
-    return: edge features (B, 10, N, K) 또는 (B, 13, N, K)
-    """
     batch_size, C_in, num_points = x.size()             
     
-    # 🌟 KNN 거리 계산은 무조건 앞의 3채널(순수 xyz 물리 좌표)로만 수행!
     xyz = x[:, :3, :]
     if idx is None:
         idx, _ = knn(xyz, k=k)                          
@@ -38,13 +33,14 @@ def get_graph_feature(x, k=20, idx=None):
     relative_xyz = neighbor_xyz - center_xyz
     dist = torch.linalg.vector_norm(relative_xyz, dim=3, keepdim=True)
 
-    # 🔥 [Ablation] 13채널 조립 (방향 꺾임 제외)
-    if C_in == 6:
+    # 🔥 7채널(14엣지), 6채널(13엣지), 3채널(10엣지) 자동 조립
+    if C_in == 7:
+        center_geom = center[..., 3:]
+        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, center_geom), dim=3)
+    elif C_in == 6:
         center_v = center[..., 3:]
-        # 13채널 조립: 상대위치(3) + 이웃위치(3) + 중심위치(3) + 거리(1) + 중심방향(3)
         feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, center_v), dim=3)
     else:
-        # 기존 10채널 조립
         feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist), dim=3)
 
     return feature.permute(0, 3, 1, 2).contiguous()     
@@ -58,18 +54,22 @@ def get_scorenet_input(x, idx, k):
     idx = idx.view(-1)                                   
 
     x_trans = x.transpose(2, 1).contiguous()                   
-    neighbor = x_trans.view(batch_size * num_points, -1)[idx, :]\
-                .view(batch_size, num_points, k, C_in)   
-    center = x_trans.view(batch_size, num_points, 1, C_in)\
-             .repeat(1, 1, k, 1)                         
+    
+    # 🌟 NameError 버그가 났던 띄어쓰기(backslash) 이슈 괄호로 완벽 해결!
+    neighbor = (x_trans.view(batch_size * num_points, -1)[idx, :]
+                .view(batch_size, num_points, k, C_in))
+    center = (x_trans.view(batch_size, num_points, 1, C_in)
+              .repeat(1, 1, k, 1))                         
              
     neighbor_xyz = neighbor[..., :3]
     center_xyz = center[..., :3]
     relative_xyz = neighbor_xyz - center_xyz
     dist = torch.linalg.vector_norm(relative_xyz, dim=3, keepdim=True)
 
-    # 🔥 [Ablation] 13채널 조립 (방향 꺾임 제외)
-    if C_in == 6:
+    if C_in == 7:
+        center_geom = center[..., 3:]
+        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, center_geom), dim=3)
+    elif C_in == 6:
         center_v = center[..., 3:]
         feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, center_v), dim=3)
     else:
@@ -148,7 +148,6 @@ class ScoreNet(nn.Module):
         scores = scores.permute(0, 2, 3, 1)             
         return scores                                   
 
-# 🔥 이 부분이 잘렸었습니다! 복구 완료!
 class Attention_Layer(nn.Module):
     def __init__(self, channels, reduction=4):
         super(Attention_Layer, self).__init__()
