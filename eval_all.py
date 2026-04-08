@@ -9,7 +9,7 @@ import sys
 import torch
 import torch.nn.functional as F
 import numpy as np
-import pandas as pd  # 🔥 엑셀 저장을 위한 pandas 추가
+import pandas as pd
 import os
 import time
 import warnings
@@ -137,7 +137,10 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
     os.makedirs(current_asc_dir, exist_ok=True)
 
     me_list, per_landmark_me_list = [], []
-    cos_sim_list, iou_list, time_list = [], []
+    
+    # 🔥🔥🔥 바로 이 부분의 오타를 수정했습니다! (변수 3개, 리스트 3개) 🔥🔥🔥
+    cos_sim_list, iou_list, time_list = [], [], []
+    
     per_landmark_cos_sim_list, per_landmark_iou_list = [], []
 
     eval_model.eval()
@@ -309,7 +312,7 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
 
     print(f"\n[{eval_name} Done] Results saved to: {run_root}")
     print(f"      TXT   : {filename_txt}")
-    print(f"      Excel : {filename_excel}") # 엑셀 생성 로그 추가
+    print(f"      Excel : {filename_excel}") 
     print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
 
 # -----------------------------------------------------------------------------
