@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + Curriculum Learning + Auto 2-Stage Pipeline (DeepPA_auto) + Global Auto-Scaled 4-Loss + 🌟 7-Channel Direct Pipeline
+@Description: Gradient Accumulation + Curriculum Learning + Auto 2-Stage Pipeline (deeppa_auto) + Global Auto-Scaled 4-Loss + 🌟 7-Channel Direct Pipeline
 '''
 
 import os
@@ -188,10 +188,8 @@ def train(args):
         with open(log_file_path, 'a') as f:
             f.write(f"\n--- [START STAGE] {stage_name} (Epochs: {current_epochs}) ---\n")
 
-        # 🔥 [안정성 패치] 대소문자 무시 (DeepPA_auto로 들어와도 deppa_auto로 처리되도록)
         model_name_lower = current_model_name.lower()
 
-        # 1. 모델 초기화
         if model_name_lower == 'deeppa' and prior_model is None:
             print(">>> [Prior Load] Loading Pre-trained PAConv from default path...")
             paconv_prior = PAConv(args, args.landmark_num).to(device)
@@ -217,7 +215,6 @@ def train(args):
             
         model.apply(weight_init)
         
-        # 2. 손실 함수 및 옵티마이저 설정
         surface_criterion = CurvatureSurfaceLoss(
             k_p2p=args.plane_knn, k_curv=args.curv_knn, 
             alpha=args.curv_alpha, dir_weight=args.dir_weight
@@ -238,7 +235,6 @@ def train(args):
         target_norm = 1.53
         auto_scales = {'heatmap': -1.0, 'coord': -1.0, 'surface': -1.0, 'struct': -1.0}
 
-        # 3. 에폭 루프
         for epoch in range(current_epochs):
             model.train()
             train_loss, train_hm, train_crd, train_srf, train_str, train_mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
@@ -258,7 +254,7 @@ def train(args):
                     
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     
-                    if model_name_lower == 'deeppa' and prior_model is not None:
+                    if current_model_name == 'DeepPA' and prior_model is not None:
                         with torch.no_grad():
                             prior_hint = prior_model(point_input)
                         pred_heatmap = model(point_input, prior_heatmap=prior_hint)
@@ -273,17 +269,14 @@ def train(args):
                     loss_surface = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=disable_norm)
                     loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                     
-                    # ⚖️ Auto-Scaler 로직
                     if epoch == 0 and i == 0 and auto_scales['heatmap'] < 0:
                         if disable_norm or model_name_lower in ['paconv', 'paconv_heat']:
                             auto_scales['heatmap'], auto_scales['coord'], auto_scales['surface'], auto_scales['struct'] = 1.0, 1.0, 1.0, 1.0
-                            print(f"\n 🎯 [Auto-Scaler] 정규화 OFF: 원본 로스 스케일 유지 (x1.0)")
                         else:
                             auto_scales['heatmap'] = target_norm / (loss_heatmap.item() + 1e-6)
                             auto_scales['coord']   = target_norm / (loss_coord.item() + 1e-6)
                             auto_scales['surface'] = target_norm / (loss_surface.item() + 1e-6)
                             auto_scales['struct']  = target_norm / (loss_struct.item() + 1e-6)
-                            print(f"\n 🎯 [Auto-Scaler] 4-Loss 황금 밸런스 자동 세팅 완료! (Target Norm: {target_norm})")
 
                     norm_heatmap = loss_heatmap * auto_scales['heatmap']
                     norm_coord   = loss_coord   * auto_scales['coord']
@@ -351,7 +344,7 @@ def train(args):
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     
-                    if model_name_lower == 'deeppa' and prior_model is not None:
+                    if current_model_name == 'DeepPA' and prior_model is not None:
                         prior_hint = prior_model(point_input) 
                         pred_heatmap = model(point_input, prior_heatmap=prior_hint)
                     else:
@@ -395,7 +388,7 @@ def train(args):
             num_val_batches = i + 1
             v_loss, v_hm, v_crd, v_srf, v_str, v_mm = val_loss/num_val_batches, val_hm/num_val_batches, val_crd/num_val_batches, val_srf/num_val_batches, val_str/num_val_batches, val_mm/num_val_batches
 
-            # --- Logging ---
+            # --- 🌟 터미널 실시간 출력 (4가지 세부 로스 모두 표시) ---
             print(f" [{stage_name} Ep {epoch+1:03d}] T_Loss: {t_loss:.4f} (HM:{t_hm:.4f} Crd:{t_crd:.4f} Srf:{t_srf:.4f} Str:{t_str:.4f}) | T_mm: {t_mm:.2f} || V_mm: {v_mm:.2f}")
 
             if model_name_lower == 'paconv_heat':
@@ -427,14 +420,13 @@ def train(args):
 
             scheduler.step()
             
-        return model # 해당 스테이지 학습 완료 후 모델 반환
+        return model 
 
     # =========================================================================
-    # 🎯 파이프라인 제어기: 대소문자 무시 (DeepPA_auto -> deeppa_auto)
+    # 🎯 파이프라인 제어기: deeppa_auto 분기 처리
     # =========================================================================
     print(f"\n=== [Phase 3] Start Training with Curriculum Learning ===")
     
-    # 전달받은 args.model을 무조건 소문자로 변환하여 분기 처리
     model_type = args.model.lower() 
     
     if model_type == 'deeppa_auto':
@@ -461,7 +453,7 @@ def train(args):
         for param in paconv_model.parameters():
             param.requires_grad = False
             
-        execute_stage(f
+        execute_stage(
             current_model_name='DeepPA', 
             current_epochs=args.deeppa_epochs, 
             disable_norm=False, 
@@ -472,7 +464,7 @@ def train(args):
         
     else:
         # 기존 단일 모델 실행 모드
-        disable_norm_flag = (model_type in ['paconv', 'paconv_heat'])
+        disable_norm_flag = (args.model in ['PAConv', 'PAConv_heat'])
         execute_stage(
             current_model_name=args.model, 
             current_epochs=args.epochs, 
