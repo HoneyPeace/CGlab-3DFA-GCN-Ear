@@ -108,9 +108,13 @@ class Stage_PA(nn.Module):
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             
-            # 🌟 7채널(14엣지) 동기화
             in_channels = getattr(args, 'in_channels', 3)
-            if in_channels == 7:
+            
+            # 🔥 똑똑한 동기화: Early Fusion(DeepPA)일 때는 50차원 문을 열고, 단독(DeepLA)일 때는 14차원 문을 엽니다!
+            current_model = getattr(args, 'model', 'deeppa').lower()
+            if current_model in ['deeppa', 'deeppa_auto'] and in_channels == 7:
+                in_feat_dim = 50   # 3(상대) + 43(입력) + 1(거리) + 3(방향) = 50채널!
+            elif in_channels == 7:
                 in_feat_dim = 14
             elif in_channels == 6:
                 in_feat_dim = 13
@@ -204,12 +208,14 @@ class Stage_PA(nn.Module):
             vector = nbr_rel / (dist + 1e-8)
             
             # 🔥 차원에 맞게 nbr 조립
-            if C_in == 7:
+            if C_in == 43:  # 🚀 Early Fusion으로 43채널이 들어온 경우!
+                nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 50)
+            elif C_in == 7:
                 nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 14)
             elif C_in == 6:
                 nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 13) 
             else:
-                nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
+                nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10)
             
             nbr_embed_func = lambda t: self.nbr_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
             nbr = checkpoint(nbr_embed_func, nbr) if self.training and self.cp else nbr_embed_func(nbr)

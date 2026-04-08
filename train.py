@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + Curriculum Learning + Auto 2-Stage Pipeline (deeppa_auto) + Global Auto-Scaled 4-Loss + 🌟 7-Channel Direct Pipeline
+@Description: Gradient Accumulation + Curriculum Learning + Auto 2-Stage Pipeline (deeppa_auto) + 🌟 Early Fusion (7-Ch Geom + 36-Ch Prob = 43-Ch)
 '''
 
 import os
@@ -178,7 +178,7 @@ def train(args):
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
     # =========================================================================
-    # 🚀 핵심 학습 루프 함수 (Stage 분리를 위한 캡슐화)
+    # 🚀 핵심 학습 루프 함수
     # =========================================================================
     def execute_stage(current_model_name, current_epochs, disable_norm=False, prior_model=None, stage_name=""):
         print(f"\n{'='*50}")
@@ -254,12 +254,22 @@ def train(args):
                     
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     
-                    if current_model_name == 'DeepPA' and prior_model is not None:
+                    # ==========================================================
+                    # 1️⃣ 학습(Train) 루프: Early Fusion 적용
+                    # ==========================================================
+                    if model_name_lower == 'deeppa' and prior_model is not None:
                         with torch.no_grad():
+                            # prior_hint: (B, 36, N)
                             prior_hint = prior_model(point_input)
-                        pred_heatmap = model(point_input, prior_heatmap=prior_hint)
+                        
+                        # 🌟 포인트 클라우드(7채널) + 히트맵 확률(36채널) 병합 -> (B, 43, N)
+                        fused_point_input = torch.cat([point_input, prior_hint], dim=1)
+                        
+                        # 병합된 43채널 입력을 DeepPA 모델에 전달
+                        pred_heatmap = model(fused_point_input)
                     else:
                         pred_heatmap = model(point_input)
+                    # ==========================================================
                     
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
@@ -344,11 +354,21 @@ def train(args):
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     
-                    if current_model_name == 'DeepPA' and prior_model is not None:
+                    # ==========================================================
+                    # 2️⃣ 검증(Validation) 루프: Early Fusion 적용
+                    # ==========================================================
+                    if model_name_lower == 'deeppa' and prior_model is not None:
+                        # prior_hint: (B, 36, N)
                         prior_hint = prior_model(point_input) 
-                        pred_heatmap = model(point_input, prior_heatmap=prior_hint)
+                        
+                        # 🌟 포인트 클라우드(7채널) + 히트맵 확률(36채널) 병합 -> (B, 43, N)
+                        fused_point_input = torch.cat([point_input, prior_hint], dim=1)
+                        
+                        # 병합된 43채널 입력을 DeepPA 모델에 전달
+                        pred_heatmap = model(fused_point_input)
                     else:
                         pred_heatmap = model(point_input)
+                    # ==========================================================
                     
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
