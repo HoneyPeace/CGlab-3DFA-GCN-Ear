@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: train.py
-@Description: Gradient Accumulation + Curriculum Learning + Auto 2-Stage Pipeline (deeppa_auto) + Global Auto-Scaled 4-Loss + 🌟 7-Channel Direct Pipeline
+@Description: Gradient Accumulation + Curriculum Learning + 🔥 End-to-End Joint Pipeline (deeppa_auto) + 14-Channel
 '''
 
 import os
@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F 
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -25,7 +26,7 @@ from util import main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate
 
 # ==========================================
-# 🚀 모델 임포트 (3대장 모두 준비 완료)
+# 🚀 모델 임포트
 # ==========================================
 from PAConv_model import PAConv
 from DeepLA_model import DeepLA_Wrapper
@@ -121,6 +122,25 @@ def process_data_storage(dataset, prefix, paths):
     np.save(os.path.join(paths['npy_backup'], f"Heat_data_{prefix}.npy"), heatmap_arr)
     print(f"   [{prefix.upper()}] Backup Saved: {paths['npy_backup']}")
 
+# =========================================================================
+# 🌟 End-to-End 조인트 모델 정의
+# =========================================================================
+class JointE2EModel(nn.Module):
+    def __init__(self, args, landmark_num):
+        super().__init__()
+        self.stage1_paconv = PAConv(args, landmark_num)
+        self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
+
+    def forward(self, x):
+        # 1. PAConv 추론
+        prior_hint = self.stage1_paconv(x)
+        # 2. DeepPA 추론 (Mid-fusion)
+        pred_heatmap = self.stage2_deeppa(x, prior_heatmap=prior_hint)
+        
+        if self.training:
+            return pred_heatmap, prior_hint
+        return pred_heatmap
+
 def train(args):
     accum_steps = args.accumulation_steps
     
@@ -178,7 +198,7 @@ def train(args):
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
     # =========================================================================
-    # 🚀 핵심 학습 루프 함수 (Stage 분리를 위한 캡슐화)
+    # 🚀 핵심 학습 루프 함수
     # =========================================================================
     def execute_stage(current_model_name, current_epochs, disable_norm=False, prior_model=None, stage_name=""):
         print(f"\n{'='*50}")
@@ -190,7 +210,10 @@ def train(args):
 
         model_name_lower = current_model_name.lower()
 
-        if model_name_lower == 'deeppa' and prior_model is None:
+        if model_name_lower == 'deeppa_e2e':
+            model = JointE2EModel(args, args.landmark_num).to(device)
+            print(">>> [INFO] 🔗 End-to-End 모드: PAConv와 DeepPA를 단일 신경망으로 묶어 동시 최적화합니다.")
+        elif model_name_lower == 'deeppa' and prior_model is None:
             print(">>> [Prior Load] Loading Pre-trained PAConv from default path...")
             paconv_prior = PAConv(args, args.landmark_num).to(device)
             best_paconv_path = os.path.join("..", "PAConv_model", "model_epoch_500.t7")
@@ -201,8 +224,8 @@ def train(args):
             for param in paconv_prior.parameters():
                 param.requires_grad = False 
             prior_model = paconv_prior
-
-        if model_name_lower in ['paconv', 'paconv_heat']:
+            model = DeepPA_Wrapper(args, args.landmark_num).to(device)
+        elif model_name_lower in ['paconv', 'paconv_heat']:
             model = PAConv(args, args.landmark_num).to(device)
             if model_name_lower == 'paconv_heat':
                 print(">>> [INFO] 🔥 PAConv_heat 모드: 1-Loss(히트맵)만 학습합니다.")
@@ -254,7 +277,12 @@ def train(args):
                     
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     
-                    if current_model_name == 'DeepPA' and prior_model is not None:
+                    # 🌟 모델별 포워드 분기
+                    if model_name_lower == 'deeppa_e2e':
+                        pred_heatmap, prior_hint = model(point_input)
+                        # PAConv 중간 결과물 보조 로스 계산
+                        loss_hm_stage1 = criterion(prior_hint, seg.permute(0, 2, 1).contiguous())
+                    elif current_model_name == 'DeepPA' and prior_model is not None:
                         with torch.no_grad():
                             prior_hint = prior_model(point_input)
                         pred_heatmap = model(point_input, prior_heatmap=prior_hint)
@@ -300,6 +328,10 @@ def train(args):
                                           rand_weights[2] * norm_struct)
                             weights = torch.tensor([0.05, rand_weights[0], rand_weights[1], rand_weights[2]])
                     
+                    # 🔥 E2E 보조 로스 덧붙이기 (가중치 0.5배)
+                    if model_name_lower == 'deeppa_e2e':
+                        total_loss = total_loss + (loss_hm_stage1 * auto_scales['heatmap'] * 0.5)
+
                     loss = total_loss / accum_steps
                     loss.backward()
                     
@@ -344,7 +376,9 @@ def train(args):
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     
-                    if current_model_name == 'DeepPA' and prior_model is not None:
+                    if model_name_lower == 'deeppa_e2e':
+                        pred_heatmap = model(point_input)
+                    elif current_model_name == 'DeepPA' and prior_model is not None:
                         prior_hint = prior_model(point_input) 
                         pred_heatmap = model(point_input, prior_heatmap=prior_hint)
                     else:
@@ -388,7 +422,6 @@ def train(args):
             num_val_batches = i + 1
             v_loss, v_hm, v_crd, v_srf, v_str, v_mm = val_loss/num_val_batches, val_hm/num_val_batches, val_crd/num_val_batches, val_srf/num_val_batches, val_str/num_val_batches, val_mm/num_val_batches
 
-            # --- 🌟 터미널 실시간 출력 (4가지 세부 로스 모두 표시) ---
             print(f" [{stage_name} Ep {epoch+1:03d}] T_Loss: {t_loss:.4f} (HM:{t_hm:.4f} Crd:{t_crd:.4f} Srf:{t_srf:.4f} Str:{t_str:.4f}) | T_mm: {t_mm:.2f} || V_mm: {v_mm:.2f}")
 
             if model_name_lower == 'paconv_heat':
@@ -404,66 +437,55 @@ def train(args):
                 log_line = f"{epoch+1:<6d} | {t_loss:<8.4f} | {t_hm:<8.4f} | {t_crd:<8.4f} | {t_srf:<8.4f} | {t_str:<8.4f} | {t_mm:<6.2f} || {v_loss:<8.4f} | {v_hm:<8.4f} | {v_crd:<8.4f} | {v_srf:<8.4f} | {v_str:<8.4f} | {v_mm:<6.2f} || {w_hm:<6.3f} | {w_crd:<6.3f} | {w_srf:<6.3f} | {w_str:<6.3f}\n"
                 f.write(log_line)
 
-            # 🏆 Best Model 저장
+            # 🏆 Best Model 저장 (E2E 분리 마법)
             if v_mm < best_val_mm:
                 best_val_mm = v_mm
                 print(f" 🌟 [{stage_name}] Best Model Saved! Error: {best_val_mm:.4f} mm")
                 with open(log_file_path, 'a') as f:
                     f.write(f"  >>> *** {stage_name} Epoch {epoch+1}: Best Model Saved! (Val Error: {best_val_mm:.4f} mm) ***\n")
-                best_save_path = os.path.join(paths['models'], f'{stage_name}_model_best.t7')
-                torch.save(model.state_dict(), best_save_path)
+                
+                # 🔥 eval_all.py 무수정 사용을 위해 덩어리를 2개로 쪼개서 각각 저장!
+                if model_name_lower == 'deeppa_e2e':
+                    torch.save(model.stage1_paconv.state_dict(), os.path.join(paths['models'], 'Stage1_PAConv_model_best.t7'))
+                    torch.save(model.stage2_deeppa.state_dict(), os.path.join(paths['models'], 'Stage2_DeepPA_model_best.t7'))
+                else:
+                    best_save_path = os.path.join(paths['models'], f'{stage_name}_model_best.t7')
+                    torch.save(model.state_dict(), best_save_path)
 
+            # 10단위 저장
             if (epoch + 1) % 10 == 0:
-                filename = f'{stage_name}_model_epoch_{epoch+1}.t7'
-                save_path = os.path.join(paths['models'], filename)
-                torch.save(model.state_dict(), save_path)
+                if model_name_lower == 'deeppa_e2e':
+                    torch.save(model.stage1_paconv.state_dict(), os.path.join(paths['models'], f'Stage1_PAConv_epoch_{epoch+1}.t7'))
+                    torch.save(model.stage2_deeppa.state_dict(), os.path.join(paths['models'], f'Stage2_DeepPA_epoch_{epoch+1}.t7'))
+                else:
+                    filename = f'{stage_name}_model_epoch_{epoch+1}.t7'
+                    save_path = os.path.join(paths['models'], filename)
+                    torch.save(model.state_dict(), save_path)
 
             scheduler.step()
             
         return model 
 
     # =========================================================================
-    # 🎯 파이프라인 제어기: deeppa_auto 분기 처리
+    # 🎯 파이프라인 제어기: 🔥 E2E 자동 변환 적용
     # =========================================================================
     print(f"\n=== [Phase 3] Start Training with Curriculum Learning ===")
     
     model_type = args.model.lower() 
     
     if model_type == 'deeppa_auto':
-        print(f">>> [AUTO MODE] 자동 2-Stage 학습 파이프라인을 가동합니다. (입력: {args.model})")
+        print(f">>> [AUTO MODE] 🔥 자동 End-to-End Joint 파이프라인 가동 (PAConv + DeepPA 동시 학습)")
         
-        # 1️⃣ Stage 1: PAConv (정규화 끄기)
-        paconv_model = execute_stage(
-            current_model_name='PAConv', 
-            current_epochs=args.paconv_epochs, 
-            disable_norm=True, 
-            prior_model=None, 
-            stage_name="Stage1_PAConv"
-        )
-        
-        # 백업 폴더에 PAConv 모델 저장
-        backup_dir = os.path.join(paths['root'], "deeppa_backup", "paconv_model")
-        os.makedirs(backup_dir, exist_ok=True)
-        paconv_save_path = os.path.join(backup_dir, "last_paconv.pth")
-        torch.save(paconv_model.state_dict(), paconv_save_path)
-        print(f"\n>>> [Stage 1 완료] PAConv 모델 백업 완료: {paconv_save_path}")
-        
-        # 2️⃣ Stage 2: DeepPA (정규화 켜기 + 앞서 학습한 PAConv 전달)
-        paconv_model.eval()
-        for param in paconv_model.parameters():
-            param.requires_grad = False
-            
         execute_stage(
-            current_model_name='DeepPA', 
-            current_epochs=args.deeppa_epochs, 
+            current_model_name='deeppa_e2e', 
+            current_epochs=args.epochs, # 500에폭 풀타임 가동
             disable_norm=False, 
-            prior_model=paconv_model, 
-            stage_name="Stage2_DeepPA"
+            prior_model=None, 
+            stage_name="E2E_Joint"
         )
-        print("\n>>> [AUTO MODE] 전체 파이프라인 성공적으로 종료되었습니다.")
+        print("\n>>> [AUTO MODE] E2E 파이프라인이 성공적으로 종료되었습니다.")
         
     else:
-        # 기존 단일 모델 실행 모드
         disable_norm_flag = (args.model in ['PAConv', 'PAConv_heat'])
         execute_stage(
             current_model_name=args.model, 
