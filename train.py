@@ -122,17 +122,34 @@ def process_data_storage(dataset, prefix, paths):
 class JointE2EModel(nn.Module):
     def __init__(self, args, landmark_num):
         super().__init__()
+        # 1. 앞단: PAConv 특징 추출기
         self.stage1_paconv = PAConv(args, landmark_num)
+        
+        # 🔥 중간 다리: 피처 정규화 (Feature Normalization) 추가
+        # InstanceNorm1d는 [Batch, 채널(Landmark), 포인트 수] 형태의 텐서에서 
+        # 랜드마크 채널별로 스케일을 평균 0, 분산 1로 일정하게 맞춰줍니다.
+        self.feature_norm = nn.InstanceNorm1d(landmark_num, affine=True) 
+        
+        # 3. 뒷단: DeepPA 예측 헤드
         self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
 
     def forward(self, x):
-        prior_hint = self.stage1_paconv(x)
-        pred_heatmap = self.stage2_deeppa(x, prior_heatmap=prior_hint)
+        # 1단계: PAConv가 날 것의 형태(Raw Feature/Hint)를 뽑아냄
+        prior_hint_raw = self.stage1_paconv(x)
+        
+        # 2단계: 🔥 피처 정규화 통과 
+        # 뒷단(DeepPA)이 헷갈려하지 않도록 튀는 단위 크기들을 정돈해 줌
+        prior_hint_norm = self.feature_norm(prior_hint_raw)
+        
+        # 3단계: 정돈된 피처를 DeepPA에 집어넣어 어텐션을 안정적으로 계산
+        pred_heatmap = self.stage2_deeppa(x, prior_heatmap=prior_hint_norm)
         
         if self.training:
-            return pred_heatmap, prior_hint
+            # 보조 로스(loss_hm_stage1)를 계산할 때는 PAConv가 날 것의 학습 신호를 
+            # 듬뿍 받을 수 있도록 정규화되기 전의 'prior_hint_raw'를 넘겨줍니다.
+            return pred_heatmap, prior_hint_raw 
+            
         return pred_heatmap
-
 def train(args):
     accum_steps = args.accumulation_steps
     
