@@ -87,7 +87,7 @@ parser.add_argument('--num_matrices', type=list, default=[8, 8, 8, 8], help='the
 # [6] 기타 설정 (Etc)
 # =============================================================================
 parser.add_argument('--Eval_DataType', type=str, default="test", help='select npy train, test, sample')
-parser.add_argument('--model_epoch', type=str, default="model_epoch_250.t7", help='load trained model file')
+parser.add_argument('--model_epoch', type=str, default="model_epoch_500.t7", help='load trained model file')
 parser.add_argument('--run_id', type=str, default='', help='Load specific run from backup (e.g., 1, 2)')
 parser.add_argument('--use_split_dataset', type=str2bool, default=True, help='Use split dataset mode')
 parser.add_argument('--user_tag', type=str, default='', help='Custom tag added to the folder name')

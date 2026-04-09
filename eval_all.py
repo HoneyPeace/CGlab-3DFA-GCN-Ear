@@ -176,7 +176,11 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
             
             if prior_model is not None:
                 prior_hint = prior_model(point_input)
-                pred_heatmap_raw = eval_model(point_input, prior_heatmap=prior_hint)
+                # 🌟 train.py와 똑같이 평가할 때도 Early Fusion(43채널) 병합!
+                fused_point_input = torch.cat([point_input, prior_hint], dim=1)
+                
+                # 병합된 43채널을 던져줍니다. (prior_heatmap 인자는 이제 필요 없습니다)
+                pred_heatmap_raw = eval_model(fused_point_input)
             else:
                 pred_heatmap_raw = eval_model(point_input)
                 
