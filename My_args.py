@@ -42,6 +42,9 @@ parser.add_argument('--batch_size', type=int, default=32, metavar='batch_size', 
 parser.add_argument('--test_batch_size', type=int, default=1, metavar='batch_size', help='Size of batch')
 parser.add_argument('--epochs', type=int, default=500, metavar='N', help='number of episode to train')
 
+# 🔥 로스 크기 정규화 (auto_scales) ON/OFF 스위치 추가! (기본값 True)
+parser.add_argument('--use_loss_norm', type=str2bool, default=True, help='Apply auto_scales (loss size normalization) at the end')
+
 # 🔥 Auto 파이프라인 전용 에폭 설정 추가
 parser.add_argument('--paconv_epochs', type=int, default=500, help='PAConv stage epochs in auto mode')
 parser.add_argument('--deeppa_epochs', type=int, default=500, help='DeepPA stage epochs in auto mode')
@@ -69,7 +72,7 @@ parser.add_argument('--seed', type=int, default=1, metavar='S', help='random see
 
 parser.add_argument('--regression_point_num', type=int, default=10, metavar='RPN', help='points in landmark regression')
 parser.add_argument('--dataset_seed', type=int, default=1, metavar='S', help='train/test dataset random seed')
-parser.add_argument('--num_points', type=int, default=2048, help='num of points to use')
+parser.add_argument('--num_points', type=int, default=8192, help='num of points to use')
 
 parser.add_argument('--sigma', type=float, default=10.0, metavar='Sig', help='Gaussian Variance of heatmap')
 parser.add_argument('--k', type=int, default=30, metavar='N', help='Num of nearest neighbors')
@@ -91,7 +94,7 @@ parser.add_argument('--model_epoch', type=str, default="model_epoch_250.t7", hel
 parser.add_argument('--run_id', type=str, default='', help='Load specific run from backup (e.g., 1, 2)')
 parser.add_argument('--use_split_dataset', type=str2bool, default=True, help='Use split dataset mode')
 parser.add_argument('--user_tag', type=str, default='', help='Custom tag added to the folder name')
-parser.add_argument('--train_len', type=int, default=203, help='Number of training samples used in folder name')
+parser.add_argument('--train_len', type=int, default=209, help='Number of training samples used in folder name')
 
 # =============================================================================
 # [7] 하이브리드 로스 & 3D 투영 하이퍼파라미터
@@ -105,4 +108,4 @@ parser.add_argument('--curv_knn', type=int, default=30, help='K points for Macro
 parser.add_argument('--curv_alpha', type=float, default=10.0, help='Penalty multiplier for curvature magnitude error')
 parser.add_argument('--dir_weight', type=float, default=1.0, help='Penalty multiplier for eigenvector direction error')
 parser.add_argument('--focal_gamma', type=float, default=1.0, help='Gamma for dynamic focal loss')
-parser.add_argument('--focal_max', type=float, default=5.0, help='Max clamp for focal weights')
+parser.add_argument('--focal_max', type=float, default=10.0, help='Max clamp for focal weights')

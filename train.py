@@ -1,8 +1,6 @@
-'''
-@Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
-@File: train.py
-@Description: Gradient Accumulation + Curriculum Learning + 🔥 End-to-End Joint Pipeline (deeppa_auto) + 14-Channel
-'''
+# @Author: Yuan Wang (Modified by Researcher & AI Assistant)
+# @File: train.py
+# @Description: Gradient Accumulation + Curriculum Learning + 🔥 End-to-End Joint Pipeline (deeppa_auto) + 14-Channel
 
 import os
 import time
@@ -123,7 +121,7 @@ def process_data_storage(dataset, prefix, paths):
     print(f"   [{prefix.upper()}] Backup Saved: {paths['npy_backup']}")
 
 # =========================================================================
-# 🌟 End-to-End 조인트 모델 정의
+# 🌟 End-to-End 조인트 모델 정의 (피처 정규화 제거됨)
 # =========================================================================
 class JointE2EModel(nn.Module):
     def __init__(self, args, landmark_num):
@@ -134,7 +132,7 @@ class JointE2EModel(nn.Module):
     def forward(self, x):
         # 1. PAConv 추론
         prior_hint = self.stage1_paconv(x)
-        # 2. DeepPA 추론 (Mid-fusion)
+        # 2. DeepPA 추론 (날 것 그대로 전달)
         pred_heatmap = self.stage2_deeppa(x, prior_heatmap=prior_hint)
         
         if self.training:
@@ -320,6 +318,7 @@ def train(args):
                             weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                             total_loss = norm_heatmap
                         else:
+                            # 🟢 RLW 무조건 켬!
                             rand_weights = torch.rand(3).to(device)
                             rand_weights = (rand_weights / rand_weights.sum()) * 0.95
                             total_loss = (0.05 * norm_heatmap + 
@@ -328,9 +327,9 @@ def train(args):
                                           rand_weights[2] * norm_struct)
                             weights = torch.tensor([0.05, rand_weights[0], rand_weights[1], rand_weights[2]])
                     
-                    # 🔥 E2E 보조 로스 덧붙이기 (가중치 0.5배)
+                    # 🟢 화룡점정: PAConv에게는 순정 보조 로스를 다이렉트로 투척! (0.5배 곱 삭제)
                     if model_name_lower == 'deeppa_e2e':
-                        total_loss = total_loss + (loss_hm_stage1 * auto_scales['heatmap'] * 0.5)
+                        total_loss = total_loss + loss_hm_stage1
 
                     loss = total_loss / accum_steps
                     loss.backward()
@@ -467,21 +466,21 @@ def train(args):
         return model 
 
     # =========================================================================
-    # 🎯 파이프라인 제어기: 🔥 E2E 자동 변환 적용
+    # 🎯 파이프라인 제어기: 🔥 My_args에서 로스 정규화 끄고 켜기
     # =========================================================================
     print(f"\n=== [Phase 3] Start Training with Curriculum Learning ===")
     
     model_type = args.model.lower() 
     
     if model_type == 'deeppa_auto':
-        print(f">>> [AUTO MODE] 🔥 자동 End-to-End Joint 파이프라인 가동 (PAConv + DeepPA 동시 학습)")
+        print(f">>> [AUTO MODE] 🔥 자동 End-to-End Joint 파이프라인 가동 (Loss Norm: {'ON' if args.use_loss_norm else 'OFF'})")
         
         execute_stage(
             current_model_name='deeppa_e2e', 
             current_epochs=args.epochs, # 500에폭 풀타임 가동
-            disable_norm=False, 
+            disable_norm=not args.use_loss_norm, # 🔥 args와 연동!
             prior_model=None, 
-            stage_name="E2E_Joint"
+            stage_name=f"E2E_Joint_Norm_{'ON' if args.use_loss_norm else 'OFF'}"
         )
         print("\n>>> [AUTO MODE] E2E 파이프라인이 성공적으로 종료되었습니다.")
         
