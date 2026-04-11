@@ -5,20 +5,32 @@ import re
 from My_args import parser
 
 def get_latest_run_info(output_root, exp_name):
-    """지정된 실험 폴더에서 가장 최근에 생성된 폴더를 찾아 run_id와 train_len을 추출합니다."""
+    """지정된 실험 폴더에서 가장 최근에 생성(수정)된 폴더를 찾아 run_id와 train_len을 추출합니다."""
     project_dir = os.path.join(output_root, exp_name)
     if not os.path.exists(project_dir):
         return None, None
     
-    # 폴더 내의 모든 하위 디렉토리 탐색
     subdirs = [os.path.join(project_dir, d) for d in os.listdir(project_dir) 
                if os.path.isdir(os.path.join(project_dir, d))]
     
     if not subdirs:
         return None, None
         
-    # 수정 시간(mtime) 기준으로 가장 최근에 만들어진 폴더 찾기
-    latest_subdir = max(subdirs, key=os.path.getmtime)
+    # 🔥 [수정된 핵심 로직] 하위 폴더/파일까지 싹 다 뒤져서 '가장 마지막으로 쓰여진 시간'을 찾음
+    def get_actual_mtime(folder):
+        latest_time = os.path.getmtime(folder)  # 기본 폴더 생성 시간
+        for root, dirs, files in os.walk(folder):
+            for f in files:
+                file_path = os.path.join(root, f)
+                try:
+                    # 파일들의 수정 시간을 비교해 가장 최신 시간을 갱신
+                    latest_time = max(latest_time, os.path.getmtime(file_path))
+                except OSError:
+                    pass
+        return latest_time
+
+    # 껍데기가 아닌 진짜 내부 파일 기준으로 가장 최근 폴더 찾기
+    latest_subdir = max(subdirs, key=get_actual_mtime)
     folder_name = os.path.basename(latest_subdir)
     
     # 1. 폴더명 맨 끝의 run_id 추출
@@ -27,7 +39,7 @@ def get_latest_run_info(output_root, exp_name):
     except:
         run_id = None
         
-    # 2. 🔥 폴더명에서 실제 학습 데이터 개수(train_len) 자동 추출 (예: _train209_ -> 209)
+    # 2. 폴더명에서 실제 학습 데이터 개수(train_len) 자동 추출
     match = re.search(r'_train(\d+)', folder_name)
     train_len = match.group(1) if match else None
     

@@ -253,7 +253,7 @@ def train(args):
         opt.zero_grad() 
         best_val_mm = float('inf')
 
-        target_norm = 1.53
+        target_norm = 1.0
         auto_scales = {'heatmap': -1.0, 'coord': -1.0, 'surface': -1.0, 'struct': -1.0}
 
         for epoch in range(current_epochs):
