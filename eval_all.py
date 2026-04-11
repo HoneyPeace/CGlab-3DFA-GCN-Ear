@@ -274,46 +274,96 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
             for i in range(lm_means.shape[0]):
                 f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm | 95%ile: {lm_me_95[i]:.3f} mm\n")
 
-    # ------------------ 🌟 Excel (.xlsx) 파일 저장 ------------------
+# ------------------ 🌟 Excel (.xlsx) 파일 완벽 포맷 저장 ------------------
     filename_excel = f"{eval_name}_Results_ME{average_me:.4f}.xlsx"
     result_excel_path = os.path.join(run_root, filename_excel)
     
-    # 1. Summary 데이터프레임 생성
+    # 1. Summary (사진 1 참고: 메타데이터 + 정량 수치 세로 나열)
     summary_data = {
-        "Metric": ["Average ME (mm)", "ME Std", "95%ile ME (mm)", "Success Rate (<10mm) %", "Success Rate (<5mm) %", 
-                   "Average Cosine Sim (%)", "95%ile Cosine Sim (%)", "Average mIoU (%)", "95%ile mIoU (%)", "Avg Time (ms)"],
-        "Value": [average_me, std_me, me_95_global, sr_10, sr_5, 
-                  avg_cos_sim, cos_sim_5_global, avg_iou, iou_5_global, avg_time]
+        "지표 (Metric)": [
+            "[Metadata]", "Experiment", "Run ID", "Model", "User Comment",
+            "[Metrics]", 
+            "Average ME (mm)", 
+            "Average Std (mm)", 
+            "Avg Time (ms)", 
+            "Cosine Sim (%)", 
+            "95%ile Cosine (%)", 
+            "mIoU (@0.1, %)", 
+            "95%ile mIoU (%)", 
+            "Success Rate (<10mm, %)", 
+            "Success Rate (<5mm, %)",
+            "data",
+            "point"
+        ],
+        eval_name: [ # 컬럼명을 모델명으로 지정하여 복붙하기 편하게 설정
+            "", args.exp_name, target_folder_name, eval_name, user_comment,
+            "",
+            round(average_me, 4), 
+            round(std_me, 4), 
+            round(avg_time, 2), 
+            round(avg_cos_sim, 2), 
+            round(cos_sim_5_global, 2), 
+            round(avg_iou, 2), 
+            round(iou_5_global, 2), 
+            round(sr_10, 2), 
+            round(sr_5, 2),
+            args.Eval_DataType,
+            args.num_points
+        ]
     }
     df_summary = pd.DataFrame(summary_data)
 
-    # 2. 랜드마크별 세부 지표 데이터프레임 생성
     df_landmarks = pd.DataFrame()
+    df_top10 = pd.DataFrame()
+    df_heatmap = pd.DataFrame()
+
     if len(per_landmark_me_list) > 0:
+        # 2. Per_Landmark (사진 2 참고: LM 01, 평균±표준편차, 95%값)
+        lm_me_combined = [f"{lm_means[i]:.3f} ± {lm_stds[i]:.3f}" for i in range(lm_means.shape[0])]
         landmark_data = {
-            "Landmark": [f"LM_{i+1:02d}" for i in range(lm_means.shape[0])],
-            "ME_Mean": lm_means,
-            "ME_Std": lm_stds,
-            "ME_95%ile": lm_me_95,
-            "Cosine_Sim_Mean": lm_cos_means,
-            "Cosine_Sim_Std": lm_cos_stds,
-            "Cosine_Sim_5%ile": lm_cos_5,
-            "mIoU_Mean": lm_iou_means,
-            "mIoU_Std": lm_iou_stds,
-            "mIoU_5%ile": lm_iou_5
+            "LM (랜드마크)": [f"{i+1}" for i in range(lm_means.shape[0])],
+            eval_name: lm_me_combined,
+            f"{eval_name} (95%ile)": np.round(lm_me_95, 3)
         }
         df_landmarks = pd.DataFrame(landmark_data)
 
-    # ExcelWriter를 사용하여 여러 시트로 분할 저장
+        # 3. Top 10 Hardest (사진 3 참고: 예측 어려운 순위)
+        worst_indices = np.argsort(lm_means)[::-1][:10]
+        top10_combined = [f"LM {i+1:02d} ({lm_means[i]:.3f} ± {lm_stds[i]:.3f})" for i in worst_indices]
+        top10_95ile = [round(lm_me_95[i], 3) for i in worst_indices]
+        top10_data = {
+            "순위": [f"{r+1}" for r in range(10)],
+            eval_name: top10_combined,
+            f"{eval_name} (95%ile)": top10_95ile
+        }
+        df_top10 = pd.DataFrame(top10_data)
+
+        # 4. Heatmap Metrics (사진 4를 위한 정량화 수치)
+        heat_cos_combined = [f"{lm_cos_means[i]:.2f} ± {lm_cos_stds[i]:.2f}" for i in range(lm_means.shape[0])]
+        heat_iou_combined = [f"{lm_iou_means[i]:.2f} ± {lm_iou_stds[i]:.2f}" for i in range(lm_means.shape[0])]
+        heatmap_data = {
+            "LM (랜드마크)": [f"{i+1}" for i in range(lm_means.shape[0])],
+            f"{eval_name} (Cos Sim)": heat_cos_combined,
+            f"{eval_name} (Cos 5%ile)": np.round(lm_cos_5, 2),
+            f"{eval_name} (mIoU)": heat_iou_combined,
+            f"{eval_name} (mIoU 5%ile)": np.round(lm_iou_5, 2)
+        }
+        df_heatmap = pd.DataFrame(heatmap_data)
+
+    # 5. 여러 시트로 분할하여 완벽하게 저장
     with pd.ExcelWriter(result_excel_path, engine='openpyxl') as writer:
-        df_summary.to_excel(writer, sheet_name='Summary', index=False)
+        df_summary.to_excel(writer, sheet_name='1_Summary', index=False)
         if not df_landmarks.empty:
-            df_landmarks.to_excel(writer, sheet_name='Per_Landmark', index=False)
+            df_landmarks.to_excel(writer, sheet_name='2_Per_Landmark', index=False)
+            df_top10.to_excel(writer, sheet_name='3_Top10_Hardest', index=False)
+            df_heatmap.to_excel(writer, sheet_name='4_Heatmap_Metrics', index=False)
 
     print(f"\n[{eval_name} Done] Results saved to: {run_root}")
     print(f"      TXT   : {filename_txt}")
     print(f"      Excel : {filename_excel}") 
     print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
+
+# -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
 # 4. 모델 로드 및 평가 분기 (대소문자 무시 적용)
