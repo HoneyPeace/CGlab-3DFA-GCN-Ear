@@ -10,14 +10,12 @@ import matplotlib.pyplot as plt
 # ==========================================
 # 1. 실험 설정
 # ==========================================
-# 🌟 시그마 범위: 0.5 ~ 5.0 (0.5 간격), 6.0 ~ 10.0 (1.0 간격)
 sigmas = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
 
 exp_name = "DeepPA최종정리"
-output_root = "./output" # My_args.py의 기본 저장 경로 확인 필요
+output_root = "./output"
 user_tag_base = "sigma"
 
-# 기본 실행 명령어 베이스
 base_cmd = [
     sys.executable, "run.py",
     "--model", "DeepPA_auto",
@@ -29,7 +27,6 @@ base_cmd = [
     "--dataset_seed", "1",
     "--epochs", "500",
     "--sample_way", "FPS",
-    "--need_resample", "True",
     "--k_softargmax", "10",
     "--plane_knn", "5",
     "--exp_name", exp_name,
@@ -38,17 +35,21 @@ base_cmd = [
 ]
 
 # ==========================================
-# 2. Sigma 루프 실행 (학습 + 평가 자동 수행)
+# 2. Sigma Loop 실행 (🌟 무조건 리샘플링)
 # ==========================================
 for sigma in sigmas:
     sigma_str = f"{sigma:.1f}"
     current_tag = f"{user_tag_base}_{sigma_str}"
     
-    cmd = base_cmd + ["--sigma", sigma_str, "--user_tag", current_tag]
+    # 🌟 시그마가 바뀔 때마다 무조건 GT 히트맵을 새로 구워야 하므로 "True" 고정!
+    cmd = base_cmd + [
+        "--sigma", sigma_str, 
+        "--need_resample", "True", 
+        "--user_tag", current_tag
+    ]
     
     print(f"\n{'='*70}")
-    print(f" 🚀 [Sigma Sweep] 실행 시작 | Sigma: {sigma_str}")
-    print(f" 📂 Tag: {current_tag}")
+    print(f" 🚀 [Sigma Sweep] 실행 시작 | Sigma: {sigma_str} (Resample: True)")
     print(f"{'='*70}\n")
     
     try:

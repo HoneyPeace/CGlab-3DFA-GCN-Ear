@@ -8,19 +8,18 @@ import re
 import matplotlib.pyplot as plt
 
 # ==========================================
-# 1. 실험 설정 (Effective Batch Size: 2, 4, 8, 16, 32, 64)
+# 1. 실험 설정
 # ==========================================
-# (물리적 배치사이즈, 누적 단계) 쌍으로 설정
 batch_configs = [
-    (2, 1), (4, 1), (8, 1),  # 기본 배치
-    (8, 2), (8, 4), (8, 8)   # VRAM 방어를 위한 Accumulation 적용 (16, 32, 64)
+    (2, 1), (4, 1), (8, 1),  
+    (8, 2), (8, 4), (8, 8)   
 ]
 
 exp_name = "DeepPA_Batch_Sweep"
 output_root = "./output"
 user_tag_base = "batch"
 
-# 기본 실행 명령어 베이스 (시그마는 2.5 고정으로 예시 설정)
+# 🌟 base_cmd에서 need_resample을 빼고 루프에서 동적 할당
 base_cmd = [
     sys.executable, "run.py",
     "--model", "DeepPA_auto",
@@ -31,7 +30,6 @@ base_cmd = [
     "--dataset_seed", "1",
     "--epochs", "500",
     "--sample_way", "FPS",
-    "--need_resample", "True",
     "--k_softargmax", "10",
     "--plane_knn", "5",
     "--exp_name", exp_name,
@@ -40,21 +38,24 @@ base_cmd = [
 ]
 
 # ==========================================
-# 2. Batch Loop 실행 (학습 + 평가 자동 수행)
+# 2. Batch Loop 실행 (🌟 리샘플링 동적 제어)
 # ==========================================
-for b_size, a_steps in batch_configs:
+for i, (b_size, a_steps) in enumerate(batch_configs):
     eff_batch = b_size * a_steps
     current_tag = f"{user_tag_base}_{eff_batch}_phys{b_size}_acc{a_steps}"
+    
+    # 🌟 첫 번째 루프(i==0)에서만 True, 나머지는 False!
+    resample_flag = "True" if i == 0 else "False"
     
     cmd = base_cmd + [
         "--batch_size", str(b_size), 
         "--accumulation_steps", str(a_steps), 
+        "--need_resample", resample_flag,
         "--user_tag", current_tag
     ]
     
     print(f"\n{'='*75}")
-    print(f" 🚀 [Batch Sweep] 실행 시작 | 유효 배치: {eff_batch} (Phys:{b_size}, Acc:{a_steps})")
-    print(f" 📂 Tag: {current_tag}")
+    print(f" 🚀 [Batch Sweep] 유효 배치: {eff_batch} (Resample: {resample_flag})")
     print(f"{'='*75}\n")
     
     try:
