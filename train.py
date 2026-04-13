@@ -1,6 +1,6 @@
 # @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 # @File: train.py
-# @Description: 스케일링 정규화 + 0에폭 전면 RLW + PAConv 기하학적 풀각성 및 표면로스 4종 세부 로깅
+# @Description: 스케일링 정규화 + 0에폭 전면 4-Way RLW + PAConv 기하학적 풀각성 및 표면로스 4종 세부 로깅
 # ==============================================================================
 # [NotebookLM을 위한 파이프라인 아키텍처 요약]
 # 이 스크립트는 3D 귀 랜드마크 탐지를 위한 Two-stage (PAConv -> DeepPA) 조인트 모델의 메인 훈련 루프입니다.
@@ -8,9 +8,9 @@
 # 💡 핵심 설계 철학 3가지:
 # 1. Scaling Normalization (스케일링 정규화): 학습 전(가상 에폭) 기울기 계산 없이 전체 데이터를 순회하여
 #    4대 로스의 정적 체급(Static Error)을 재고 1.0으로 맞추는 고정 배수(Multiplier)를 구합니다.
-# 2. 0 Epoch Geometric Awakening (전면 RLW): 기존의 '히트맵 선학습' 대기열을 없애고,
-#    학습 시작(0에폭)부터 Stage 1(PAConv)과 Stage 2(DeepPA) 모두에 기하학 로스를 쏟아붓습니다.
-#    이를 통해 PAConv가 초기부터 뼈대와 표면 수직 거리(Point-to-Plane)를 엄격히 맞추도록 강제합니다.
+# 2. True 4-Way RLW (0에폭 진정한 풀각성): 기존의 '히트맵 고정 5%' 꼼수를 완전히 버리고,
+#    학습 시작(0에폭)부터 [Heatmap, Coord, Surface, Struct] 4대 로스가 동등하게 랜덤 가중치(RLW)를
+#    나눠 가지며 무한 경쟁하도록 설계했습니다. 이를 통해 Stage 1과 2가 극도로 다이나믹하게 수렴합니다.
 # 3. Detailed Auxiliary Logging (초정밀 보조 로스 모니터링): 
 #    표면 로스(Surface Loss)를 단순 1개 수치가 아닌 [통합, 순수P2P거리, 곡률오차, 방향오차] 4개로 
 #    분해하여 엑셀에 기록함으로써, 모델이 형태를 헷갈리는지 방향을 헷갈리는지 완벽히 추적합니다.
@@ -147,15 +147,12 @@ def train(args):
 
         # =========================================================================
         # 🟢 [Phase 2.9] 스케일링 정규화 (가상 에폭 캘리브레이션)
-        # [NotebookLM 참고] 기울기 연산을 끄고(no_grad) 정적 통계(eval)만 수집하여 스케일링 기준 픽스
         # =========================================================================
         if not disable_norm:
             print(f"\n🔍 [Scaling Normalization] 스케일링 정규화 및 세부 로스 전수 분석 중...")
             model.eval() 
             
-            # 🌟 4대 통합 로스 + 3대 표면 세부 지표 누적 변수
-            sum_losses = {'heatmap': 0.0, 'coord': 0.0, 'surface': 0.0, 'struct': 0.0, 
-                          'p2p': 0.0, 'curv': 0.0, 'dir': 0.0}
+            sum_losses = {'heatmap': 0.0, 'coord': 0.0, 'surface': 0.0, 'struct': 0.0, 'p2p': 0.0, 'curv': 0.0, 'dir': 0.0}
             single_batch_losses = {}
             
             with torch.no_grad():
@@ -172,7 +169,6 @@ def train(args):
                     l_hm = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous()).item()
                     l_crd = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma).item()
                     
-                    # 🌟 표면 로스가 반환하는 4개의 값 모두 받기 (통합, 거리, 곡률, 방향)
                     l_srf_tensor, l_p2p, l_curv, l_dir = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=disable_norm)
                     l_srf = l_srf_tensor.item()
                     
@@ -188,36 +184,31 @@ def train(args):
 
             num_batches = len(train_loader)
             avg_losses = {k: v / num_batches for k, v in sum_losses.items()}
-            
-            # 스케일링 배수(Multiplier)는 4대 메인 로스에만 계산
             auto_scales = {k: target_norm / (avg_losses[k] + 1e-6) for k in ['heatmap', 'coord', 'surface', 'struct']}
             
-            # 🌟 터미널/엑셀 출력용 캘리브레이션 표에 세부 지표 추가
             df_calib = pd.DataFrame({
                 "Metric": ["Raw_Loss (1 Batch)", "Raw_Loss (Full Avg)", "Multiplier (Based on Full)"],
                 "Heatmap": [single_batch_losses['heatmap'], avg_losses['heatmap'], auto_scales['heatmap']],
                 "Coord": [single_batch_losses['coord'], avg_losses['coord'], auto_scales['coord']],
                 "Surface_Unified": [single_batch_losses['surface'], avg_losses['surface'], auto_scales['surface']],
                 "Structure": [single_batch_losses['struct'], avg_losses['struct'], auto_scales['struct']],
-                "Srf_P2P": [single_batch_losses['p2p'], avg_losses['p2p'], "-"],      # 🌟 세부 지표 (배수 미적용 표기)
-                "Srf_Curv": [single_batch_losses['curv'], avg_losses['curv'], "-"],    # 🌟 세부 지표
-                "Srf_Dir": [single_batch_losses['dir'], avg_losses['dir'], "-"]        # 🌟 세부 지표
+                "Srf_P2P": [single_batch_losses['p2p'], avg_losses['p2p'], "-"],
+                "Srf_Curv": [single_batch_losses['curv'], avg_losses['curv'], "-"],
+                "Srf_Dir": [single_batch_losses['dir'], avg_losses['dir'], "-"]
             })
             print("\n📊 [Scaling Normalization Result]\n", df_calib.to_string(index=False))
             torch.cuda.empty_cache()
 
         # =========================================================================
-        # 🟢 [Phase 3] 본 학습 (0 에폭부터 전면 RLW 훈련)
+        # 🟢 [Phase 3] 본 학습 (0 에폭부터 전면 4-Way RLW 훈련)
         # =========================================================================
         for epoch in range(current_epochs):
             model.train() 
             train_loss_norm, train_loss_reversed = 0.0, 0.0
             
-            # Stage 2 (DeepPA) 누적 변수
             raw_hm, raw_crd, raw_srf, raw_str = 0.0, 0.0, 0.0, 0.0
             s2_p2p_raw, s2_curv_raw, s2_dir_raw = 0.0, 0.0, 0.0
             
-            # Stage 1 (PAConv 보조로스) 누적 변수
             s1_raw_hm, s1_raw_crd, s1_raw_srf, s1_raw_str = 0.0, 0.0, 0.0, 0.0
             s1_p2p_raw, s1_curv_raw, s1_dir_raw = 0.0, 0.0, 0.0 
             
@@ -237,17 +228,14 @@ def train(args):
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     
-                    # 🌟🌟 [Stage 1: PAConv 기하학 보조로스 풀각성] 🌟🌟
+                    # 🌟🌟 [Stage 1: PAConv 진정한 4-Way RLW 가동] 🌟🌟
                     if model_name_lower == 'deeppa_e2e':
                         pred_heatmap, prior_hint = model(point_input)
                         prior_coords = get_differentiable_coords(points_for_coords, prior_hint, k=args.k_softargmax)
                         
                         loss_hm_s1 = criterion(prior_hint, seg.permute(0, 2, 1).contiguous())
                         loss_crd_s1 = dynamic_focal_l1_loss(prior_coords, augmented_landmark, gamma=args.focal_gamma)
-                        
-                        # 4가지 값을 모두 언패킹! (통합, 거리, 곡률, 방향)
                         loss_srf_s1, p2p_s1, curv_err_s1, dir_err_s1 = surface_criterion(prior_coords, augmented_landmark, points_for_coords, disable_norm=False)
-                        
                         loss_str_s1 = compute_structural_loss(prior_coords, augmented_landmark)
                         
                         norm_hm_s1 = loss_hm_s1 * auto_scales['heatmap']
@@ -255,9 +243,12 @@ def train(args):
                         norm_srf_s1 = loss_srf_s1 * auto_scales['surface']
                         norm_str_s1 = loss_str_s1 * auto_scales['struct']
                         
-                        rand_w_s1 = torch.rand(3).to(device)
-                        rand_w_s1 = (rand_w_s1 / rand_w_s1.sum()) * 0.95
-                        total_loss_stage1 = (0.05 * norm_hm_s1 + rand_w_s1[0] * norm_crd_s1 + rand_w_s1[1] * norm_srf_s1 + rand_w_s1[2] * norm_str_s1)
+                        # 🌟 4개 로스 동등하게 랜덤 가중치 분배!
+                        rand_w_s1 = torch.rand(4).to(device)
+                        rand_w_s1 = rand_w_s1 / rand_w_s1.sum()
+                        
+                        total_loss_stage1 = (rand_w_s1[0] * norm_hm_s1 + rand_w_s1[1] * norm_crd_s1 + 
+                                             rand_w_s1[2] * norm_srf_s1 + rand_w_s1[3] * norm_str_s1)
                         
                         s1_raw_hm += loss_hm_s1.item(); s1_raw_crd += loss_crd_s1.item(); s1_raw_srf += loss_srf_s1.item(); s1_raw_str += loss_str_s1.item()
                         s1_p2p_raw += p2p_s1.item(); s1_curv_raw += curv_err_s1.item(); s1_dir_raw += dir_err_s1.item()
@@ -265,14 +256,12 @@ def train(args):
                         pred_heatmap = model(point_input)
                         total_loss_stage1 = 0.0
 
-                    # 🌟🌟 [Stage 2: DeepPA 최종 로스 계산] 🌟🌟
+                    # 🌟🌟 [Stage 2: DeepPA 진정한 4-Way RLW 가동] 🌟🌟
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
                     
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                     loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
-                    
                     loss_surface, p2p_s2, curv_err_s2, dir_err_s2 = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
-                    
                     loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                     
                     norm_heatmap = loss_heatmap * auto_scales['heatmap']
@@ -280,16 +269,21 @@ def train(args):
                     norm_surface = loss_surface * auto_scales['surface']         
                     norm_struct  = loss_struct  * auto_scales['struct']
 
-                    rand_weights = torch.rand(3).to(device)
-                    rand_weights = (rand_weights / rand_weights.sum()) * 0.95
+                    # 🌟 4개 로스 동등하게 랜덤 가중치 분배!
+                    rand_weights = torch.rand(4).to(device)
+                    rand_weights = rand_weights / rand_weights.sum()
                     
-                    total_loss_stage2 = (0.05 * norm_heatmap + rand_weights[0] * norm_coord + rand_weights[1] * norm_surface + rand_weights[2] * norm_struct)
+                    total_loss_stage2 = (rand_weights[0] * norm_heatmap + rand_weights[1] * norm_coord + 
+                                         rand_weights[2] * norm_surface + rand_weights[3] * norm_struct)
                     
                     total_loss = total_loss_stage2 + total_loss_stage1
                     
-                    total_loss_raw_reversed = (0.05 * loss_heatmap + rand_weights[0] * loss_coord + rand_weights[1] * loss_surface + rand_weights[2] * loss_struct)
+                    # 🌟 물리적 역산 로깅도 4-Way 가중치에 맞춰 수정
+                    total_loss_raw_reversed = (rand_weights[0] * loss_heatmap + rand_weights[1] * loss_coord + 
+                                               rand_weights[2] * loss_surface + rand_weights[3] * loss_struct)
                     if model_name_lower == 'deeppa_e2e':
-                        total_loss_raw_reversed += (0.05 * loss_hm_s1 + rand_w_s1[0] * loss_crd_s1 + rand_w_s1[1] * loss_srf_s1 + rand_w_s1[2] * loss_str_s1)
+                        total_loss_raw_reversed += (rand_w_s1[0] * loss_hm_s1 + rand_w_s1[1] * loss_crd_s1 + 
+                                                    rand_w_s1[2] * loss_srf_s1 + rand_w_s1[3] * loss_str_s1)
 
                     loss = total_loss / accum_steps
                     loss.backward()
@@ -335,15 +329,16 @@ def train(args):
                     val_mm += F.l1_loss(pred_coords, landmark_normal).item() * avg_m
 
             v_hm, v_mm = val_hm/len(test_loader), val_mm/len(test_loader)
+            
             print(f" [{stage_name} Ep {epoch+1:03d}] T_Norm: {t_loss_n:.2f} | T_mm: {t_mm:.2f} || V_mm: {v_mm:.2f}")
+            print(f"  ├─ [S2_DeepPA] HM: {t_hm_raw:.4f} | Crd: {t_crd_raw:.4f} | Srf(Unified): {t_srf_raw:.4f} | Str: {t_str_raw:.4f}")
+            if model_name_lower == 'deeppa_e2e':
+                print(f"  └─ [S1_PAConv] HM: {s1_raw_hm/num_b:.4f} | Crd: {s1_raw_crd/num_b:.4f} | Srf(Unified): {s1_raw_srf/num_b:.4f} | Str: {s1_raw_str/num_b:.4f}")
 
-            # 🌟 [NotebookLM 참고] 엑셀용 데이터 상세 기록 
             log_records.append({
                 'Epoch': epoch + 1, 'Total_Loss_Norm': t_loss_n, 'Total_Loss_Raw_Phys': t_loss_r,
-                # Stage 2 (최종 결과물)
                 'S2_HM_Raw': t_hm_raw, 'S2_Crd_Raw': t_crd_raw, 'S2_Str_Raw': t_str_raw,
                 'S2_Srf_Unified': t_srf_raw, 'S2_P2P_Dist': s2_p2p_raw/num_b, 'S2_Curv_Err': s2_curv_raw/num_b, 'S2_Dir_Err': s2_dir_raw/num_b,
-                # Stage 1 (PAConv 초기 힌트)
                 'S1_Aux_HM_Raw': s1_raw_hm/num_b, 'S1_Aux_Crd_Raw': s1_raw_crd/num_b, 'S1_Aux_Str_Raw': s1_raw_str/num_b,
                 'S1_Aux_Srf_Unified': s1_raw_srf/num_b, 'S1_Aux_P2P_Dist': s1_p2p_raw/num_b, 'S1_Aux_Curv_Err': s1_curv_raw/num_b, 'S1_Aux_Dir_Err': s1_dir_raw/num_b,
                 'Train_mm': t_mm, 'Val_mm': v_mm
@@ -369,7 +364,7 @@ def train(args):
     print(f"\n=== [Phase 3] Start Auto End-to-End Pipeline ===")
     
     if args.model.lower() == 'deeppa_auto':
-        print(f">>> [AUTO MODE] 🔥 0에폭 전면 RLW 훈련 가동 (Loss Norm: {'ON' if args.use_loss_norm else 'OFF'})")
+        print(f">>> [AUTO MODE] 🔥 0에폭 전면 4-Way RLW 훈련 가동 (Loss Norm: {'ON' if args.use_loss_norm else 'OFF'})")
         execute_stage('deeppa_e2e', args.epochs, disable_norm=not args.use_loss_norm, stage_name=f"E2E_Joint_Norm_ON")
     else:
         execute_stage(args.model, args.epochs, disable_norm=(args.model in ['PAConv', 'PAConv_heat']), stage_name=f"Single_{args.model}")
