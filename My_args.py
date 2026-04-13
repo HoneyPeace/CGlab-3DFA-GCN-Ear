@@ -42,8 +42,6 @@ parser.add_argument('--batch_size', type=int, default=32, metavar='batch_size', 
 parser.add_argument('--test_batch_size', type=int, default=1, metavar='batch_size', help='Size of batch')
 parser.add_argument('--epochs', type=int, default=500, metavar='N', help='number of episode to train')
 
-# 🔥 로스 크기 정규화 (auto_scales) ON/OFF 스위치 추가! (기본값 True)
-parser.add_argument('--use_loss_norm', type=str2bool, default=True, help='Apply auto_scales (loss size normalization) at the end')
 
 # 🔥 Auto 파이프라인 전용 에폭 설정 추가
 parser.add_argument('--paconv_epochs', type=int, default=500, help='PAConv stage epochs in auto mode')
@@ -109,3 +107,7 @@ parser.add_argument('--curv_alpha', type=float, default=10.0, help='Penalty mult
 parser.add_argument('--dir_weight', type=float, default=1.0, help='Penalty multiplier for eigenvector direction error')
 parser.add_argument('--focal_gamma', type=float, default=1.0, help='Gamma for dynamic focal loss')
 parser.add_argument('--focal_max', type=float, default=10.0, help='Max clamp for focal weights')
+
+# 👇 loss 스케일 정규화
+parser.add_argument('--use_loss_norm', type=str2bool, default=True, help='Use Initial Loss Normalization')
+parser.add_argument('--target_norm', type=float, default=1.0, help='Target scale for Loss Normalization')
