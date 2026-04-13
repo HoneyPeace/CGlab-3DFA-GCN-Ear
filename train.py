@@ -1,10 +1,11 @@
 # @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 # @File: train.py
-# @Description: Gradient Accumulation + Curriculum Learning + 🔥 End-to-End Joint Pipeline (deeppa_auto) + 14-Channel
+# @Description: Gradient Accumulation + Virtual Epoch LSB + VRAM Optimization + Excel Logging
 
 import os
 import time
 import numpy as np
+import pandas as pd # 🌟 엑셀 저장을 위한 pandas 추가
 import matplotlib.pyplot as plt 
 from mpl_toolkits.mplot3d import Axes3D
 
@@ -85,24 +86,6 @@ def get_experiment_paths(args, train_len):
     
     return paths
 
-def save_multiview_heatmap(points, heatmap, save_dir, sample_idx, landmark_idx, prefix):
-    fig = plt.figure(figsize=(30, 10))
-    views = [
-        (131, 90, -100, "Front"),
-        (132, 30, 120,  "Side"),
-        (133, 45, -45, "Downside")
-    ]
-    for pos, elev, azim, title in views:
-        ax = fig.add_subplot(pos, projection='3d')
-        ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=heatmap, cmap='jet', s=15, alpha=0.8)
-        ax.view_init(elev=elev, azim=azim)
-        ax.set_title(title)
-        ax.axis('off')
-
-    filename = f"{prefix}_S{sample_idx:03d}_L{landmark_idx:02d}.png"
-    plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')
-    plt.close()
-
 def process_data_storage(dataset, prefix, paths):
     shape_list, landmark_list, heatmap_list = [], [], []
     for i in range(len(dataset)):
@@ -121,7 +104,7 @@ def process_data_storage(dataset, prefix, paths):
     print(f"   [{prefix.upper()}] Backup Saved: {paths['npy_backup']}")
 
 # =========================================================================
-# 🌟 End-to-End 조인트 모델 정의 (피처 정규화 제거됨)
+# 🌟 End-to-End 조인트 모델 정의
 # =========================================================================
 class JointE2EModel(nn.Module):
     def __init__(self, args, landmark_num):
@@ -130,9 +113,7 @@ class JointE2EModel(nn.Module):
         self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
 
     def forward(self, x):
-        # 1. PAConv 추론
         prior_hint = self.stage1_paconv(x)
-        # 2. DeepPA 추론 (날 것 그대로 전달)
         pred_heatmap = self.stage2_deeppa(x, prior_heatmap=prior_hint)
         
         if self.training:
@@ -146,11 +127,8 @@ def train(args):
         MODE = "SPLIT"
         target_dataset = args.train_dataset_name
         args.test_dataset_name = args.train_dataset_name
-        print(f"\n>>> [MODE] Split Mode (Dataset: {target_dataset})")
     else:
         MODE = "SEPARATE"
-        print(f"\n>>> [MODE] Separate Mode")
-        print(f"    Train: {args.train_dataset_name} / Test: {args.test_dataset_name}")
 
     print(f">>> [Gradient Accumulation] Steps: {accum_steps}")
 
@@ -173,18 +151,8 @@ def train(args):
         train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name, in_channels=args.in_channels)
         test_dataset = FaceLandmarkData(data_root=args.data_root, partition='test', data=args.test_dataset_name, in_channels=args.in_channels)
 
-    print("=== [Phase 2.5] Creating Experiment Paths ===")
     train_len = len(train_dataset)
     paths = get_experiment_paths(args, train_len)
-
-    log_file_path = os.path.join(paths['root'], 'training_log.txt')
-    with open(log_file_path, 'w') as f:
-        f.write(f"Experiment ID: {paths['root'].split('/')[-1]}\n")
-        f.write(f"Model Backbone: {args.model}\n")
-        f.write(f"Dataset: Train({args.train_dataset_name}) / Test({args.test_dataset_name})\n")
-        f.write("="*160 + "\n")
-        f.write(f"{'Epoch':<6} | {'T_Loss':<8} | {'T_HM':<8} | {'T_Crd':<8} | {'T_Srf':<8} | {'T_Str':<8} | {'T_mm':<6} || {'V_Loss':<8} | {'V_HM':<8} | {'V_Crd':<8} | {'V_Srf':<8} | {'V_Str':<8} | {'V_mm':<6} || {'W_HM':<6} | {'W_Crd':<6} | {'W_Srf':<6} | {'W_Str':<6}\n")
-        f.write("="*160 + "\n")
 
     print("=== [Phase 2.6] Backing up Data ===")
     process_data_storage(train_dataset, "train", paths)
@@ -203,20 +171,13 @@ def train(args):
         print(f" 🚀 [Start Stage] {stage_name} (Epochs: {current_epochs}, Norm Disable: {disable_norm})")
         print(f"{'='*50}")
 
-        with open(log_file_path, 'a') as f:
-            f.write(f"\n--- [START STAGE] {stage_name} (Epochs: {current_epochs}) ---\n")
-
         model_name_lower = current_model_name.lower()
 
         if model_name_lower == 'deeppa_e2e':
             model = JointE2EModel(args, args.landmark_num).to(device)
-            print(">>> [INFO] 🔗 End-to-End 모드: PAConv와 DeepPA를 단일 신경망으로 묶어 동시 최적화합니다.")
         elif model_name_lower == 'deeppa' and prior_model is None:
-            print(">>> [Prior Load] Loading Pre-trained PAConv from default path...")
             paconv_prior = PAConv(args, args.landmark_num).to(device)
             best_paconv_path = os.path.join("..", "PAConv_model", "model_epoch_500.t7")
-            if not os.path.exists(best_paconv_path):
-                raise FileNotFoundError(f"🚨 PAConv 모델 파일을 찾을 수 없습니다: {best_paconv_path}")
             paconv_prior.load_state_dict(torch.load(best_paconv_path))
             paconv_prior.eval()
             for param in paconv_prior.parameters():
@@ -225,42 +186,116 @@ def train(args):
             model = DeepPA_Wrapper(args, args.landmark_num).to(device)
         elif model_name_lower in ['paconv', 'paconv_heat']:
             model = PAConv(args, args.landmark_num).to(device)
-            if model_name_lower == 'paconv_heat':
-                print(">>> [INFO] 🔥 PAConv_heat 모드: 1-Loss(히트맵)만 학습합니다.")
         elif model_name_lower == 'deepla':
             model = DeepLA_Wrapper(args, args.landmark_num).to(device)
         elif model_name_lower == 'deeppa':
             model = DeepPA_Wrapper(args, args.landmark_num).to(device)
-        else:
-            raise ValueError(f"Unknown model: {current_model_name}")
             
         model.apply(weight_init)
         
-        surface_criterion = CurvatureSurfaceLoss(
-            k_p2p=args.plane_knn, k_curv=args.curv_knn, 
-            alpha=args.curv_alpha, dir_weight=args.dir_weight
-        ).to(device)
-
+        surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, dir_weight=args.dir_weight).to(device)
         criterion = AdaptiveWingLoss() if args.loss == 'adaptive_wing' else torch.nn.MSELoss()
             
-        if args.use_sgd: 
-            opt = optim.SGD(model.parameters(), lr=args.lr*100, momentum=args.momentum, weight_decay=args.weight_decay)
-        else: 
-            opt = optim.Adam(model.parameters(), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
-        
+        opt = optim.Adam(model.parameters(), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
         scheduler = CosineAnnealingLR(opt, T_max=current_epochs) if args.scheduler == 'cos' else StepLR(opt, step_size=40, gamma=0.9)
 
-        opt.zero_grad() 
-        best_val_mm = float('inf')
+        # 🌟 엑셀 로그 데이터 저장용 리스트
+        excel_log_path = os.path.join(paths['root'], f'Training_Log_{stage_name}.xlsx')
+        log_records = []
 
-        target_norm = args.target_norm
+        best_val_mm = float('inf')
+        target_norm = 1.0 
         auto_scales = {'heatmap': -1.0, 'coord': -1.0, 'surface': -1.0, 'struct': -1.0}
 
+        # =========================================================================
+        # 🟢 [Phase 2.9] 가상 에폭: 전체 평균 vs 첫 배치 스케일 비교 및 기록
+        # =========================================================================
+        if not disable_norm and model_name_lower not in ['paconv', 'paconv_heat']:
+            print(f"\n🔍 [Scale Calibration] 스케일 정밀 분석 중... (First Batch vs Full Average)")
+            model.eval()
+            
+            # 비교용 변수
+            single_batch_losses = {}
+            sum_losses = {'heatmap': 0.0, 'coord': 0.0, 'surface': 0.0, 'struct': 0.0}
+            
+            with torch.no_grad():
+                for i, (point, landmark, seg) in enumerate(tqdm(train_loader, desc="Calibrating", leave=False)):
+                    # 데이터 전처리 (실제 학습과 동일하게 진행)
+                    point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
+                    point_normal, landmark_normal = normalize_data(point, landmark)
+                    point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
+                    point_input = point_normal.permute(0, 2, 1).contiguous()
+                    
+                    if model_name_lower == 'deeppa_e2e':
+                        pred_heatmap = model(point_input)
+                    elif current_model_name == 'DeepPA' and prior_model is not None:
+                        prior_hint = prior_model(point_input)
+                        pred_heatmap = model(point_input, prior_heatmap=prior_hint)
+                    else:
+                        pred_heatmap = model(point_input)
+                    
+                    points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
+                    pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
+                    
+                    # 로스 계산
+                    l_hm = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous()).item()
+                    l_crd = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma).item()
+                    l_srf = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=disable_norm).item()
+                    l_str = compute_structural_loss(pred_coords, augmented_landmark).item()
+
+                    # 🌟 [첫 번째 배치 데이터 기록]
+                    if i == 0:
+                        single_batch_losses = {'heatmap': l_hm, 'coord': l_crd, 'surface': l_srf, 'struct': l_str}
+
+                    # 🌟 [전체 누적]
+                    sum_losses['heatmap'] += l_hm
+                    sum_losses['coord'] += l_crd
+                    sum_losses['surface'] += l_srf
+                    sum_losses['struct'] += l_str
+
+            # 최종 평균 계산
+            num_batches = len(train_loader)
+            avg_losses = {k: v / num_batches for k, v in sum_losses.items()}
+
+            # 배수(Multiplier) 계산
+            auto_scales_single = {k: target_norm / (v + 1e-6) for k, v in single_batch_losses.items()}
+            auto_scales_full = {k: target_norm / (v + 1e-6) for k, v in avg_losses.items()}
+            
+            # 🔥 [실제 학습에는 '전체 평균' 적용]
+            auto_scales = auto_scales_full 
+
+            # 🌟 [엑셀 기록용 비교 데이터 준비]
+            calibration_report = {
+                "Metric": ["Raw_Loss (1 Batch)", "Raw_Loss (Full Avg)", "Multiplier (Based on 1nd)", "Multiplier (Based on Full)"],
+                "Heatmap": [single_batch_losses['heatmap'], avg_losses['heatmap'], auto_scales_single['heatmap'], auto_scales_full['heatmap']],
+                "Coord": [single_batch_losses['coord'], avg_losses['coord'], auto_scales_single['coord'], auto_scales_full['coord']],
+                "Surface": [single_batch_losses['surface'], avg_losses['surface'], auto_scales_single['surface'], auto_scales_full['surface']],
+                "Structure": [single_batch_losses['struct'], avg_losses['struct'], auto_scales_single['struct'], auto_scales_full['struct']]
+            }
+            df_calib = pd.DataFrame(calibration_report)
+            print("\n📊 [Scale Comparison Result]")
+            print(df_calib.to_string(index=False))
+
+            torch.cuda.empty_cache()
+            print(" 🧹 VRAM 캐시 초기화 완료. 본 학습을 시작합니다.\n")
+        else:
+            auto_scales['heatmap'], auto_scales['coord'], auto_scales['surface'], auto_scales['struct'] = 1.0, 1.0, 1.0, 1.0
+
+        # =========================================================================
+        # 🟢 본 학습 (Real Epoch)
+        # =========================================================================
         for epoch in range(current_epochs):
             model.train()
-            train_loss, train_hm, train_crd, train_srf, train_str, train_mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
             
-            with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"{stage_name} Epoch {epoch+1:03d}/{current_epochs} [Train]", unit="batch", leave=False) as tepoch:
+            # 누적 변수 세팅
+            train_loss_norm, train_loss_reversed = 0.0, 0.0
+            raw_hm, raw_crd, raw_srf, raw_str = 0.0, 0.0, 0.0, 0.0
+            norm_hm_sum, norm_crd_sum, norm_srf_sum, norm_str_sum = 0.0, 0.0, 0.0, 0.0
+            train_mm = 0.0
+            
+            opt.zero_grad() 
+            
+            with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"{stage_name} Ep {epoch+1:03d}/{current_epochs} [Train]", unit="batch", leave=False) as tepoch:
                 for i, (point, landmark, seg) in tepoch:
                     point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
@@ -272,13 +307,10 @@ def train(args):
 
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
-                    
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     
-                    # 🌟 모델별 포워드 분기
                     if model_name_lower == 'deeppa_e2e':
                         pred_heatmap, prior_hint = model(point_input)
-                        # PAConv 중간 결과물 보조 로스 계산
                         loss_hm_stage1 = criterion(prior_hint, seg.permute(0, 2, 1).contiguous())
                     elif current_model_name == 'DeepPA' and prior_model is not None:
                         with torch.no_grad():
@@ -290,20 +322,13 @@ def train(args):
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
                     
+                    # 🌟 Raw Loss 계산
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                     loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                     loss_surface = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=disable_norm)
                     loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                     
-                    if epoch == 0 and i == 0 and auto_scales['heatmap'] < 0:
-                        if disable_norm or model_name_lower in ['paconv', 'paconv_heat']:
-                            auto_scales['heatmap'], auto_scales['coord'], auto_scales['surface'], auto_scales['struct'] = 1.0, 1.0, 1.0, 1.0
-                        else:
-                            auto_scales['heatmap'] = target_norm / (loss_heatmap.item() + 1e-6)
-                            auto_scales['coord']   = target_norm / (loss_coord.item() + 1e-6)
-                            auto_scales['surface'] = target_norm / (loss_surface.item() + 1e-6)
-                            auto_scales['struct']  = target_norm / (loss_struct.item() + 1e-6)
-
+                    # 🌟 Norm Loss 계산
                     norm_heatmap = loss_heatmap * auto_scales['heatmap']
                     norm_coord   = loss_coord   * auto_scales['coord']
                     norm_surface = loss_surface * auto_scales['surface']         
@@ -312,22 +337,31 @@ def train(args):
                     if model_name_lower == 'paconv_heat':
                         weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                         total_loss = norm_heatmap
+                        total_loss_raw_reversed = loss_heatmap # 역산
                     else:
                         stage1_epochs = current_epochs // 5 
                         if epoch < stage1_epochs:
                             weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                             total_loss = norm_heatmap
+                            total_loss_raw_reversed = loss_heatmap
                         else:
-                            # 🟢 RLW 무조건 켬!
                             rand_weights = torch.rand(3).to(device)
                             rand_weights = (rand_weights / rand_weights.sum()) * 0.95
+                            
+                            # 🌟 실제 훈련용(Norm) Total Loss
                             total_loss = (0.05 * norm_heatmap + 
                                           rand_weights[0] * norm_coord + 
                                           rand_weights[1] * norm_surface + 
                                           rand_weights[2] * norm_struct)
+                                          
+                            # 🌟 역산용(Reversed) Total Loss: 원본 크기에 가중치만 반영한 가상의 물리적 로스
+                            total_loss_raw_reversed = (0.05 * loss_heatmap + 
+                                                       rand_weights[0] * loss_coord + 
+                                                       rand_weights[1] * loss_surface + 
+                                                       rand_weights[2] * loss_struct)
+                                                       
                             weights = torch.tensor([0.05, rand_weights[0], rand_weights[1], rand_weights[2]])
                     
-                    # 🟢 화룡점정: PAConv에게는 순정 보조 로스를 다이렉트로 투척! (0.5배 곱 삭제)
                     if model_name_lower == 'deeppa_e2e':
                         total_loss = total_loss + loss_hm_stage1
 
@@ -342,25 +376,40 @@ def train(args):
                         true_l1 = F.l1_loss(pred_coords, augmented_landmark).item()
                         mm_error = true_l1 * avg_m
 
-                    train_loss += total_loss.item()
-                    train_hm   += loss_heatmap.item()
-                    train_crd  += loss_coord.item()
-                    train_srf  += loss_surface.item()
-                    train_str  += loss_struct.item()
-                    train_mm   += mm_error
+                    # 변수 누적
+                    train_loss_norm += total_loss.item()
+                    train_loss_reversed += total_loss_raw_reversed.item()
                     
-                    tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", HM=f"{loss_heatmap.item():.4f}", Srf=f"{loss_surface.item():.4f}", mm=f"{mm_error:.2f}")
+                    raw_hm += loss_heatmap.item()
+                    raw_crd += loss_coord.item()
+                    raw_srf += loss_surface.item()
+                    raw_str += loss_struct.item()
+                    
+                    norm_hm_sum += norm_heatmap.item()
+                    norm_crd_sum += norm_coord.item()
+                    norm_srf_sum += norm_surface.item()
+                    norm_str_sum += norm_struct.item()
+                    train_mm += mm_error
+                    
+                    if torch.cuda.is_available():
+                        vram_used = torch.cuda.max_memory_allocated() / (1024 ** 3)
+                        vram_str = f"{vram_used:.1f}GB"
+                    else:
+                        vram_str = "CPU"
+                    
+                    tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", HM=f"{loss_heatmap.item():.4f}", mm=f"{mm_error:.2f}", VRAM=vram_str)
 
-            t_loss = train_loss / len(train_loader)
-            t_hm   = train_hm / len(train_loader)
-            t_crd  = train_crd / len(train_loader)
-            t_srf  = train_srf / len(train_loader)
-            t_str  = train_str / len(train_loader) 
-            t_mm   = train_mm / len(train_loader)
+            num_b = len(train_loader)
+            t_loss_n = train_loss_norm / num_b
+            t_loss_r = train_loss_reversed / num_b
+            
+            t_hm_raw, t_crd_raw, t_srf_raw, t_str_raw = raw_hm/num_b, raw_crd/num_b, raw_srf/num_b, raw_str/num_b
+            t_hm_n, t_crd_n, t_srf_n, t_str_n = norm_hm_sum/num_b, norm_crd_sum/num_b, norm_srf_sum/num_b, norm_str_sum/num_b
+            t_mm = train_mm / num_b
 
             # --- Validation ---
             model.eval()
-            val_loss, val_hm, val_crd, val_srf, val_str, val_mm = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            val_loss, val_hm, val_mm = 0.0, 0.0, 0.0
             val_sample_count = 0 
             
             with torch.no_grad():
@@ -387,63 +436,40 @@ def train(args):
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
 
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
-                    loss_coord = dynamic_focal_l1_loss(pred_coords, landmark_normal, gamma=args.focal_gamma)
-                    loss_surface = surface_criterion(pred_coords, landmark_normal, points_for_coords, disable_norm=disable_norm)
-                    loss_struct = compute_structural_loss(pred_coords, landmark_normal)
-                    
                     true_l1 = F.l1_loss(pred_coords, landmark_normal).item()
                     mm_error = true_l1 * avg_m
                     
-                    norm_heatmap = loss_heatmap * auto_scales['heatmap']
-                    norm_coord   = loss_coord   * auto_scales['coord']
-                    norm_surface = loss_surface * auto_scales['surface'] 
-                    norm_struct  = loss_struct  * auto_scales['struct']
-                    
-                    if model_name_lower == 'paconv_heat':
-                        total_loss = norm_heatmap
-                    else:
-                        stage1_epochs = current_epochs // 5
-                        if epoch < stage1_epochs:
-                            total_loss = norm_heatmap
-                        else:
-                            total_loss = 0.25 * norm_heatmap + 0.25 * norm_coord + 0.25 * norm_surface + 0.25 * norm_struct
-
-                    val_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
-                    val_hm   += loss_heatmap.item()
-                    val_crd  += loss_coord.item()
-                    val_srf  += loss_surface.item()
-                    val_str  += loss_struct.item()
-                    val_mm   += mm_error
+                    val_hm += loss_heatmap.item()
+                    val_mm += mm_error
                     
                     val_sample_count += point.size(0)
                     if val_sample_count >= 30: break
 
             num_val_batches = i + 1
-            v_loss, v_hm, v_crd, v_srf, v_str, v_mm = val_loss/num_val_batches, val_hm/num_val_batches, val_crd/num_val_batches, val_srf/num_val_batches, val_str/num_val_batches, val_mm/num_val_batches
+            v_hm, v_mm = val_hm/num_val_batches, val_mm/num_val_batches
 
-            print(f" [{stage_name} Ep {epoch+1:03d}] T_Loss: {t_loss:.4f} (HM:{t_hm:.4f} Crd:{t_crd:.4f} Srf:{t_srf:.4f} Str:{t_str:.4f}) | T_mm: {t_mm:.2f} || V_mm: {v_mm:.2f}")
+            print(f" [{stage_name} Ep {epoch+1:03d}] Total Norm: {t_loss_n:.4f} | Raw HM: {t_hm_raw:.4f} | T_mm: {t_mm:.2f} || V_mm: {v_mm:.2f}")
 
-            if model_name_lower == 'paconv_heat':
-                w_hm, w_crd, w_srf, w_str = 1.0, 0.0, 0.0, 0.0
-            else:
-                if epoch < (current_epochs // 5):
-                    w_hm, w_crd, w_srf, w_str = 1.0, 0.0, 0.0, 0.0
-                else:
-                    w_np = weights.detach().cpu().numpy()
-                    w_hm, w_crd, w_srf, w_str = w_np[0], w_np[1], w_np[2], w_np[3]
+            # 🌟 엑셀용 데이터 기록 (Raw vs Norm 완벽 분리)
+            w_np = weights.detach().cpu().numpy()
+            log_records.append({
+                'Epoch': epoch + 1,
+                'Stage': stage_name,
+                'Total_Loss_Norm': t_loss_n,
+                'Total_Loss_Reversed (Raw Physical)': t_loss_r,
+                'HM_Raw': t_hm_raw, 'HM_Norm': t_hm_n, 'W_HM': w_np[0],
+                'Crd_Raw': t_crd_raw, 'Crd_Norm': t_crd_n, 'W_Crd': w_np[1],
+                'Srf_Raw': t_srf_raw, 'Srf_Norm': t_srf_n, 'W_Srf': w_np[2],
+                'Str_Raw': t_str_raw, 'Str_Norm': t_str_n, 'W_Str': w_np[3],
+                'Train_mm': t_mm,
+                'Val_mm': v_mm
+            })
+            
+            # 매 에폭마다 엑셀 덮어쓰기 저장 (중간에 꺼져도 기록 유지)
+            pd.DataFrame(log_records).to_excel(excel_log_path, index=False)
 
-            with open(log_file_path, 'a') as f:
-                log_line = f"{epoch+1:<6d} | {t_loss:<8.4f} | {t_hm:<8.4f} | {t_crd:<8.4f} | {t_srf:<8.4f} | {t_str:<8.4f} | {t_mm:<6.2f} || {v_loss:<8.4f} | {v_hm:<8.4f} | {v_crd:<8.4f} | {v_srf:<8.4f} | {v_str:<8.4f} | {v_mm:<6.2f} || {w_hm:<6.3f} | {w_crd:<6.3f} | {w_srf:<6.3f} | {w_str:<6.3f}\n"
-                f.write(log_line)
-
-            # 🏆 Best Model 저장 (E2E 분리 마법)
             if v_mm < best_val_mm:
                 best_val_mm = v_mm
-                print(f" 🌟 [{stage_name}] Best Model Saved! Error: {best_val_mm:.4f} mm")
-                with open(log_file_path, 'a') as f:
-                    f.write(f"  >>> *** {stage_name} Epoch {epoch+1}: Best Model Saved! (Val Error: {best_val_mm:.4f} mm) ***\n")
-                
-                # 🔥 eval_all.py 무수정 사용을 위해 덩어리를 2개로 쪼개서 각각 저장!
                 if model_name_lower == 'deeppa_e2e':
                     torch.save(model.stage1_paconv.state_dict(), os.path.join(paths['models'], 'Stage1_PAConv_model_best.t7'))
                     torch.save(model.stage2_deeppa.state_dict(), os.path.join(paths['models'], 'Stage2_DeepPA_model_best.t7'))
@@ -451,7 +477,6 @@ def train(args):
                     best_save_path = os.path.join(paths['models'], f'{stage_name}_model_best.t7')
                     torch.save(model.state_dict(), best_save_path)
 
-            # 10단위 저장
             if (epoch + 1) % 10 == 0:
                 if model_name_lower == 'deeppa_e2e':
                     torch.save(model.stage1_paconv.state_dict(), os.path.join(paths['models'], f'Stage1_PAConv_epoch_{epoch+1}.t7'))
@@ -465,34 +490,16 @@ def train(args):
             
         return model 
 
-    # =========================================================================
-    # 🎯 파이프라인 제어기: 🔥 My_args에서 로스 정규화 끄고 켜기
-    # =========================================================================
     print(f"\n=== [Phase 3] Start Training with Curriculum Learning ===")
     
     model_type = args.model.lower() 
     
     if model_type == 'deeppa_auto':
         print(f">>> [AUTO MODE] 🔥 자동 End-to-End Joint 파이프라인 가동 (Loss Norm: {'ON' if args.use_loss_norm else 'OFF'})")
-        
-        execute_stage(
-            current_model_name='deeppa_e2e', 
-            current_epochs=args.epochs, # 500에폭 풀타임 가동
-            disable_norm=not args.use_loss_norm, # 🔥 args와 연동!
-            prior_model=None, 
-            stage_name=f"E2E_Joint_Norm_{'ON' if args.use_loss_norm else 'OFF'}"
-        )
-        print("\n>>> [AUTO MODE] E2E 파이프라인이 성공적으로 종료되었습니다.")
-        
+        execute_stage(current_model_name='deeppa_e2e', current_epochs=args.epochs, disable_norm=not args.use_loss_norm, prior_model=None, stage_name=f"E2E_Joint_Norm_{'ON' if args.use_loss_norm else 'OFF'}")
     else:
         disable_norm_flag = (args.model in ['PAConv', 'PAConv_heat'])
-        execute_stage(
-            current_model_name=args.model, 
-            current_epochs=args.epochs, 
-            disable_norm=disable_norm_flag, 
-            prior_model=None, 
-            stage_name=f"Single_{args.model}"
-        )
+        execute_stage(current_model_name=args.model, current_epochs=args.epochs, disable_norm=disable_norm_flag, prior_model=None, stage_name=f"Single_{args.model}")
         
     print(f"\n=== Training Finished. Results at: {paths['root']} ===")
 

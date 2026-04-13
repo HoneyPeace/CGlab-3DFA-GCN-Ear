@@ -15,7 +15,7 @@ batch_configs = [
     (8, 2), (8, 4), (8, 8)   
 ]
 
-exp_name = "DeepPA_Batch_Sweep"
+exp_name = "DeepPA최종정리"
 output_root = "./output"
 user_tag_base = "batch"
 
