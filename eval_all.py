@@ -2,6 +2,13 @@
 @Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
 @File: eval_all.py
 @Description: Auto 2-Stage Evaluation Script (PAConv Base vs DeepPA Final) & 7-Channel Compatibility & Full Metrics & 🌟 Excel Export
+
+[NotebookLM을 위한 모듈 요약]
+이 스크립트는 3D 랜드마크 검출 모델의 최종 성능을 측정하는 '평가(Evaluation) 파이프라인'입니다.
+논문의 실험(Experiments) 섹션 작성을 위한 핵심 코드이며, 다음과 같은 특징을 가집니다.
+1. 정성적 평가(Qualitative): 3D 히트맵을 다각도(정면, 측면, 하단)에서 렌더링하여 이미지로 저장.
+2. 정량적 평가(Quantitative): Mean Error(mm 거리 오차), Cosine Similarity(분포 유사성), mIoU(영역 겹침) 등 다각도 지표 산출.
+3. 자동화(Automation): 'DeepPA_auto' 모드 시 1단계(PAConv)와 2단계(DeepPA)를 연속으로 평가하여 성능 향상폭을 엑셀로 자동 정리함.
 '''
 
 from __future__ import print_function, division
@@ -39,6 +46,11 @@ args.eval = True
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx, prefix):
+    """
+    [정성적 평가 시각화 도구 (Qualitative Visualization)]
+    - 목적: 예측된 랜드마크 확률 분포(히트맵)를 3D 공간 상에 점(Point)의 색상(Colormap)으로 매핑하여 저장합니다.
+    - 특징: 3D 구조의 특성상 가려지는 부분이 없도록 정면(Front), 측면(Side), 하단(Downside) 3개의 카메라 뷰(View)를 동시 렌더링합니다.
+    """
     fig = plt.figure(figsize=(30, 10))
     views = [
         (131, 90, -100, "Front"),
@@ -127,6 +139,13 @@ test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 # 3. 평가 수행 코어 함수
 # -----------------------------------------------------------------------------
 def evaluate_target_model(eval_name, eval_model, prior_model=None):
+    """
+    [핵심 정량 평가 로직]
+    평가 지표 (NotebookLM 분석용):
+    1. Mean Error (ME): 예측 랜드마크 3D 좌표와 실제 3D 좌표 간의 유클리디안 거리 (단위: mm). 낮을수록 좋음.
+    2. Cosine Similarity: 예측 히트맵과 정답 히트맵을 벡터로 보았을 때의 유사도. 분포의 방향성이 얼마나 비슷한지 평가. 높을수록 좋음.
+    3. mIoU (Intersection over Union): 예측 히트맵과 정답 히트맵이 임계값(0.1) 이상인 영역이 얼마나 겹치는지 평가. 픽셀 수준의 분할 정확도. 높을수록 좋음.
+    """
     print(f"\n==================================================")
     print(f" 🚀 [EVALUATION START] 대상 모델: {eval_name}")
     print(f"==================================================")
@@ -152,6 +171,9 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
         real_name = name_sample[idx]
         B, N, C = point.shape
         
+        # [정규화 복원 (Denormalization)]
+        # 모델의 스케일 무관성(Scale-invariance)을 위해 정규화했던 데이터를, 
+        # 실제 mm 단위의 오차(Mean Error)를 계산하기 위해 다시 원래 스케일과 위치로 되돌립니다.
         point_xyz = point[:, :, :3]
         centroid = torch.mean(point_xyz, axis=1, keepdim=True)
         point_centered = point_xyz - centroid
@@ -174,6 +196,7 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
 
             point_input = point_norm.permute(0, 2, 1).contiguous()
             
+            # [Two-stage 추론] prior_model(1단계 PAConv)의 결과를 eval_model(2단계 DeepPA)의 힌트로 제공
             if prior_model is not None:
                 prior_hint = prior_model(point_input)
                 pred_heatmap_raw = eval_model(point_input, prior_heatmap=prior_hint)
@@ -182,12 +205,14 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
                 
             pred_heatmap = pred_heatmap_raw.permute(0, 2, 1)
 
+            # 히트맵(확률)에서 실제 3D 좌표 복원 (Soft-argmax 방식 사용)
             pred_landmark_norm = get_differentiable_coords(point_norm_xyz, pred_heatmap_raw, k=args.k_softargmax)
-            pred_landmark = (pred_landmark_norm * scale) + centroid
+            pred_landmark = (pred_landmark_norm * scale) + centroid # mm 단위로 복구
 
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)
 
+            # [Metric 1 & 2: Cosine Similarity & mIoU] (히트맵 분포 평가)
             pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
             cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
             cos_sim_list.append(cos_sim_k.mean().item()) 
@@ -210,6 +235,7 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
             pred_np = pred_landmark.cpu().numpy().squeeze(0) if pred_landmark.ndim == 3 else pred_landmark.cpu().numpy()
             gt_np = gt_landmark.cpu().numpy().squeeze(0) if gt_landmark.ndim == 3 else gt_landmark.cpu().numpy()
                 
+            # [Metric 3: Mean Error] 실제 예측 좌표와 정답 좌표 간의 물리적 거리 계산
             dists = np.linalg.norm(pred_np - gt_np, axis=1)
             me = np.mean(dists)
             
@@ -218,7 +244,7 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
             
             np.savetxt(os.path.join(current_asc_dir, f"{eval_name}_pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
-    # ------------------ 최종 집계 ------------------
+    # ------------------ 최종 집계 (논문에 들어갈 통계치 산출) ------------------
     if len(per_landmark_me_list) > 0:
         per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) 
         lm_means, lm_stds, lm_me_95 = np.mean(per_landmark_me_array, axis=0), np.std(per_landmark_me_array, axis=0), np.percentile(per_landmark_me_array, 95, axis=0)
@@ -232,6 +258,7 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
     else:
         return
 
+    # SR (Success Rate): 특정 오차 범위(10mm, 5mm) 내에 들어온 예측의 비율
     sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
     sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
     avg_cos_sim, cos_sim_5_global = np.mean(cos_sim_list), np.percentile(cos_sim_list, 5)
@@ -275,6 +302,7 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
                 f.write(f"    LM {i+1:02d}: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm | 95%ile: {lm_me_95[i]:.3f} mm\n")
 
 # ------------------ 🌟 Excel (.xlsx) 파일 완벽 포맷 저장 ------------------
+    # [논문 작성 편의성 확보] 산출된 모든 지표를 논문 테이블(Table) 양식에 맞춰 여러 시트(Sheet)로 분할 저장
     filename_excel = f"{eval_name}_Results_ME{average_me:.4f}.xlsx"
     result_excel_path = os.path.join(run_root, filename_excel)
     
@@ -371,6 +399,11 @@ def evaluate_target_model(eval_name, eval_model, prior_model=None):
 models_to_eval = []
 
 if args.model.lower() == 'deeppa_auto':
+    """
+    [Two-stage 자동 평가 모드]
+    연구의 핵심인 '1단계 거시적 파악(PAConv) -> 2단계 미시적 정밀 교정(DeepPA)' 파이프라인의
+    성능 변화를 명확히 보여주기 위해, 두 모델을 순차적으로 로드하고 각각 평가를 진행합니다.
+    """
     print(">>> [INFO] 🔄 Auto Mode: PAConv(Stage1)와 DeepPA(Stage2) 두 모델을 연속으로 평가합니다.")
     
     # 1. PAConv Base 로드

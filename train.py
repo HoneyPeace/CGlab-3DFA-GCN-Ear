@@ -1,6 +1,16 @@
 # @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 # @File: train.py
 # @Description: Gradient Accumulation + Virtual Epoch LSB + VRAM Optimization + Excel Logging
+# ==============================================================================
+# [NotebookLM을 위한 파이프라인 아키텍처 요약]
+# 이 스크립트는 3D 귀 포인트 클라우드에서 랜드마크를 탐지하는 다중 작업 학습(Multi-task Learning) 모델을 훈련합니다.
+# 핵심 기술 3가지:
+# 1. End-to-End Joint Model: PAConv(Stage1, 대략적 위치) -> DeepPA/DeepLA(Stage2, 정밀 히트맵) 직렬 연결 구조.
+# 2. Virtual Epoch (가상 에폭) 기반 LSB: 학습 시작 전 기울기 계산 없이 전체 데이터를 순회하여 4가지 Loss의 
+#    '정적 평균(Static Error)'을 구하고, 이를 모두 1.0 체급으로 맞추는 고정 배수(Multiplier)를 계산합니다. (VRAM 폭발 방지)
+# 3. Gradient Accumulation: 대용량 3D 데이터의 물리적 VRAM 한계를 극복하기 위해, 배치를 잘게 쪼개어 연산한 뒤 
+#    기울기를 누적하여 가중치를 업데이트합니다.
+# ==============================================================================
 
 import os
 import time
@@ -35,6 +45,7 @@ from DeepPA_model import DeepPA_Wrapper
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# [NotebookLM 참고] 네트워크 가중치 초기화 함수. Linear는 Xavier, Conv는 Kaiming 초기화를 사용하여 학습 초반 기울기 소실을 방지합니다.
 def weight_init(m):
     if isinstance(m, torch.nn.Linear):
         torch.nn.init.xavier_normal_(m.weight)
@@ -45,6 +56,7 @@ def weight_init(m):
     elif isinstance(m, torch.nn.Conv1d):
         torch.nn.init.kaiming_normal_(m.weight)
 
+# [NotebookLM 참고] 실험 결과, 모델 가중치, 원본 NPY 데이터를 저장할 고유한 폴더(Run Directory)를 생성하는 함수입니다.
 def get_experiment_paths(args, train_len):
     project_dir = os.path.join(args.output_root, args.exp_name)
     os.makedirs(project_dir, exist_ok=True)
@@ -86,6 +98,7 @@ def get_experiment_paths(args, train_len):
     
     return paths
 
+# [NotebookLM 참고] 평가의 일관성을 위해 학습/테스트에 사용된 데이터 원본(.npy)을 실험 폴더에 백업합니다.
 def process_data_storage(dataset, prefix, paths):
     shape_list, landmark_list, heatmap_list = [], [], []
     for i in range(len(dataset)):
@@ -105,6 +118,7 @@ def process_data_storage(dataset, prefix, paths):
 
 # =========================================================================
 # 🌟 End-to-End 조인트 모델 정의
+# [NotebookLM 참고] Stage 1(PAConv)과 Stage 2(DeepPA)를 하나로 묶어 동시에 최적화하기 위한 컨테이너 클래스입니다.
 # =========================================================================
 class JointE2EModel(nn.Module):
     def __init__(self, args, landmark_num):
@@ -116,11 +130,13 @@ class JointE2EModel(nn.Module):
         prior_hint = self.stage1_paconv(x)
         pred_heatmap = self.stage2_deeppa(x, prior_heatmap=prior_hint)
         
+        # 훈련 모드일 때는 두 단계의 로스를 모두 계산하기 위해 힌트도 반환, 평가 시에는 최종 히트맵만 반환
         if self.training:
             return pred_heatmap, prior_hint
         return pred_heatmap
 
 def train(args):
+    # [NotebookLM 참고] Gradient Accumulation 설정: 물리적 batch_size는 작게 유지하고, 여러 스텝을 모아 한 번에 역전파합니다.
     accum_steps = args.accumulation_steps
     
     if not args.test_dataset_name or (args.train_dataset_name == args.test_dataset_name):
@@ -132,6 +148,7 @@ def train(args):
 
     print(f">>> [Gradient Accumulation] Steps: {accum_steps}")
 
+    # [NotebookLM 참고] GT Heatmap 생성 과정 (FPS 샘플링 등). 시그마가 바뀌면 무조건 새로 수행해야 합니다.
     if args.need_resample:
         print("=== [Phase 1] Data Generation (Initial) ===")
         main_sample(args.num_points, args.seed, args.sigma, args.sample_way, 
@@ -164,7 +181,8 @@ def train(args):
     ScaleAndTranslate = PointcloudScaleAndTranslate()
 
     # =========================================================================
-    # 🚀 핵심 학습 루프 함수
+    # 🚀 핵심 학습 루프 함수 (execute_stage)
+    # [NotebookLM 참고] 커리큘럼 학습이나 개별 모델 학습을 재사용성 있게 호출하기 위한 래퍼(Wrapper) 함수입니다.
     # =========================================================================
     def execute_stage(current_model_name, current_epochs, disable_norm=False, prior_model=None, stage_name=""):
         print(f"\n{'='*50}")
@@ -173,6 +191,7 @@ def train(args):
 
         model_name_lower = current_model_name.lower()
 
+        # 사용할 모델 초기화
         if model_name_lower == 'deeppa_e2e':
             model = JointE2EModel(args, args.landmark_num).to(device)
         elif model_name_lower == 'deeppa' and prior_model is None:
@@ -193,6 +212,7 @@ def train(args):
             
         model.apply(weight_init)
         
+        # 손실 함수 정의
         surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, dir_weight=args.dir_weight).to(device)
         criterion = AdaptiveWingLoss() if args.loss == 'adaptive_wing' else torch.nn.MSELoss()
             
@@ -208,26 +228,28 @@ def train(args):
         auto_scales = {'heatmap': -1.0, 'coord': -1.0, 'surface': -1.0, 'struct': -1.0}
 
         # =========================================================================
-        # 🟢 [Phase 2.9] 가상 에폭: 전체 평균 vs 첫 배치 스케일 비교 및 기록
+        # 🟢 [Phase 2.9] 가상 에폭: 전체 평균 vs 첫 배치 스케일 비교 및 기록 (Loss Scale Balancing의 핵심)
+        # [NotebookLM 참고] VRAM 폭발 방지 및 통계적 안정성을 확보하는 파이프라인의 최고 핵심 기술입니다.
+        # 기울기 연산을 끄고(no_grad), 측정 모드(eval)로 전체 데이터를 한 바퀴 순회하여 순수한 로스 체급을 측정합니다.
         # =========================================================================
         if not disable_norm and model_name_lower not in ['paconv', 'paconv_heat']:
             print(f"\n🔍 [Scale Calibration] 스케일 정밀 분석 중... (First Batch vs Full Average)")
-            model.eval()
+            model.eval() # 동적 노이즈(BatchNorm 등)를 제거하기 위해 반드시 eval 모드 사용
             
             # 비교용 변수
             single_batch_losses = {}
             sum_losses = {'heatmap': 0.0, 'coord': 0.0, 'surface': 0.0, 'struct': 0.0}
             
-            with torch.no_grad():
+            with torch.no_grad(): # VRAM 웜업 및 계산 그래프 미생성으로 메모리 절약
                 for i, (point, landmark, seg) in enumerate(tqdm(train_loader, desc="Calibrating", leave=False)):
-                    # 데이터 전처리 (실제 학습과 동일하게 진행)
+                    # 데이터 전처리 (실제 학습과 동일하게 진행하여 간극 최소화)
                     point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     
                     if model_name_lower == 'deeppa_e2e':
-                        pred_heatmap = model(point_input)
+                        pred_heatmap = model(point_input) # ✅ 수정됨: 가상 에폭(eval)에서는 1개의 값만 반환함
                     elif current_model_name == 'DeepPA' and prior_model is not None:
                         prior_hint = prior_model(point_input)
                         pred_heatmap = model(point_input, prior_heatmap=prior_hint)
@@ -237,34 +259,34 @@ def train(args):
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
                     
-                    # 로스 계산
+                    # 4가지 Raw 로스 계산
                     l_hm = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous()).item()
                     l_crd = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma).item()
                     l_srf = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=disable_norm).item()
                     l_str = compute_structural_loss(pred_coords, augmented_landmark).item()
 
-                    # 🌟 [첫 번째 배치 데이터 기록]
+                    # 🌟 [첫 번째 배치 데이터 기록] 아웃라이어에 취약한 구버전 방식
                     if i == 0:
                         single_batch_losses = {'heatmap': l_hm, 'coord': l_crd, 'surface': l_srf, 'struct': l_str}
 
-                    # 🌟 [전체 누적]
+                    # 🌟 [전체 누적] 모든 데이터의 로스를 누적
                     sum_losses['heatmap'] += l_hm
                     sum_losses['coord'] += l_crd
                     sum_losses['surface'] += l_srf
                     sum_losses['struct'] += l_str
 
-            # 최종 평균 계산
+            # 최종 평균 계산 (전수 조사)
             num_batches = len(train_loader)
             avg_losses = {k: v / num_batches for k, v in sum_losses.items()}
 
-            # 배수(Multiplier) 계산
+            # 1.0 체급으로 만들기 위한 배수(Multiplier) 계산 (Zero-division 방지용 1e-6 추가)
             auto_scales_single = {k: target_norm / (v + 1e-6) for k, v in single_batch_losses.items()}
             auto_scales_full = {k: target_norm / (v + 1e-6) for k, v in avg_losses.items()}
             
-            # 🔥 [실제 학습에는 '전체 평균' 적용]
+            # 🔥 [실제 학습에는 '전체 평균(Full Avg)' 적용하여 통계적 안정성 확보]
             auto_scales = auto_scales_full 
 
-            # 🌟 [엑셀 기록용 비교 데이터 준비]
+            # 🌟 [엑셀 기록용 비교 데이터 준비] 연구자의 논문 작성 및 증명을 위한 기록
             calibration_report = {
                 "Metric": ["Raw_Loss (1 Batch)", "Raw_Loss (Full Avg)", "Multiplier (Based on 1nd)", "Multiplier (Based on Full)"],
                 "Heatmap": [single_batch_losses['heatmap'], avg_losses['heatmap'], auto_scales_single['heatmap'], auto_scales_full['heatmap']],
@@ -276,6 +298,7 @@ def train(args):
             print("\n📊 [Scale Comparison Result]")
             print(df_calib.to_string(index=False))
 
+            # 캐시를 비워 VRAM 여유 확보 후 본 학습 진입
             torch.cuda.empty_cache()
             print(" 🧹 VRAM 캐시 초기화 완료. 본 학습을 시작합니다.\n")
         else:
@@ -283,9 +306,11 @@ def train(args):
 
         # =========================================================================
         # 🟢 본 학습 (Real Epoch)
+        # [NotebookLM 참고] model.train() 모드로 전환되며 BN/Dropout의 영향으로 초기 로스가 
+        # 가상 에폭 측정치보다 높게(예: 3.3) 찍힐 수 있으나 정상적인 노이즈 현상입니다.
         # =========================================================================
         for epoch in range(current_epochs):
-            model.train()
+            model.train() # 학습 모드: 역동적 노이즈 발생 시작
             
             # 누적 변수 세팅
             train_loss_norm, train_loss_reversed = 0.0, 0.0
@@ -299,6 +324,7 @@ def train(args):
                 for i, (point, landmark, seg) in tepoch:
                     point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
 
+                    # 물리적 거리 오차 계산용
                     with torch.no_grad():
                         point_xyz = point[:, :, :3]
                         centroid_tmp = torch.mean(point_xyz, axis=1, keepdim=True)
@@ -322,18 +348,19 @@ def train(args):
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     pred_coords = get_differentiable_coords(points_for_coords, pred_heatmap, k=args.k_softargmax)
                     
-                    # 🌟 Raw Loss 계산
+                    # 🌟 Raw Loss (스케일링 전 원본 오차)
                     loss_heatmap = criterion(pred_heatmap, seg.permute(0, 2, 1).contiguous())
                     loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                     loss_surface = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=disable_norm)
                     loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                     
-                    # 🌟 Norm Loss 계산
+                    # 🌟 Norm Loss (가상 에폭에서 구한 배수를 곱하여 1.0 체급으로 강제 밸런싱)
                     norm_heatmap = loss_heatmap * auto_scales['heatmap']
                     norm_coord   = loss_coord   * auto_scales['coord']
                     norm_surface = loss_surface * auto_scales['surface']         
                     norm_struct  = loss_struct  * auto_scales['struct']
 
+                    # [NotebookLM 참고] Curriculum Learning: 학습 초기에는 Heatmap에만 집중하고, 이후 복합 로스로 전환
                     if model_name_lower == 'paconv_heat':
                         weights = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device)
                         total_loss = norm_heatmap
@@ -354,7 +381,7 @@ def train(args):
                                           rand_weights[1] * norm_surface + 
                                           rand_weights[2] * norm_struct)
                                           
-                            # 🌟 역산용(Reversed) Total Loss: 원본 크기에 가중치만 반영한 가상의 물리적 로스
+                            # 🌟 역산용(Reversed) Total Loss: 원본 크기에 가중치만 반영한 물리적 모니터링 수치
                             total_loss_raw_reversed = (0.05 * loss_heatmap + 
                                                        rand_weights[0] * loss_coord + 
                                                        rand_weights[1] * loss_surface + 
@@ -362,12 +389,15 @@ def train(args):
                                                        
                             weights = torch.tensor([0.05, rand_weights[0], rand_weights[1], rand_weights[2]])
                     
+                    # Stage1 + Stage2 통합 로스
                     if model_name_lower == 'deeppa_e2e':
                         total_loss = total_loss + loss_hm_stage1
 
+                    # [NotebookLM 참고] Gradient Accumulation: 잘게 쪼갠 배치의 로스를 나누어 역전파
                     loss = total_loss / accum_steps
                     loss.backward()
                     
+                    # 지정된 누적 스텝(accum_steps)에 도달했을 때만 실제 가중치 업데이트 수행
                     if (i + 1) % accum_steps == 0:
                         opt.step()
                         opt.zero_grad() 
@@ -391,6 +421,7 @@ def train(args):
                     norm_str_sum += norm_struct.item()
                     train_mm += mm_error
                     
+                    # 실시간 VRAM 모니터링
                     if torch.cuda.is_available():
                         vram_used = torch.cuda.max_memory_allocated() / (1024 ** 3)
                         vram_str = f"{vram_used:.1f}GB"
@@ -450,7 +481,7 @@ def train(args):
 
             print(f" [{stage_name} Ep {epoch+1:03d}] Total Norm: {t_loss_n:.4f} | Raw HM: {t_hm_raw:.4f} | T_mm: {t_mm:.2f} || V_mm: {v_mm:.2f}")
 
-            # 🌟 엑셀용 데이터 기록 (Raw vs Norm 완벽 분리)
+            # 🌟 [NotebookLM 참고] 엑셀용 데이터 기록 (Raw vs Norm 완벽 분리)
             w_np = weights.detach().cpu().numpy()
             log_records.append({
                 'Epoch': epoch + 1,
@@ -465,7 +496,7 @@ def train(args):
                 'Val_mm': v_mm
             })
             
-            # 매 에폭마다 엑셀 덮어쓰기 저장 (중간에 꺼져도 기록 유지)
+            # 매 에폭마다 엑셀 덮어쓰기 저장 (중간에 시스템이 꺼져도 로그 보존)
             pd.DataFrame(log_records).to_excel(excel_log_path, index=False)
 
             if v_mm < best_val_mm:
