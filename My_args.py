@@ -1,5 +1,5 @@
 '''
-@Author: Yuan Wang (Modified by Researcher 2)
+@Author: Yuan Wang (Modified by Researcher & AI Assistant)
 @File: My_args.py
 @Description: 
 [NotebookLM을 위한 핵심 파일 요약]
@@ -54,7 +54,6 @@ parser.add_argument('--test_batch_size', type=int, default=1, metavar='batch_siz
 parser.add_argument('--epochs', type=int, default=500, metavar='N', help='number of episode to train')
 
 # 🔥 Auto 파이프라인 전용 에폭 설정 추가
-# [의도] --model이 'DeepPA_auto'일 때 작동하며, 1단계(paconv)와 2단계(deeppa)에 각각 몇 에폭씩 할당할지 결정합니다.
 parser.add_argument('--paconv_epochs', type=int, default=500, help='PAConv stage epochs in auto mode')
 parser.add_argument('--deeppa_epochs', type=int, default=500, help='DeepPA stage epochs in auto mode')
 
@@ -64,7 +63,6 @@ parser.add_argument('--accumulation_steps', type=int, default=1, help='Gradient 
 # =============================================================================
 # [3] 최적화 설정 (Optimizer Args)
 # =============================================================================
-# [참고] 'adaptive_wing' 로스는 loss.py에 정의된 비선형 히트맵 회귀 전용 오차 함수입니다.
 parser.add_argument('--loss', type=str, default='adaptive_wing', metavar='N', choices=['mse', 'adaptive_wing'], help='loss function to use')
 parser.add_argument('--use_sgd', type=str2bool, default=False, help='Use SGD')
 parser.add_argument('--lr', type=float, default=0.001, metavar='LR', help='learning rate')
@@ -84,8 +82,7 @@ parser.add_argument('--regression_point_num', type=int, default=10, metavar='RPN
 parser.add_argument('--dataset_seed', type=int, default=1, metavar='S', help='train/test dataset random seed')
 parser.add_argument('--num_points', type=int, default=8192, help='num of points to use')
 
-# [sigma 의도] 3D 공간 상의 정답 랜드마크(GT)를 점 하나(Dirac delta)로 두면 학습이 어려우므로, 
-# 주변으로 확률이 퍼지는 가우시안 히트맵을 만듭니다. sigma는 그 퍼지는 범위(분산)를 의미합니다.
+# [sigma 의도] 3D 가우시안 히트맵의 분산(퍼짐 정도) 설정
 parser.add_argument('--sigma', type=float, default=10.0, metavar='Sig', help='Gaussian Variance of heatmap')
 parser.add_argument('--k', type=int, default=30, metavar='N', help='Num of nearest neighbors')
 parser.add_argument('--emb_dims', type=int, default=1024, metavar='N', help='Dimension of embeddings')
@@ -109,29 +106,21 @@ parser.add_argument('--user_tag', type=str, default='', help='Custom tag added t
 parser.add_argument('--train_len', type=int, default=209, help='Number of training samples used in folder name')
 
 # =============================================================================
-# [7] 하이브리드 로스 & 3D 투영 하이퍼파라미터 ( loss.py 와 연동됨 )
+# [7] 🌟 하이브리드 로스 & 3D 표면 페널티 하이퍼파라미터 (loss.py 연동)
 # =============================================================================
-# [가중치 밸런스] 일반적인 유클리디안 거리(alpha)와 표면 수직 거리(beta) 간의 혼합 비율.
-parser.add_argument('--alpha_init', type=float, default=0.5, help='Initial weight for Coordinate L1 Loss')
-parser.add_argument('--beta_init', type=float, default=0.1, help='Initial weight for Point-to-Plane Surface Loss')
-
-# [이웃 크기(K) 설정의 기하학적 차이]
-# - plane_knn (5): 거리가 매우 가까운 5개의 점만 모아 '접평면(Tangent Plane)'과 '법선(Normal)'을 구함. (미시적)
-# - curv_knn (30): 넓은 반경의 30개 점을 모아 뼈대의 주방향이나 거시적인 '곡률(Curvature)'을 파악함. (거시적)
+# [이웃 크기(K) 설정]
 parser.add_argument('--k_softargmax', type=int, default=10, help='Top-K points used for Soft-argmax')
 parser.add_argument('--plane_knn', type=int, default=5, help='K points for Local Tangent Plane estimation')
 parser.add_argument('--curv_knn', type=int, default=30, help='K points for Macroscopic Curvature & Direction estimation')
 
-# [기하학적 페널티 승수] 예측점이 정답 표면의 곡률이나 뼈대 방향을 벗어났을 때, 오차를 얼마나 뻥튀기할 것인가.
-parser.add_argument('--curv_alpha', type=float, default=10.0, help='Penalty multiplier for curvature magnitude error')
-parser.add_argument('--dir_weight', type=float, default=1.0, help='Penalty multiplier for eigenvector direction error')
+# [NotebookLM 참고: 기하학적 페널티 승수] 
+# 수식: Loss = P2P_Distance * (1 + alpha*Curv_Error + beta*Dir_Error)
+# 예측점이 GT의 굴곡(Curvature)이나 뼈대 방향(Direction)을 벗어날 때 오차를 기하급수적으로 증폭시키는 변수입니다.
+parser.add_argument('--curv_alpha', type=float, default=10.0, help='[Alpha] Penalty multiplier for curvature magnitude error')
+parser.add_argument('--dir_beta', type=float, default=1.0, help='[Beta] Penalty multiplier for eigenvector direction error')
 
-# [Focal Loss] 학습 시 계속 못 맞추는 악성 랜드마크에 가중치를 동적으로 더 부여함.
+# [Focal Loss 및 스케일 정규화]
 parser.add_argument('--focal_gamma', type=float, default=1.0, help='Gamma for dynamic focal loss')
 parser.add_argument('--focal_max', type=float, default=10.0, help='Max clamp for focal weights')
-
-# 👇 loss 스케일 정규화
-# [의도] L1 거리, Point-to-Plane 거리, 곡률 오차 등 여러 로스가 섞일 때 단위나 크기가 다르면 학습이 무너짐.
-# 이를 방지하기 위해 학습 초기(에폭 0)에 모든 로스 값의 스케일을 target_norm(1.0)에 맞게 강제 정규화하는 기능.
 parser.add_argument('--use_loss_norm', type=str2bool, default=True, help='Use Initial Loss Normalization')
 parser.add_argument('--target_norm', type=float, default=1.0, help='Target scale for Loss Normalization')
