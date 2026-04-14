@@ -16,7 +16,7 @@ def get_latest_run_info(output_root, exp_name):
     if not subdirs:
         return None, None
         
-    # 🔥 [수정된 핵심 로직] 하위 폴더/파일까지 싹 다 뒤져서 '가장 마지막으로 쓰여진 시간'을 찾음
+    # 🔥 하위 폴더/파일까지 싹 다 뒤져서 '가장 마지막으로 쓰여진 시간'을 찾음
     def get_actual_mtime(folder):
         latest_time = os.path.getmtime(folder)  # 기본 폴더 생성 시간
         for root, dirs, files in os.walk(folder):
@@ -82,13 +82,22 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     eval_cmd = [sys.executable, "eval_all.py"] + user_args + ["--run_id", run_id]
     
-    # 🔥 추출한 train_len을 강제로 주입하여 폴더 탐색 실패 원천 차단
+    # 추출한 train_len을 강제로 주입하여 폴더 탐색 실패 원천 차단
     if train_len and "--train_len" not in user_args:
         eval_cmd.extend(["--train_len", train_len])
     
     # 평가 시 데이터 타입이 강제로 덮어씌워지지 않도록 기본값(test) 보장
     if "--Eval_DataType" not in user_args:
         eval_cmd.extend(["--Eval_DataType", "test"])
+
+    # 🌟 [핵심 추가] train.py에서 최적화한 _last.t7 파일을 자동으로 타겟팅하도록 주입
+    if "--model_epoch" not in user_args:
+        if args.model.lower() != 'deeppa_auto':
+            # Single 모델일 경우 해당 모델의 마지막 저장 파일을 자동으로 가리킴
+            eval_cmd.extend(["--model_epoch", f"Single_{args.model}_last.t7"])
+        else:
+            # deeppa_auto 모드일 때는 eval_all.py 내부에서 알아서 Stage1/Stage2_last.t7을 찾음
+            pass
 
     try:
         subprocess.run(eval_cmd, check=True)

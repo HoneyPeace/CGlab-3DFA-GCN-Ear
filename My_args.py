@@ -45,6 +45,7 @@ parser.add_argument('--output_root', type=str, default='../results', help='Root 
 # 추가로 입력하여 모델이 표면의 굴곡을 더 빨리 이해하도록 돕습니다.
 parser.add_argument('--in_channels', type=int, default=7, help='Input channels: 3 for (xyz), 7 for (xyz + principal_dir + curvature)')
 
+
 # =============================================================================
 # [2] 학습 설정 (Train Args) & Two-stage 스케줄링
 # =============================================================================
@@ -124,3 +125,10 @@ parser.add_argument('--focal_gamma', type=float, default=1.0, help='Gamma for dy
 parser.add_argument('--focal_max', type=float, default=10.0, help='Max clamp for focal weights')
 parser.add_argument('--use_loss_norm', type=str2bool, default=True, help='Use Initial Loss Normalization')
 parser.add_argument('--target_norm', type=float, default=1.0, help='Target scale for Loss Normalization')
+
+# 동적 히트맵 선학습(Warm-up) 설정
+parser.add_argument('--use_warmup', type=str2bool, default=False, help='히트맵 로스 정체 기반 자동 선학습 켜기/끄기')
+parser.add_argument('--warmup_patience', type=int, default=10, help='몇 에폭 동안 히트맵 로스가 안 떨어지면 RLW로 넘어갈지 결정')
+
+#DeepPA가 히트맵 대신 (X,Y,Z) 좌표를 직접 뱉도록 하는 플래그
+parser.add_argument('--use_direct_regression', type=str2bool, default=True, help='DeepPA outputs (X,Y,Z) directly instead of heatmap')
