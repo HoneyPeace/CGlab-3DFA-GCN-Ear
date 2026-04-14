@@ -132,3 +132,5 @@ parser.add_argument('--warmup_patience', type=int, default=10, help='몇 에폭 
 
 #DeepPA가 히트맵 대신 (X,Y,Z) 좌표를 직접 뱉도록 하는 플래그
 parser.add_argument('--use_direct_regression', type=str2bool, default=True, help='DeepPA outputs (X,Y,Z) directly instead of heatmap')
+parser.add_argument('--freeze_paconv', type=str2bool, default=False, help='PAConv를 얼리고 DeepPA만 학습합니다.')
+parser.add_argument('--pretrained_paconv_path', type=str, default='', help='얼려둘 PAConv의 .t7 파일 절대/상대 경로')

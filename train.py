@@ -1,6 +1,6 @@
 # @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 # @File: train.py
-# @Description: 동적 히트맵 선학습 + 스케일링 정규화 + 전면 RLW + 마지막 에폭 최종 저장
+# @Description: 동적 히트맵 선학습 + 스케일링 정규화 + 전면 RLW + 🧊 PAConv Freezing 대응 (차원 충돌 완벽 방어 및 상세 로깅 복원본)
 # ==============================================================================
 
 import os
@@ -75,8 +75,14 @@ class JointE2EModel(nn.Module):
         self.stage1_paconv = PAConv(args, landmark_num)
         self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
 
-    def forward(self, x):
-        prior_hint = self.stage1_paconv(x)
+    def forward(self, x, is_frozen=False):
+        if is_frozen:
+            self.stage1_paconv.eval()
+            with torch.no_grad():
+                prior_hint = self.stage1_paconv(x)
+        else:
+            prior_hint = self.stage1_paconv(x)
+            
         stage2_out = self.stage2_deeppa(x, prior_heatmap=prior_hint)
         if self.training: return stage2_out, prior_hint
         return stage2_out
@@ -86,6 +92,8 @@ def train(args):
     MODE = "SPLIT" if not args.test_dataset_name or (args.train_dataset_name == args.test_dataset_name) else "SEPARATE"
     
     use_direct = getattr(args, 'use_direct_regression', False)
+    is_frozen_paconv = getattr(args, 'freeze_paconv', False)
+    pretrained_path = getattr(args, 'pretrained_paconv_path', '')
 
     if args.need_resample:
         main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.train_dataset_name, args.data_root, partition='train')
@@ -111,15 +119,33 @@ def train(args):
 
     def execute_stage(current_model_name, current_epochs, disable_norm=False, prior_model=None, stage_name=""):
         model_name_lower = current_model_name.lower()
-        if model_name_lower == 'deeppa_e2e': model = JointE2EModel(args, args.landmark_num).to(device)
-        else: model = DeepPA_Wrapper(args, args.landmark_num).to(device)
+        
+        # 🌟 티처 여부 확인 변수
+        is_teacher_train = ('paconv' in model_name_lower) and (model_name_lower != 'deeppa_e2e')
+        
+        # =========================================================================
+        # 1. 모델 생성 (PAConv 티처는 무조건 히트맵 원본 모델로 생성!)
+        # =========================================================================
+        if model_name_lower == 'deeppa_e2e': 
+            model = JointE2EModel(args, args.landmark_num).to(device)
+            if is_frozen_paconv:
+                print(f"\n>>> [INFO] 🧊 PAConv Freezing 활성화! 가중치 로드: {pretrained_path}")
+                model.stage1_paconv.load_state_dict(torch.load(pretrained_path, map_location=device))
+                for param in model.stage1_paconv.parameters(): param.requires_grad = False
+                model.stage1_paconv.eval()
+        elif is_teacher_train:
+            model = PAConv(args, args.landmark_num).to(device)
+            print(">>> [INFO] 👨‍🏫 Teacher Mode: PAConv(Heatmap) 모델을 독립 학습합니다.")
+        else: 
+            model = DeepPA_Wrapper(args, args.landmark_num).to(device)
             
         model.apply(weight_init)
         
         surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
         criterion = AdaptiveWingLoss() if args.loss == 'adaptive_wing' else torch.nn.MSELoss()
         
-        opt = optim.Adam(model.parameters(), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
+        opt_params = filter(lambda p: p.requires_grad, model.parameters())
+        opt = optim.Adam(opt_params, lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
         scheduler = CosineAnnealingLR(opt, T_max=current_epochs) if args.scheduler == 'cos' else StepLR(opt, step_size=40, gamma=0.9)
 
         excel_log_path = os.path.join(paths['root'], f'Training_Log_{stage_name}.xlsx')
@@ -127,17 +153,17 @@ def train(args):
         target_norm = 1.0 
         auto_scales = {'heatmap': 1.0, 'coord': 1.0, 'surface': 1.0, 'struct': 1.0}
 
-        # 🌟 동적 선학습(Warm-up) 상태 변수 초기화
-        is_warmup = getattr(args, 'use_warmup', True) and (model_name_lower == 'deeppa_e2e')
+        # 🌟 동적 선학습(Warm-up) 상태 변수 (프리징이면 강제 차단)
+        is_warmup = getattr(args, 'use_warmup', True) and (model_name_lower == 'deeppa_e2e' or is_teacher_train)
+        if is_frozen_paconv: is_warmup = False
+            
         warmup_patience = getattr(args, 'warmup_patience', 10)
         best_warmup_hm = float('inf')
         patience_counter = 0
-
-        # 🌟 방어적 코딩: 엑셀 저장을 위한 변수 초기화 (NameError 원천 차단)
         df_calib = None 
 
         # =========================================================================
-        # 🟢 [Phase 2.9] 스케일링 정규화 (가상 에폭 캘리브레이션)
+        # 🟢 [Phase 2.9] 스케일링 정규화 (Calibration)
         # =========================================================================
         if not disable_norm:
             print(f"\n🔍 [Scaling Normalization] 스케일링 정규화 전수 분석 중...")
@@ -151,22 +177,21 @@ def train(args):
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                     point_input = point_normal.permute(0, 2, 1).contiguous()
-                    
-                    if model_name_lower == 'deeppa_e2e':
-                        prior_hint = model.stage1_paconv(point_input)
-                        stage2_out = model.stage2_deeppa(point_input, prior_heatmap=prior_hint)
-                    else:
-                        stage2_out = model(point_input)
-                        prior_hint = stage2_out
-                    
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     
-                    if use_direct:
-                        pred_coords = stage2_out
+                    # 🌟 [차원 충돌 해결 핵심] 모델에 따라 출력값 및 좌표 추출을 명확히 분리!
+                    if model_name_lower == 'deeppa_e2e':
+                        stage2_out, prior_hint = model(point_input, is_frozen=is_frozen_paconv)
+                        pred_coords = stage2_out if use_direct else get_differentiable_coords(points_for_coords, stage2_out, k=args.k_softargmax)
+                        l_hm = criterion(prior_hint, seg.permute(0, 2, 1).contiguous()).item()
+                    elif is_teacher_train:
+                        prior_hint = model(point_input)
+                        pred_coords = get_differentiable_coords(points_for_coords, prior_hint, k=args.k_softargmax)
                         l_hm = criterion(prior_hint, seg.permute(0, 2, 1).contiguous()).item()
                     else:
-                        pred_coords = get_differentiable_coords(points_for_coords, stage2_out, k=args.k_softargmax)
-                        l_hm = criterion(stage2_out, seg.permute(0, 2, 1).contiguous()).item()
+                        stage2_out = model(point_input)
+                        pred_coords = stage2_out if use_direct else get_differentiable_coords(points_for_coords, stage2_out, k=args.k_softargmax)
+                        l_hm = 1.0 if use_direct else criterion(stage2_out, seg.permute(0, 2, 1).contiguous()).item()
                     
                     l_crd = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma).item()
                     l_srf_tensor, l_p2p, l_curv, l_dir = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=disable_norm)
@@ -185,7 +210,6 @@ def train(args):
             avg_losses = {k: v / num_batches for k, v in sum_losses.items()}
             auto_scales = {k: target_norm / (avg_losses[k] + 1e-6) for k in ['heatmap', 'coord', 'surface', 'struct']}
             
-            # 🌟 스케일 배수 데이터프레임 정상 생성
             df_calib = pd.DataFrame({
                 "Metric": ["Raw_Loss (1 Batch)", "Raw_Loss (Full Avg)", "Multiplier (Based on Full)"],
                 "Heatmap": [single_batch_losses['heatmap'], avg_losses['heatmap'], auto_scales['heatmap']],
@@ -203,7 +227,12 @@ def train(args):
         # 🟢 [Phase 3] 본 학습
         # =========================================================================
         for epoch in range(current_epochs):
-            model.train() 
+            if not is_frozen_paconv: 
+                model.train() 
+            else: 
+                if hasattr(model, 'stage2_deeppa'): model.stage2_deeppa.train()
+                else: model.train()
+                
             train_loss_norm, train_loss_reversed = 0.0, 0.0
             
             raw_hm, raw_crd, raw_srf, raw_str = 0.0, 0.0, 0.0, 0.0
@@ -214,7 +243,7 @@ def train(args):
             train_mm = 0.0
             opt.zero_grad() 
             
-            current_phase_str = "🔥 Warm-up (Heatmap Only)" if is_warmup else "🚀 Main (Full RLW)"
+            current_phase_str = "🧊 Frozen S1 (Teacher)" if is_frozen_paconv else ("🔥 Warm-up (Heatmap Only)" if is_warmup else "🚀 Main (Full RLW)")
             
             with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"{stage_name} Ep {epoch+1:03d} [{current_phase_str}]", unit="batch", leave=False) as tepoch:
                 for i, (point, landmark, seg) in tepoch:
@@ -229,43 +258,45 @@ def train(args):
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     
+                    # 🌟 1. 모델 포워딩 및 기본 변수 초기화
                     if model_name_lower == 'deeppa_e2e':
-                        stage2_out, prior_hint = model(point_input)
+                        stage2_out, prior_hint = model(point_input, is_frozen=is_frozen_paconv)
                         loss_hm_s1 = criterion(prior_hint, seg.permute(0, 2, 1).contiguous())
                         norm_hm_s1 = loss_hm_s1 * auto_scales['heatmap']
                         
-                        if is_warmup or use_direct:
-                            total_loss_stage1 = norm_hm_s1
-                            s1_raw_hm += loss_hm_s1.item()
+                        if use_direct:
+                            pred_coords = stage2_out
+                            loss_heatmap = torch.tensor(0.0).to(device)
+                            norm_heatmap = 0.0
                         else:
-                            prior_coords = get_differentiable_coords(points_for_coords, prior_hint, k=args.k_softargmax)
-                            loss_crd_s1 = dynamic_focal_l1_loss(prior_coords, augmented_landmark, gamma=args.focal_gamma)
-                            loss_srf_s1, p2p_s1, curv_err_s1, dir_err_s1 = surface_criterion(prior_coords, augmented_landmark, points_for_coords, disable_norm=False)
-                            loss_str_s1 = compute_structural_loss(prior_coords, augmented_landmark)
-                            
-                            norm_crd_s1 = loss_crd_s1 * auto_scales['coord']
-                            norm_srf_s1 = loss_srf_s1 * auto_scales['surface']
-                            norm_str_s1 = loss_str_s1 * auto_scales['struct']
-                            
-                            rand_w_s1 = torch.rand(4).to(device)
-                            rand_w_s1 = rand_w_s1 / rand_w_s1.sum()
-                            total_loss_stage1 = (rand_w_s1[0] * norm_hm_s1 + rand_w_s1[1] * norm_crd_s1 + 
-                                                 rand_w_s1[2] * norm_srf_s1 + rand_w_s1[3] * norm_str_s1)
-                            s1_raw_hm += loss_hm_s1.item(); s1_raw_crd += loss_crd_s1.item(); s1_raw_srf += loss_srf_s1.item(); s1_raw_str += loss_str_s1.item()
-                            s1_p2p_raw += p2p_s1.item(); s1_curv_raw += curv_err_s1.item(); s1_dir_raw += dir_err_s1.item()
-                    else:
-                        stage2_out = model(point_input)
-                        total_loss_stage1 = 0.0
+                            pred_coords = get_differentiable_coords(points_for_coords, stage2_out, k=args.k_softargmax)
+                            loss_heatmap = criterion(stage2_out, seg.permute(0, 2, 1).contiguous())
+                            norm_heatmap = loss_heatmap * auto_scales['heatmap']
 
-                    if use_direct:
-                        pred_coords = stage2_out
+                    elif is_teacher_train:
+                        prior_hint = model(point_input)
+                        loss_hm_s1 = criterion(prior_hint, seg.permute(0, 2, 1).contiguous())
+                        norm_hm_s1 = loss_hm_s1 * auto_scales['heatmap']
+                        
+                        pred_coords = get_differentiable_coords(points_for_coords, prior_hint, k=args.k_softargmax)
                         loss_heatmap = torch.tensor(0.0).to(device)
                         norm_heatmap = 0.0
-                    else:
-                        pred_coords = get_differentiable_coords(points_for_coords, stage2_out, k=args.k_softargmax)
-                        loss_heatmap = criterion(stage2_out, seg.permute(0, 2, 1).contiguous())
-                        norm_heatmap = loss_heatmap * auto_scales['heatmap']
+
+                    else: # Single DeepPA
+                        stage2_out = model(point_input)
+                        loss_hm_s1 = torch.tensor(0.0).to(device)
+                        norm_hm_s1 = 0.0
                         
+                        if use_direct:
+                            pred_coords = stage2_out
+                            loss_heatmap = torch.tensor(0.0).to(device)
+                            norm_heatmap = 0.0
+                        else:
+                            pred_coords = get_differentiable_coords(points_for_coords, stage2_out, k=args.k_softargmax)
+                            loss_heatmap = criterion(stage2_out, seg.permute(0, 2, 1).contiguous())
+                            norm_heatmap = loss_heatmap * auto_scales['heatmap']
+
+                    # 🌟 2. 3D 기하학 로스 (어떤 모드든 pred_coords는 항상 3차원 좌표임)
                     loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                     loss_surface, p2p_s2, curv_err_s2, dir_err_s2 = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
                     loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
@@ -274,34 +305,74 @@ def train(args):
                     norm_surface = loss_surface * auto_scales['surface']         
                     norm_struct  = loss_struct  * auto_scales['struct']
 
-                    if is_warmup:
-                        if use_direct:
-                            total_loss_stage2 = torch.tensor(0.0).to(device)
+                    total_loss_stage1 = torch.tensor(0.0).to(device)
+                    total_loss_stage2 = torch.tensor(0.0).to(device)
+
+                    # 🌟 3. 로스 결합 (완벽 복원된 상세 로깅 로직)
+                    if model_name_lower == 'deeppa_e2e':
+                        if is_frozen_paconv:
+                            total_loss_stage1 = torch.tensor(0.0).to(device)
+                            s1_raw_hm += loss_hm_s1.item() # 모니터링용
+                        else:
+                            if is_warmup or use_direct:
+                                total_loss_stage1 = norm_hm_s1
+                                s1_raw_hm += loss_hm_s1.item()
+                            else:
+                                prior_coords = get_differentiable_coords(points_for_coords, prior_hint, k=args.k_softargmax)
+                                loss_crd_s1 = dynamic_focal_l1_loss(prior_coords, augmented_landmark, gamma=args.focal_gamma)
+                                loss_srf_s1, p2p_s1, curv_err_s1, dir_err_s1 = surface_criterion(prior_coords, augmented_landmark, points_for_coords, disable_norm=False)
+                                loss_str_s1 = compute_structural_loss(prior_coords, augmented_landmark)
+                                
+                                rand_w_s1 = torch.rand(4).to(device); rand_w_s1 = rand_w_s1 / rand_w_s1.sum()
+                                total_loss_stage1 = (rand_w_s1[0]*norm_hm_s1 + rand_w_s1[1]*(loss_crd_s1*auto_scales['coord']) + 
+                                                     rand_w_s1[2]*(loss_srf_s1*auto_scales['surface']) + rand_w_s1[3]*(loss_str_s1*auto_scales['struct']))
+                                
+                                s1_raw_hm += loss_hm_s1.item(); s1_raw_crd += loss_crd_s1.item(); s1_raw_srf += loss_srf_s1.item(); s1_raw_str += loss_str_s1.item()
+                                s1_p2p_raw += p2p_s1.item(); s1_curv_raw += curv_err_s1.item(); s1_dir_raw += dir_err_s1.item()
+
+                        if is_warmup:
+                            total_loss_stage2 = torch.tensor(0.0).to(device) if use_direct else norm_heatmap
+                            total_loss_raw_reversed = loss_hm_s1 if use_direct else (loss_heatmap + loss_hm_s1)
+                        else:
+                            if use_direct:
+                                rand_weights = torch.rand(3).to(device); rand_weights = rand_weights / rand_weights.sum()
+                                total_loss_stage2 = (rand_weights[0]*norm_coord + rand_weights[1]*norm_surface + rand_weights[2]*norm_struct)
+                                total_loss_raw_reversed = (rand_weights[0]*loss_coord + rand_weights[1]*loss_surface + rand_weights[2]*loss_struct)
+                            else:
+                                rand_weights = torch.rand(4).to(device); rand_weights = rand_weights / rand_weights.sum()
+                                total_loss_stage2 = (rand_weights[0]*norm_heatmap + rand_weights[1]*norm_coord + rand_weights[2]*norm_surface + rand_weights[3]*norm_struct)
+                                total_loss_raw_reversed = (rand_weights[0]*loss_heatmap + rand_weights[1]*loss_coord + rand_weights[2]*loss_surface + rand_weights[3]*loss_struct)
+
+                    elif is_teacher_train:
+                        if is_warmup:
+                            total_loss_stage1 = norm_hm_s1
+                            s1_raw_hm += loss_hm_s1.item()
                             total_loss_raw_reversed = loss_hm_s1
                         else:
-                            total_loss_stage2 = norm_heatmap
-                            total_loss_raw_reversed = loss_heatmap + loss_hm_s1
-                    else:
+                            rand_w_s1 = torch.rand(4).to(device); rand_w_s1 = rand_w_s1 / rand_w_s1.sum()
+                            total_loss_stage1 = (rand_w_s1[0]*norm_hm_s1 + rand_w_s1[1]*norm_coord + rand_w_s1[2]*norm_surface + rand_w_s1[3]*norm_struct)
+                            total_loss_raw_reversed = (rand_w_s1[0]*loss_hm_s1 + rand_w_s1[1]*loss_coord + rand_w_s1[2]*loss_surface + rand_w_s1[3]*loss_struct)
+
+                            s1_raw_hm += loss_hm_s1.item(); s1_raw_crd += loss_coord.item(); s1_raw_srf += loss_surface.item(); s1_raw_str += loss_struct.item()
+                            s1_p2p_raw += p2p_s2.item(); s1_curv_raw += curv_err_s2.item(); s1_dir_raw += dir_err_s2.item()
+
+                    else: # Single DeepPA
                         if use_direct:
-                            rand_weights = torch.rand(3).to(device)
-                            rand_weights = rand_weights / rand_weights.sum()
-                            total_loss_stage2 = (rand_weights[0] * norm_coord + rand_weights[1] * norm_surface + rand_weights[2] * norm_struct)
-                            total_loss_raw_reversed = (rand_weights[0] * loss_coord + rand_weights[1] * loss_surface + rand_weights[2] * loss_struct)
+                            rand_weights = torch.rand(3).to(device); rand_weights = rand_weights / rand_weights.sum()
+                            total_loss_stage2 = (rand_weights[0]*norm_coord + rand_weights[1]*norm_surface + rand_weights[2]*norm_struct)
+                            total_loss_raw_reversed = (rand_weights[0]*loss_coord + rand_weights[1]*loss_surface + rand_weights[2]*loss_struct)
                         else:
-                            rand_weights = torch.rand(4).to(device)
-                            rand_weights = rand_weights / rand_weights.sum()
-                            total_loss_stage2 = (rand_weights[0] * norm_heatmap + rand_weights[1] * norm_coord + 
-                                                 rand_weights[2] * norm_surface + rand_weights[3] * norm_struct)
-                            total_loss_raw_reversed = (rand_weights[0] * loss_heatmap + rand_weights[1] * loss_coord + 
-                                                       rand_weights[2] * loss_surface + rand_weights[3] * loss_struct)
+                            rand_weights = torch.rand(4).to(device); rand_weights = rand_weights / rand_weights.sum()
+                            total_loss_stage2 = (rand_weights[0]*norm_heatmap + rand_weights[1]*norm_coord + rand_weights[2]*norm_surface + rand_weights[3]*norm_struct)
+                            total_loss_raw_reversed = (rand_weights[0]*loss_heatmap + rand_weights[1]*loss_coord + rand_weights[2]*loss_surface + rand_weights[3]*loss_struct)
                     
                     total_loss = total_loss_stage2 + total_loss_stage1
                     
-                    if not is_warmup and model_name_lower == 'deeppa_e2e' and not use_direct:
-                        total_loss_raw_reversed += (rand_w_s1[0] * loss_hm_s1 + rand_w_s1[1] * loss_crd_s1 + 
-                                                    rand_w_s1[2] * loss_srf_s1 + rand_w_s1[3] * loss_str_s1)
-                    elif model_name_lower == 'deeppa_e2e' and (use_direct or is_warmup):
-                        total_loss_raw_reversed += loss_hm_s1 
+                    if not is_teacher_train:
+                        # DeepPA 학습인 경우 S2 로깅 업데이트
+                        raw_hm += loss_heatmap.item(); raw_crd += loss_coord.item()
+                        raw_srf += loss_surface.item(); raw_str += loss_struct.item()
+                        s2_p2p_raw += p2p_s2.item(); s2_curv_raw += curv_err_s2.item(); s2_dir_raw += dir_err_s2.item()
 
                     loss = total_loss / accum_steps
                     loss.backward()
@@ -315,11 +386,8 @@ def train(args):
 
                     train_loss_norm += total_loss.item()
                     train_loss_reversed += total_loss_raw_reversed.item()
-                    
-                    raw_hm += loss_heatmap.item(); raw_crd += loss_coord.item(); raw_srf += loss_surface.item(); raw_str += loss_struct.item()
-                    s2_p2p_raw += p2p_s2.item(); s2_curv_raw += curv_err_s2.item(); s2_dir_raw += dir_err_s2.item()
-                    
                     train_mm += mm_error
+                    
                     vram_str = f"{torch.cuda.max_memory_allocated() / (1024 ** 3):.1f}GB" if torch.cuda.is_available() else "CPU"
                     tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", mm=f"{mm_error:.2f}", VRAM=vram_str)
 
@@ -339,29 +407,32 @@ def train(args):
                     avg_m = torch.mean(torch.max(torch.sqrt(torch.sum((point_xyz - torch.mean(point_xyz, axis=1, keepdim=True)) ** 2, axis=2)), axis=1)[0]).item()
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1).contiguous()
+                    points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous()
                     
                     if model_name_lower == 'deeppa_e2e':
-                        prior_hint = model.stage1_paconv(point_input)
-                        stage2_out = model.stage2_deeppa(point_input, prior_heatmap=prior_hint)
-                    else:
-                        stage2_out = model(point_input)
-                        prior_hint = stage2_out
-                    
-                    if use_direct:
-                        pred_coords = stage2_out
+                        stage2_out, prior_hint = model(point_input, is_frozen=is_frozen_paconv)
+                        pred_coords = stage2_out if use_direct else get_differentiable_coords(points_for_coords, stage2_out, k=args.k_softargmax)
+                        val_hm += criterion(prior_hint, seg.permute(0, 2, 1).contiguous()).item()
+                    elif is_teacher_train:
+                        prior_hint = model(point_input)
+                        pred_coords = get_differentiable_coords(points_for_coords, prior_hint, k=args.k_softargmax)
                         val_hm += criterion(prior_hint, seg.permute(0, 2, 1).contiguous()).item()
                     else:
-                        pred_coords = get_differentiable_coords(point_input[:, :3, :].permute(0, 2, 1).contiguous(), stage2_out, k=args.k_softargmax)
-                        val_hm += criterion(stage2_out, seg.permute(0, 2, 1).contiguous()).item()
+                        stage2_out = model(point_input)
+                        pred_coords = stage2_out if use_direct else get_differentiable_coords(points_for_coords, stage2_out, k=args.k_softargmax)
+                        val_hm += criterion(stage2_out, seg.permute(0, 2, 1).contiguous()).item() if not use_direct else 0.0
 
                     val_mm += F.l1_loss(pred_coords, landmark_normal).item() * avg_m
 
             v_hm, v_mm = val_hm/len(test_loader), val_mm/len(test_loader)
             
+            # 🌟 터미널 상세 로깅 (기존에 누락되었던 부분 완벽 복구)
             print(f" [{stage_name} Ep {epoch+1:03d}] T_Norm: {t_loss_n:.2f} | T_mm: {t_mm:.2f} || V_mm: {v_mm:.2f}")
-            print(f"  ├─ [S2_DeepPA] HM: {t_hm_raw:.4f} | Crd: {t_crd_raw:.4f} | Srf(Unified): {t_srf_raw:.4f} | Str: {t_str_raw:.4f}")
-            if model_name_lower == 'deeppa_e2e':
-                print(f"  └─ [S1_PAConv] HM: {s1_raw_hm/num_b:.4f} | Crd: {s1_raw_crd/num_b:.4f} | Srf(Unified): {s1_raw_srf/num_b:.4f} | Str: {s1_raw_str/num_b:.4f}")
+            if not is_teacher_train:
+                print(f"  ├─ [S2_DeepPA] HM: {t_hm_raw:.4f} | Crd: {t_crd_raw:.4f} | Srf(Unified): {t_srf_raw:.4f} | Str: {t_str_raw:.4f}")
+            if model_name_lower == 'deeppa_e2e' or is_teacher_train:
+                prefix = "└─" if not is_teacher_train else "├─"
+                print(f"  {prefix} [S1_PAConv] HM: {s1_raw_hm/num_b:.4f} | Crd: {s1_raw_crd/num_b:.4f} | Srf(Unified): {s1_raw_srf/num_b:.4f} | Str: {s1_raw_str/num_b:.4f}")
 
             # 🌟 Patience Checker
             if is_warmup:
@@ -380,6 +451,7 @@ def train(args):
                     print(f" 🚀 다음 에폭(Ep {epoch+2})부터 기하학 로스(RLW)를 전면 개방합니다.")
                     print(f"{'='*60}\n")
 
+            # 🌟 상세 엑셀 저장
             log_records.append({
                 'Epoch': epoch + 1, 'Phase': current_phase_str,
                 'Total_Loss_Norm': t_loss_n, 'Total_Loss_Raw_Phys': t_loss_r,
@@ -390,25 +462,21 @@ def train(args):
                 'Train_mm': t_mm, 'Val_mm': v_mm
             })
             
-            # 🌟 방어적 코딩 적용 완료: IndexError 및 NameError 원천 차단
             with pd.ExcelWriter(excel_log_path, engine='openpyxl') as writer:
-                # 무조건 Training Log를 먼저 써서 시트가 1개 이상 존재하게 만듦
                 df_log = pd.DataFrame(log_records)
                 df_log.to_excel(writer, sheet_name='2_Training_Log', index=False)
-                
-                # 캘리브레이션 표는 안전하게 검사 후 저장
                 if df_calib is not None: 
                     df_calib.to_excel(writer, sheet_name='1_Calibration', index=False)
 
             scheduler.step()
 
         # =========================================================================
-        # 모든 에폭이 완전히 끝난 직후, 마지막 에폭 모델 딱 한 번만 저장
-        # =========================================================================
         print(f"\n💾 [Model Save] 모든 학습 완료! 마지막 에폭({current_epochs}) 모델을 저장합니다.")
         if model_name_lower == 'deeppa_e2e':
             torch.save(model.stage1_paconv.state_dict(), os.path.join(paths['models'], 'Stage1_PAConv_last.t7'))
             torch.save(model.stage2_deeppa.state_dict(), os.path.join(paths['models'], 'Stage2_DeepPA_last.t7'))
+        elif is_teacher_train:
+            torch.save(model.state_dict(), os.path.join(paths['models'], 'Single_PAConv_last.t7'))
         else:
             last_save_path = os.path.join(paths['models'], f'{stage_name}_last.t7')
             torch.save(model.state_dict(), last_save_path)
@@ -416,13 +484,12 @@ def train(args):
         return model 
 
     print(f"\n=== [Phase 3] Start Auto End-to-End Pipeline ===")
-    
     if args.model.lower() == 'deeppa_auto':
-        mode_str = "Direct Regression" if use_direct else "Heatmap Cascade"
-        print(f">>> [AUTO MODE] 🔥 동적 선학습(Warm-up) 기반 {mode_str} 훈련 가동")
+        mode_str = "Frozen PAConv + Direct S2" if is_frozen_paconv else ("Direct Regression" if use_direct else "Heatmap Cascade")
+        print(f">>> [AUTO MODE] 🔥 {mode_str} 훈련 가동")
         execute_stage('deeppa_e2e', args.epochs, disable_norm=not args.use_loss_norm, stage_name=f"E2E_Joint")
     else:
-        execute_stage(args.model, args.epochs, disable_norm=(args.model in ['PAConv', 'PAConv_heat']), stage_name=f"Single_{args.model}")
+        execute_stage(args.model, args.epochs, disable_norm=not args.use_loss_norm, stage_name=f"Single_{args.model}")
         
     print(f"\n=== Training Finished. Results at: {paths['root']} ===")
 
