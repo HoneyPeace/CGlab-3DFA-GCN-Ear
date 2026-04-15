@@ -196,7 +196,7 @@ def train(args):
                 "Srf_Curv": [single_batch_losses['curv'], avg_losses['curv'], "-"],
                 "Srf_Dir": [single_batch_losses['dir'], avg_losses['dir'], "-"]
             })
-            print(f"✅ 정규화 완료 (Multiplier: HM={auto_scales['heatmap']:.2f}, Crd={auto_scales['coord']:.2f}, Srf={auto_scales['surface']:.2f})")
+            print(f"✅ 정규화 완료 (Multiplier: HM={auto_scales['heatmap']:.2f}, Crd={auto_scales['coord']:.2f}, Srf={auto_scales['surface']:.2f}, Str={auto_scales['struct']:.2f})")
             torch.cuda.empty_cache()
 
         # =========================================================================
