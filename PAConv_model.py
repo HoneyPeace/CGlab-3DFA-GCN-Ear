@@ -7,11 +7,19 @@ from PAConv.cuda_lib.functional import assign_score_withk as assemble_dgcnn
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 '''
-[Module: PAConv (Position Adaptive Convolution) Backbone]
-- 역할: 3D Point Cloud 데이터를 입력받아 각 점이 특정 랜드마크일 확률(Heatmap)을 계산하는 핵심 딥러닝 모델.
-- 핵심 논리: 기존 CNN처럼 고정된 커널(가중치)을 쓰지 않고, 
-           ScoreNet을 통해 '점과 점 사이의 기하학적 위치 관계'를 분석하여 
-           여러 개의 가중치 행렬(Weight Banks)을 동적으로 조합해 사용하는 최신 3D 합성곱 기법입니다.
+================================================================================
+[NotebookLM을 위한 학술적 의도 및 모듈 요약]
+- 모듈명: PAConv (Position Adaptive Convolution) Feature Extractor
+- 논문 내 역할: DeepPA(2단계) 아키텍처의 전반부(Stage 1)를 담당하며, 
+              점과 점 사이의 기하학적 위치 관계를 동적으로 학습하여 
+              전역적인(Global) 맥락을 파악하는 최전방 탐색기(Vanguard)입니다.
+- 핵심 구조 변화 (Heatmap -> Latent Feature):
+  기존에는 최종 레이어에서 랜드마크의 '확률(Heatmap)'을 내뱉었으나, 
+  이는 정보의 병목(Information Bottleneck)과 공간 해상도 손실을 유발했습니다.
+  개선된 본 구조에서는 64차원의 순수 고차원 특징(Raw Latent Feature)을 출력하며, 
+  이를 통해 다음 스테이지(DeepPA)가 랜드마크의 위치뿐만 아니라 주변의 곡률, 
+  질감, 방향성 등의 풍부한 기하학적 단서(Geometric Clues)를 손실 없이 건네받도록 설계되었습니다.
+================================================================================
 '''
 class PAConv(nn.Module):
     def __init__(self, args, landmark_num):
@@ -23,7 +31,7 @@ class PAConv(nn.Module):
         self.hidden = args.hidden
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices # Weight Banks(가중치 행렬)의 개수
         
-        # 🌟 [채널 동기화 핵심 로직]
+        #  [채널 동기화 핵심 로직]
         # util.py에서 만든 7채널(XYZ 3 + 주방향 3 + 곡률 1) 데이터가 여기서 처리됩니다.
         # 중심점(7)과 이웃점과의 차이(7)를 이어붙여(Concat) 총 14차원의 Edge Feature(간선 특징)를 만듭니다.
         in_channels = getattr(args, 'in_channels', 3)
@@ -91,8 +99,17 @@ class PAConv(nn.Module):
         self.dp2 = nn.Dropout(p=args.dropout)
         self.conv8 = nn.Sequential(nn.Conv1d(256, 128, kernel_size=1, bias=False),
                                    self.bn8)
-        # 최종 히트맵 차원(landmark_num)으로 매핑하는 Projection 레이어
-        self.conv9 = nn.Conv1d(128, landmark_num, kernel_size=1, bias=True)
+                                   
+        #  [핵심 변경 사항: 히트맵 출력기 폐기 및 라텐트 피처 생성기 부착] 
+        # 기존: self.conv9 = nn.Conv1d(128, landmark_num, kernel_size=1, bias=True)
+        # 변경: 128채널 정보를 64채널의 '라텐트 피처'로 정제하여 출력합니다.
+        # 이는 Stage 2(DeepPA)의 초기 수용 차원(64채널)과 구조적 대칭성(Structural Symmetry)을 
+        # 이루기 위한 매우 의도적인 차원 동기화 설계입니다.
+        self.conv9 = nn.Sequential(
+            nn.Conv1d(128, 64, kernel_size=1, bias=False),
+            nn.BatchNorm1d(64, momentum=0.1),
+            nn.ReLU(inplace=True)
+        )
 
         
     def forward(self, x):
@@ -100,7 +117,7 @@ class PAConv(nn.Module):
         
         # ---------------------------------------------------------------------
         # [Step 1: 3D 물리적 공간 기반 이웃 탐색 (K-NN)]
-        # 🌟 핵심: 채널이 7개(기하특징 포함)이더라도, 이웃을 찾을 때는 물리적 거리인 앞의 3채널(XYZ)만 사용합니다.
+        #  핵심: 채널이 7개(기하특징 포함)이더라도, 이웃을 찾을 때는 물리적 거리인 앞의 3채널(XYZ)만 사용합니다.
         # 이렇게 해야 기하학적 형태가 꼬이지 않고 정확한 로컬 패치(Local Patch)가 형성됩니다.
         # ---------------------------------------------------------------------
         physical_xyz = x[:, :3, :].contiguous()
@@ -158,7 +175,7 @@ class PAConv(nn.Module):
         x_concat = torch.cat((xx, cls), dim=1)
         
         # ---------------------------------------------------------------------
-        # [Step 5: Heatmap 출력 (Regression Point)]
+        # [Step 5: Latent Feature 출력 (Feature Extraction Point)]
         # ---------------------------------------------------------------------
         x_res = F.relu(self.conv6(x_concat))
         x_res = self.dp1(x_res)
@@ -166,12 +183,11 @@ class PAConv(nn.Module):
         x_res = self.dp2(x_res)
         x_res = F.relu(self.conv8(x_res))
         
-        # 최종 채널 수를 랜드마크 개수(landmark_num)로 맞춤
+        # [핵심 변경 사항: 순수 기하학 특징 방출]
+        # 1. 64채널 피처맵 통과 (Stage 2에 전달할 순수한 특징의 덩어리)
         x_res = self.conv9(x_res) 
         
-        # 🌟 핵심: Softmax를 채널(랜드마크) 방향이 아닌, 점(Point, dim=1) 방향으로 적용
-        # 이유: "이 점이 무슨 랜드마크인가?"(Classification)를 찾는 것이 아니라,
-        # "1번 랜드마크가 이 N개의 점들 중 어디에 있을 확률이 높은가?"(Heatmap Regression)를 찾는 것이기 때문임.
-        x_res = F.softmax(x_res, dim=1)  
+        # 2. [삭제] 확률로 바꾸는 Softmax는 정보 손실의 주범이므로 제거합니다! 
+        # 이제 모델은 확률 분포(0~1)가 아닌 무한한 가능성을 가진 기하학 특징 텐서를 내뿜습니다.
         
-        return x_res
+        return x_res # 형태: (B, 64, N)

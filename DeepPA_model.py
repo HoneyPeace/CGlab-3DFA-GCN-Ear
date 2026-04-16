@@ -6,6 +6,9 @@ from deeppa_semseg import DeepPA_semseg
 import sys
 from pathlib import Path
 
+# ==============================================================================
+# 🌟 [NotebookLM 경로 설정 및 최적화]
+# ==============================================================================
 current_dir = Path(__file__).resolve().parent
 sys.path.append(str(current_dir / "utils" / "pointnet2_ops_lib"))
 
@@ -48,16 +51,18 @@ def farthest_point_sample(xyz, npoint):
 class DirectRegressionHead(nn.Module):
     """
     [NotebookLM을 위한 모듈 요약]
-    이 모듈은 기존의 '히트맵 기반 Soft-argmax' 방식을 완전히 대체하기 위해 탄생한 "직접 좌표 회귀 헤드"입니다.
-    
-    - 입력: 백본(DeepPA_semseg)이 뱉어낸 조밀한 피처 (B, Landmark_Num, N) + 원본 3D 좌표 (B, 3, N)
-    - 과정: 점마다 부여된 특징과 공간 좌표를 결합한 뒤, PointNet 스타일의 1D-Conv와 Global Max Pooling을 
-           거쳐 공간의 모든 정보를 하나의 글로벌 벡터(1024차원)로 압축합니다.
-    - 출력: 거대한 MLP 네트워크를 통과하여 최종적으로 깔끔한 [Batch, Landmark_Num, 3] 형태의 (X, Y, Z) 좌표를 뱉어냅니다.
+    - 모듈명: Direct Regression Head (256ch 원본 직결형)
+    - 논문 내 역할: 히트맵 기반의 격자 해상도 한계를 극복하기 위한 '해상도 독립적(Resolution-free)' 회귀 엔진입니다.
+    - 핵심 구조: 
+      백본(DeepPA_semseg)이 120층을 거쳐 복구한 256차원의 기하학적 라텐트 피처를 압축 없이 그대로 수용합니다.
+      여기에 실제 3D 물리 좌표(XYZ)를 연결(Concat)하여 공간 감각을 극대화한 뒤, 
+      PointNet 스타일의 1D-Conv와 Global Max Pooling을 거쳐 공간의 모든 정보를 
+      하나의 글로벌 벡터(1024차원)로 압축합니다.
+    - 출력: 거대한 MLP를 통과하여 [Batch, Landmark_Num, 3] 형태의 3D 물리 좌표를 다이렉트로 방출합니다.
     """
     def __init__(self, in_channels, landmark_num):
         super(DirectRegressionHead, self).__init__()
-        # 특징 압축 (Feature Extraction)
+        # 특징 압축 및 확장 (259 -> 1024차원)
         self.conv1 = nn.Conv1d(in_channels, 256, 1)
         self.bn1 = nn.BatchNorm1d(256)
         self.conv2 = nn.Conv1d(256, 512, 1)
@@ -82,22 +87,22 @@ class DirectRegressionHead(nn.Module):
         )
 
     def forward(self, features, xyz):
-        # features: (B, 36, N) | xyz: (B, 3, N)
-        # 1. 랜드마크별 특징과 실제 3D 물리 공간의 좌표를 결합하여 위치 감각 부여
-        x = torch.cat([features, xyz], dim=1) # (B, 39, N)
+        # features: (B, 256, N) | xyz: (B, 3, N)
+        # 1. 256차원 특징과 실제 3D 물리 공간의 좌표를 결합하여 위치 감각 부여
+        x = torch.cat([features, xyz], dim=1) # (B, 259, N)
         
-        # 2. 1D Convolution 수행
+        # 2. 고차원 사영 수행
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
         
-        # 3. Global Max Pooling: N개의 점들 중 가장 강한 특징만 뽑아서 전체 3D 형태를 1차원 벡터로 요약
+        # 3. Global Max Pooling: 3D 형태를 1차원 글로벌 맥락으로 요약
         x = torch.max(x, 2, keepdim=False)[0] # (B, 1024)
         
-        # 4. 다층 퍼셉트론(MLP)을 거쳐 3D 좌표 맵핑
+        # 4. 3D 좌표 회귀
         coords = self.mlp(x) # (B, 108)
         
-        # 5. [B, 36, 3] 형태로 예쁘게 잘라서 반환
+        # 5. [B, 36, 3] 형태로 반환
         return coords.view(-1, coords.size(1) // 3, 3)
 
 
@@ -115,6 +120,7 @@ class DeepPA_Wrapper(nn.Module):
         
         dl_args.bn_momentum = 0.1
         dl_args.act = nn.GELU     
+        # 백본의 출력 차원을 256으로 명시
         dl_args.head_dim = 256    
         dl_args.mlp_ratio = 1.0               
         dl_args.depths = [20, 20, 60, 20] 
@@ -142,19 +148,23 @@ class DeepPA_Wrapper(nn.Module):
         self.k = dl_args.ks[0]
         self.stage_count = len(dl_args.depths)
         
-        # 1. 뼈대(Backbone) 네트워크 생성
+        # 1. 뼈대(Backbone) 네트워크 생성 (DeepPA_semseg)
         self.model = DeepPA_semseg(dl_args)
         
         # ---------------------------------------------------------------------
-        # 🌟 [신규 추가] Direct Regression 활성화 확인 및 헤드 부착
+        # 🌟 [핵심] 다이렉트 좌표 회귀 모델 강제 세팅 및 보조 로스 헤드 부착
         # ---------------------------------------------------------------------
-        # My_args.py에서 스위치가 켜져 있으면, 직접 회귀 헤드를 모델 끝에 붙입니다.
-        self.use_direct_regression = getattr(args, 'use_direct_regression', False)
-        if self.use_direct_regression:
-            print(">>> [INFO] 🚀 Direct Regression Head 활성화: 모델이 3D 좌표를 직접 출력합니다!")
-            # 입력 차원: 백본 출력(클래스 수) + 원본 3D 좌표(3차원)
-            in_channels_head = dl_args.num_classes + 3
-            self.regression_head = DirectRegressionHead(in_channels=in_channels_head, landmark_num=dl_args.num_classes)
+        print(">>> [INFO] 🚀 모델 아키텍처: 256ch Raw Latent Direct Regression (히트맵 우회 모드)")
+        
+        # 입력 차원: 백본 출력(256차원) + 원본 3D 좌표(3차원)
+        in_channels_head = dl_args.head_dim + 3
+        
+        # 메인 회귀 경로
+        self.regression_head = DirectRegressionHead(in_channels=in_channels_head, landmark_num=dl_args.num_classes)
+        
+        # 학습용 보조 닻(Auxiliary Anchor) 경로
+        # 256채널 라텐트가 공간적 위치 감각을 잃지 않도록 감독하는 역할입니다.
+        self.aux_heatmap_head = nn.Conv1d(dl_args.head_dim, dl_args.num_classes, 1)
 
     def forward(self, x, prior_heatmap=None):
         B, C, N = x.shape
@@ -208,22 +218,24 @@ class DeepPA_Wrapper(nn.Module):
         indices = up_idx_list + down_knn_list
         
         # ---------------------------------------------------------------------
-        # 🌟 모델 포워딩 및 분기 처리 (Branching)
+        # 🌟 모델 포워딩 및 Latent Direct Regression
         # ---------------------------------------------------------------------
-        # 백본 통과 (출력: B, N, 36)
+        # 백본 통과 (출력은 더 이상 36이 아닌, 256차원 고차원 텐서입니다)
         out = self.model(xyz, feature, indices, prior_heatmap=prior_heatmap)
         if isinstance(out, tuple):
             out = out[0]
             
-        # (B, 36, N) 형태로 변환 (채널을 중간으로)
+        # 형태 변환: (B, 256, N)
         dense_features = out.permute(0, 2, 1).contiguous()
         
-        # [분기 1] Direct Regression 스위치가 켜진 경우 -> 헤드 통과 후 (B, 36, 3) 좌표 반환
-        if self.use_direct_regression:
-            xyz_input = xyz.permute(0, 2, 1).contiguous() # (B, 3, N)
-            pred_coords = self.regression_head(dense_features, xyz_input)
-            return pred_coords
-            
-        # [분기 2] 옛날 방식(Ablation)인 경우 -> 기존처럼 (B, 36, N) 히트맵 반환
-        else:
-            return dense_features
+        # 물리 좌표 정렬: (B, 3, N)
+        xyz_input = xyz.permute(0, 2, 1).contiguous() 
+        
+        # [메인 출력] 다이렉트 헤드를 통과하여 서브 밀리미터 단위 좌표 산출
+        pred_coords = self.regression_head(dense_features, xyz_input)
+        
+        # [보조 출력] 학습 시, 라텐트 피처의 위치 정렬을 돕기 위해 보조 히트맵 산출
+        aux_heatmap = self.aux_heatmap_head(dense_features)
+        
+        # 항상 (좌표, 보조 히트맵)의 튜플 형태로 일관성 있게 반환합니다.
+        return pred_coords, aux_heatmap

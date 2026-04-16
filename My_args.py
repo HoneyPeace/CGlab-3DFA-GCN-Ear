@@ -126,9 +126,17 @@ parser.add_argument('--focal_max', type=float, default=10.0, help='Max clamp for
 parser.add_argument('--use_loss_norm', type=str2bool, default=True, help='Use Initial Loss Normalization')
 parser.add_argument('--target_norm', type=float, default=1.0, help='Target scale for Loss Normalization')
 
-# 동적 히트맵 선학습(Warm-up) 설정
+# =============================================================================
+# [8] 🌟 Ablation Study 및 구조 제어 스위치 (Architecture & Loss Control)
+# =============================================================================
+# 1. 동적 히트맵 선학습(Warm-up) 설정
 parser.add_argument('--use_warmup', type=str2bool, default=False, help='히트맵 로스 정체 기반 자동 선학습 켜기/끄기')
 parser.add_argument('--warmup_patience', type=int, default=10, help='몇 에폭 동안 히트맵 로스가 안 떨어지면 RLW로 넘어갈지 결정')
 
-#DeepPA가 히트맵 대신 (X,Y,Z) 좌표를 직접 뱉도록 하는 플래그
+# 2. 다이렉트 좌표 회귀 활성화 플래그 (DeepPA가 히트맵 대신 X,Y,Z를 직접 뱉도록 함)
 parser.add_argument('--use_direct_regression', type=str2bool, default=True, help='DeepPA outputs (X,Y,Z) directly instead of heatmap')
+
+# 3. [논문 방어용 Ablation] RLW 분기 제어 스위치
+# - False (추천/기본값): 닻(Anchor) 모드. 히트맵을 1.0 가중치로 고정하고 기하학 3-Loss만 RLW로 경쟁시킵니다. (계층적 최적화)
+# - True : 전면 랜덤 모드. 히트맵마저 RLW에 포함시켜 모든 4-Loss가 완전히 자율적으로 조율되게 합니다.
+parser.add_argument('--use_rlw_for_heatmap', type=str2bool, default=False, help='히트맵 로스를 RLW 풀에 포함시킬지 여부 (False 시 1.0 고정 닻으로 작동)')
