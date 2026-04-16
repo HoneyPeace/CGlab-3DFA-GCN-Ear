@@ -39,6 +39,9 @@ cd C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN
 
 python train.py --train_dataset_name train --test_dataset_name test --sigma 2.5 --num_points 4096 --batch_size 16 --accumulation_steps 2 --dataset_seed 1 --sample_way FPS --need_resample False --k_softargmax 10 --plane_knn 5 --exp_name Ear_3loss --user_tag "argmax10_plane5" 
 python train.py --train_dataset_name train --test_dataset_name test --sigma 2.5 --num_points 4096 --batch_size 16 --accumulation_steps 2 --dataset_seed 1 --epochs 250 --sample_way FPS --need_resample True --k_softargmax 10 --plane_knn 5 --exp_name DeepLA_test --user_tag "정렬_Focal2.0_epoch250"
+
+정규화실험
+python run_heat_RLW.py --train_dataset_name train --test_dataset_name test --sigma 2.5 --num_points 8192 --batch_size 8 --accumulation_steps 4 --dataset_seed 1 --epochs 500 --sample_way FPS --need_resample False --k_softargmax 10 --plane_knn 5 --exp_name Ablation_NoNorm --landmark_num 36 --in_channels 7 --use_direct_regression True
 ```
 
 ---
