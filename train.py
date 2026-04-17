@@ -1,6 +1,6 @@
 # @Author: Yuan Wang (Modified by Researcher)
 # @File: train.py
-# @Description: Unified Hybrid Pipeline (Stage1 / Frozen / E2E 완벽 지원)
+# @Description: Unified Hybrid Pipeline (Stage1 / Frozen / E2E 완벽 지원) + 차원 자동 보간
 # ==============================================================================
 
 import os
@@ -65,10 +65,7 @@ def process_data_storage(dataset, prefix, paths):
 
 """
 ================================================================================
-🌟 [핵심 수리 완료] Unified Hybrid Pipeline
-- Stage1 모드: PAConv + Aux Head만 학습 (히트맵 생성기 훈련용)
-- Frozen 모드: PAConv 잠금 + DeepPA 회귀 훈련
-- E2E 모드: 전체 동시 학습
+🌟 Unified Hybrid Pipeline
 ================================================================================
 """
 class HybridPipeline(nn.Module):
@@ -82,13 +79,11 @@ class HybridPipeline(nn.Module):
             for param in self.stage1_paconv.parameters(): param.requires_grad = False
             for param in self.s1_aux_head.parameters(): param.requires_grad = False
                 
-        # Stage 1이 아닐 때만 DeepPA 부착
         if self.mode in ['frozen', 'e2e']:
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
 
     def forward(self, x):
         if self.mode == 'stage1':
-            # 🌟 [Stage 1 모드]: 오직 PAConv만 작동. DeepPA는 거치지 않음.
             s1_latent = self.stage1_paconv(x)
             s1_hm = self.s1_aux_head(s1_latent)
             dummy_coords = torch.zeros((x.shape[0], self.s1_aux_head.out_channels, 3), device=x.device)
@@ -140,16 +135,14 @@ def train(args):
     def execute_stage(current_model_name, current_epochs, disable_norm=False, stage_name=""):
         model_name_lower = current_model_name.lower()
         
-        # 🌟 모델 모드 매핑
         if model_name_lower == 'paconv': pipeline_mode = 'stage1'
         elif model_name_lower in ['deeppa_frozen', 'deeppa_auto']: pipeline_mode = 'frozen'
         elif model_name_lower == 'deeppa_e2e': pipeline_mode = 'e2e'
-        else: pipeline_mode = 'single_custom' # 예외 처리
+        else: pipeline_mode = 'single_custom' 
             
         if pipeline_mode in ['stage1', 'frozen', 'e2e']: 
             model = HybridPipeline(args, args.landmark_num, mode=pipeline_mode).to(device)
             
-            # Frozen이나 E2E일 때 사전학습 가중치 로드
             if pipeline_mode in ['frozen', 'e2e']:
                 paconv_path = os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
                 if os.path.exists(paconv_path):
@@ -179,7 +172,6 @@ def train(args):
             train_loss_norm = 0.0; t_hm_aux, t_crd, t_srf, t_str = 0.0, 0.0, 0.0, 0.0; train_mm = 0.0
             opt.zero_grad() 
             
-            # 🌟 [안전장치]: Stage 1(PAConv)일 경우 강제로 HDS 로스 가중치 차단
             if not getattr(args, 'use_direct_regression', True):
                 w_sem, w_spa, w_pred = 1.0, 0.0, 0.0
                 current_phase_str = f"STAGE1 Heatmap Only"
@@ -204,9 +196,16 @@ def train(args):
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     target_hm = seg.permute(0, 2, 1).contiguous()
                     
-                    # 1. Forward Pass
+                    # ---------------------------------------------------------
+                    # 1. Forward Pass & PAConv 히트맵 안전 확보
+                    # ---------------------------------------------------------
                     if pipeline_mode in ['stage1', 'frozen', 'e2e']:
-                        pred_coords, spa_loss, sem_list, _ = model(point_input)
+                        pred_coords, spa_loss, sem_list, s1_hm = model(point_input)
+                        
+                        # 🌟 [핵심 수정 1]: PAConv가 만든 핵심 히트맵(s1_hm)이 E2E 학습에서 누락되지 않도록 명시적 추가
+                        sem_list = list(sem_list)
+                        if s1_hm is not None:
+                            sem_list.append(s1_hm)
                     else:
                         out = model(point_input)
                         pred_coords, spa_loss, sem_list = out[0], torch.tensor(0.0).to(device), []
@@ -214,14 +213,24 @@ def train(args):
                     # 2. 로스 계산 (HDS 모의고사)
                     L_spa = spa_loss if isinstance(spa_loss, torch.Tensor) else torch.tensor(0.0).to(device)
                     
-                    # 🌟 [에러 해결]: 어떠한 차원이 와도 target_hm과 맞도록 자동 형변환 (방어 코드)
+                    # ---------------------------------------------------------
+                    # 🌟 [핵심 수정 2]: 2048해상도 보조 히트맵을 8192로 자동 보간(Interpolate)
+                    # ---------------------------------------------------------
                     safe_sem_list = []
                     for sp in sem_list:
-                        if sp.shape[1] != target_hm.shape[1]: sp = sp.permute(0, 2, 1).contiguous()
+                        if sp is None: continue
+                        if sp.shape[1] != target_hm.shape[1]: 
+                            sp = sp.permute(0, 2, 1).contiguous()
+                        
+                        # 점의 개수(N)가 다르면 Nearest Neighbor 방식으로 강제 펌핑!
+                        if sp.shape[2] != target_hm.shape[2]:
+                            sp = F.interpolate(sp, size=target_hm.shape[2], mode='nearest')
+                            
                         safe_sem_list.append(sp)
+                        
                     L_sem = sum([hm_criterion(sp, target_hm) for sp in safe_sem_list]) / len(safe_sem_list) if len(safe_sem_list) > 0 else torch.tensor(0.0).to(device)
                         
-                    # 최종 회귀 로스 계산 (Stage 1일때는 계산 무시됨)
+                    # 최종 회귀 로스 계산 
                     loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                     loss_surface, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
                     loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
@@ -303,8 +312,6 @@ def train(args):
 
         print(f"\n💾 [Model Save] 학습 완료! 모델을 저장합니다.")
         last_save_path = os.path.join(paths['models'], f'{stage_name}_last.t7')
-        
-        # 🌟 모두 동일한 방식으로 저장하여 호환성 100% 보장
         torch.save(model.state_dict(), last_save_path)
             
         return model 

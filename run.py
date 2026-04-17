@@ -80,7 +80,7 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     # 3. 평가 (eval_all.py) 실행
     # ---------------------------------------------------------
-    eval_cmd = [sys.executable, "eval_all.py"] + user_args + ["--run_id", run_id]
+    eval_cmd = [sys.executable, "eval.py"] + user_args + ["--run_id", run_id]
     
     # 추출한 train_len을 강제로 주입하여 폴더 탐색 실패 원천 차단
     if train_len and "--train_len" not in user_args:
