@@ -232,4 +232,4 @@ class DeepPA_Wrapper(nn.Module):
         # 2. [최종단 결합] 다이렉트 헤드를 통과하여 좌표 산출
         pred_coords = self.regression_head(dense_features, xyz_input, prior_heatmap)
         
-        return pred_coords, spa_loss, sem_list
+        return pred_coords, spa_loss, sem_list, indices
