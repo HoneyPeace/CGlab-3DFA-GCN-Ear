@@ -1,7 +1,7 @@
 '''
-@Author: Yuan Wang (Modified by Researcher & AI Assistant)
-@File: eval_all.py
-@Description: Direct Regression 맞춤형 평가 스크립트 + 🌟 Excel Export
+@Author: Yuan Wang (Modified by Researcher)
+@File: eval.py
+@Description: Frozen Hybrid (DeepPA + PAConv) 다이렉트 회귀 맞춤형 평가 스크립트
 '''
 
 from __future__ import print_function, division
@@ -26,7 +26,7 @@ from My_args import parser
 from DeepPA_model import DeepPA_Wrapper  
 from PAConv_model import PAConv          
 
-# 🌟 Soft-argmax 로드 (이제 예측 좌표를 뽑을 땐 안 쓰지만, 보조 닻(Anchor)의 정밀도 평가용으로만 씁니다)
+# Soft-argmax는 제거되었지만 다른 loss 함수에서 import 구조 유지용
 from loss import get_differentiable_coords
 
 matplotlib.use('Agg')
@@ -86,26 +86,33 @@ except FileNotFoundError:
 
 test_dataset = TensorDataset(
     torch.tensor(shape_sample, dtype=torch.float32),
-    torch.tensor(landmark_all, dtype=torch.float32), # GT는 원본 mm 스케일
+    torch.tensor(landmark_all, dtype=torch.float32), 
     torch.tensor(heatmap_sample, dtype=torch.float32)
 )
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # -----------------------------------------------------------------------------
-# 2. Joint 모델 래퍼 정의 (train.py와 동일하게 통일)
+# 2. 🌟 평가용 Frozen Hybrid Model 래퍼
 # -----------------------------------------------------------------------------
-class JointE2EModel(nn.Module):
+class FrozenHybridModel_Eval(nn.Module):
     def __init__(self, args, landmark_num):
         super().__init__()
         self.stage1_paconv = PAConv(args, landmark_num)
+        # 🌟 PAConv 라텐트는 128채널입니다. (기존 64에서 수정됨)
+        self.s1_aux_head = nn.Conv1d(128, landmark_num, 1)
         self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
-        self.s1_aux_head = nn.Conv1d(64, landmark_num, 1)
 
     def forward(self, x):
+        # 1. PAConv에서 라텐트(128ch)와 히트맵(36ch) 추출
         s1_latent = self.stage1_paconv(x)
-        pred_coords, s2_aux_hm = self.stage2_deeppa(x, prior_heatmap=s1_latent)
-        s1_aux_hm = self.s1_aux_head(s1_latent)
-        return pred_coords, s2_aux_hm, s1_aux_hm
+        s1_hm = self.s1_aux_head(s1_latent)
+        
+        # 2. DeepPA에 명시적으로 분리하여 주입 (결과: 좌표, spa_loss, sem_list)
+        out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
+        pred_coords = out[0] # 첫 번째 반환값이 예측 좌표
+        
+        # 평가 스크립트에서는 최종 좌표와 닻(Anchor) 히트맵만 반환합니다.
+        return pred_coords, s1_hm
 
 # -----------------------------------------------------------------------------
 # 3. 평가 수행 코어 함수
@@ -121,7 +128,7 @@ def evaluate_target_model(eval_name, eval_model):
     os.makedirs(current_asc_dir, exist_ok=True)
 
     me_list, per_landmark_me_list = [], []
-    cos_sim_list, iou_list, time_list = [], [], []
+    cos_sim_list, iou_list, time_list = [], []
     per_landmark_cos_sim_list, per_landmark_iou_list = [], []
 
     eval_model.eval()
@@ -145,24 +152,23 @@ def evaluate_target_model(eval_name, eval_model):
         
         with torch.no_grad():
             if device.type == 'cuda': torch.cuda.synchronize()
-            start_time = time.time()  # 🌟 모델 투입 직전 타이머 시작!
+            start_time = time.time()  
 
             point_input = point_norm.permute(0, 2, 1).contiguous()
             
-            # 1. 모델에서 결과 3개를 받습니다. (S2 히트맵은 None일 수 있음)
-            pred_coords_norm, s2_aux_hm, s1_aux_hm = eval_model(point_input)
+            # 🌟 [수정] 모델에서 결과 2개(좌표, 닻 히트맵)를 받습니다.
+            pred_coords_norm, s1_aux_hm = eval_model(point_input)
             
             if device.type == 'cuda': torch.cuda.synchronize()
-            time_list.append(time.time() - start_time)  # 🌟 연산 종료 직후 타이머 스톱!
+            time_list.append(time.time() - start_time)  
             
-            # 2. 🌟 [핵심 수정] 평가용 히트맵 타겟 결정 
-            # Stage 2에 히트맵이 없으면(None), Stage 1의 히트맵으로 위치 정확도를 평가합니다.
-            eval_target_hm = s1_aux_hm if s2_aux_hm is None else s2_aux_hm
+            # 🌟 S2 히트맵이 제거되었으므로 닻(Anchor)을 시각화/IoU 평가 타겟으로 씁니다.
+            eval_target_hm = s1_aux_hm
 
-            # 3. mm 단위 좌표 복구 (Direct Regression의 결과물)
+            # mm 단위 좌표 복구
             pred_landmark = (pred_coords_norm * scale) + centroid
 
-            # 4. 히트맵 지표 계산 (이제 eval_target_hm을 사용합니다)
+            # 히트맵 지표 계산
             pred_heatmap = eval_target_hm.permute(0, 2, 1) 
             pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
             cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
@@ -261,15 +267,33 @@ def evaluate_target_model(eval_name, eval_model):
 # 4. 모델 로드 및 평가 분기
 # -----------------------------------------------------------------------------
 if args.model.lower() == 'deeppa_auto':
-    print(">>> [INFO] 🚀 Direct Regression Evaluation Mode")
-    model = JointE2EModel(args, args.landmark_num).to(device)
+    print(">>> [INFO] 🚀 Direct Regression Evaluation Mode (Frozen Hybrid)")
+    model = FrozenHybridModel_Eval(args, args.landmark_num).to(device)
     
-    # 두 가중치를 로드하여 Joint 모델 완성
-    stage1_path = os.path.join(run_root, 'models', 'Stage1_PAConv_last.t7')
-    stage2_path = os.path.join(run_root, 'models', 'Stage2_DeepPA_last.t7')
+    # 🌟 [수정] 유연한 모델 가중치 로드
+    # 1. PAConv 가중치 로드 (사전 학습된 모델 우선, 없으면 현재 run_root)
+    paconv_pretrained_path = os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
+    stage1_path_old = os.path.join(run_root, 'models', 'Stage1_PAConv_last.t7')
     
-    model.stage1_paconv.load_state_dict(torch.load(stage1_path, map_location=device))
-    model.stage2_deeppa.load_state_dict(torch.load(stage2_path, map_location=device))
+    if os.path.exists(paconv_pretrained_path):
+        print("📦 Pretrained PAConv 가중치를 로드합니다.")
+        model.stage1_paconv.load_state_dict(torch.load(paconv_pretrained_path, map_location=device))
+    elif os.path.exists(stage1_path_old):
+        print("📦 로컬 Run의 PAConv 가중치를 로드합니다.")
+        model.stage1_paconv.load_state_dict(torch.load(stage1_path_old, map_location=device))
+    else:
+        print("⚠️ [Warning] PAConv 가중치를 찾을 수 없습니다.")
+
+    # 2. DeepPA 가중치 로드
+    stage2_path_new = os.path.join(run_root, 'models', 'Frozen_Hybrid_DeepPA_last.t7')
+    stage2_path_old = os.path.join(run_root, 'models', 'Stage2_DeepPA_last.t7')
+    
+    if os.path.exists(stage2_path_new):
+        model.stage2_deeppa.load_state_dict(torch.load(stage2_path_new, map_location=device))
+    elif os.path.exists(stage2_path_old):
+        model.stage2_deeppa.load_state_dict(torch.load(stage2_path_old, map_location=device))
+    else:
+        print("⚠️ [Warning] DeepPA 가중치를 찾을 수 없습니다.")
     
     evaluate_target_model("DeepPA_Direct", model)
 

@@ -46,63 +46,59 @@ def farthest_point_sample(xyz, npoint):
 
 
 # ==============================================================================
-# 🌟 [신규 추가] Direct Regression Head (직접 좌표 회귀 헤드)
+# 🌟 [디펜스 포인트 8, 9] Direct Regression Head (히트맵 앵커 적용판)
 # ==============================================================================
 class DirectRegressionHead(nn.Module):
     """
-    [NotebookLM을 위한 모듈 요약]
-    - 모듈명: Direct Regression Head (256ch 원본 직결형)
-    - 논문 내 역할: 히트맵 기반의 격자 해상도 한계를 극복하기 위한 '해상도 독립적(Resolution-free)' 회귀 엔진입니다.
-    - 핵심 구조: 
-      백본(DeepPA_semseg)이 120층을 거쳐 복구한 256차원의 기하학적 라텐트 피처를 압축 없이 그대로 수용합니다.
-      여기에 실제 3D 물리 좌표(XYZ)를 연결(Concat)하여 공간 감각을 극대화한 뒤, 
-      PointNet 스타일의 1D-Conv와 Global Max Pooling을 거쳐 공간의 모든 정보를 
-      하나의 글로벌 벡터(1024차원)로 압축합니다.
-    - 출력: 거대한 MLP를 통과하여 [Batch, Landmark_Num, 3] 형태의 3D 물리 좌표를 다이렉트로 방출합니다.
+    - 입력: [256ch (백본) + 3ch (XYZ) + 36ch (PAConv 히트맵)] = 총 295ch
+    - 구조: 295ch의 융합된 공간 정보를 1024ch로 넓게 확장(Expansion)하여 
+            전역 맥락(Global Context)을 파악한 뒤, 
+            MLP를 거쳐 (1024 -> 512 -> 256 -> 좌표) 점진적으로 압축합니다.
     """
     def __init__(self, in_channels, landmark_num):
         super(DirectRegressionHead, self).__init__()
-        # 특징 압축 및 확장 (259 -> 1024차원)
-        self.conv1 = nn.Conv1d(in_channels, 256, 1)
-        self.bn1 = nn.BatchNorm1d(256)
-        self.conv2 = nn.Conv1d(256, 512, 1)
-        self.bn2 = nn.BatchNorm1d(512)
-        self.conv3 = nn.Conv1d(512, 1024, 1)
-        self.bn3 = nn.BatchNorm1d(1024)
+        
+        # 1. 공간 특징 점진적 확장 (Point-wise Convolution)
+        self.conv1 = nn.Conv1d(in_channels, 512, 1)
+        self.bn1 = nn.BatchNorm1d(512)
+        self.conv2 = nn.Conv1d(512, 1024, 1)
+        self.bn2 = nn.BatchNorm1d(1024)
 
-        # 글로벌 특징으로부터 3D 좌표 예측 (MLP Regressor)
+        # 2. 글로벌 맥락 압축 회귀 (MLP Regressor)
         self.mlp = nn.Sequential(
             nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Dropout(0.3),
             
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
+            nn.GELU(),
             nn.Dropout(0.3),
             
-            # 최종 출력: 랜드마크 개수(36) * 3(XYZ)
+            # 최종 출력: 랜드마크 개수 * 3(XYZ)
             nn.Linear(256, landmark_num * 3) 
         )
 
-    def forward(self, features, xyz):
-        # features: (B, 256, N) | xyz: (B, 3, N)
-        # 1. 256차원 특징과 실제 3D 물리 공간의 좌표를 결합하여 위치 감각 부여
-        x = torch.cat([features, xyz], dim=1) # (B, 259, N)
+    def forward(self, features, xyz, prior_heatmap):
+        # features: (B, 256, N) | xyz: (B, 3, N) | prior_heatmap: (B, 36, N)
         
-        # 2. 고차원 사영 수행
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
+        # 🌟 히트맵 힌트 결합 (그래디언트 역전파 차단)
+        prior_heatmap = prior_heatmap.detach()
         
-        # 3. Global Max Pooling: 3D 형태를 1차원 글로벌 맥락으로 요약
-        x = torch.max(x, 2, keepdim=False)[0] # (B, 1024)
+        # 295차원(256+3+36)으로 융합
+        x = torch.cat([features, xyz, prior_heatmap], dim=1) 
         
-        # 4. 3D 좌표 회귀
-        coords = self.mlp(x) # (B, 108)
+        # 고차원 1024ch 확장
+        x = F.gelu(self.bn1(self.conv1(x)))
+        x = F.gelu(self.bn2(self.conv2(x)))
         
-        # 5. [B, 36, 3] 형태로 반환
+        # Global Max Pooling: 3D 형태를 1차원 글로벌 맥락으로 요약 -> (B, 1024)
+        x = torch.max(x, 2, keepdim=False)[0] 
+        
+        # 3D 좌표 회귀
+        coords = self.mlp(x) 
+        
         return coords.view(-1, coords.size(1) // 3, 3)
 
 
@@ -152,40 +148,41 @@ class DeepPA_Wrapper(nn.Module):
         self.model = DeepPA_semseg(dl_args)
         
         # ---------------------------------------------------------------------
-        # 🌟 [핵심] 다이렉트 좌표 회귀 모델 강제 세팅 및 보조 로스 헤드 부착
+        # 🌟 헤드 결합부
         # ---------------------------------------------------------------------
-        print(">>> [INFO] 🚀 모델 아키텍처: 256ch Raw Latent Direct Regression (히트맵 우회 모드)")
+        print(">>> [INFO] 🚀 모델 아키텍처: 256ch 백본 + 36ch HM 가이드 다이렉트 회귀")
         
-        # 입력 차원: 백본 출력(256차원) + 원본 3D 좌표(3차원)
-        in_channels_head = dl_args.head_dim + 3
+        # 입력 차원: 256(백본) + 3(XYZ) + 랜드마크 수(PAConv 히트맵 채널)
+        in_channels_head = dl_args.head_dim + 3 + dl_args.num_classes
         
-        # 메인 회귀 경로
         self.regression_head = DirectRegressionHead(in_channels=in_channels_head, landmark_num=dl_args.num_classes)
-        
-        # 학습용 보조 닻(Auxiliary Anchor) 경로
-        # 256채널 라텐트가 공간적 위치 감각을 잃지 않도록 감독하는 역할입니다.
-        #self.aux_heatmap_head = nn.Conv1d(dl_args.head_dim, dl_args.num_classes, 1)
 
-    def forward(self, x, prior_heatmap=None):
+    def forward(self, x, prior_latent=None, prior_heatmap=None):
         B, C, N = x.shape
+        device = x.device
         
         xyz = x[:, :3, :].permute(0, 2, 1).contiguous().detach()
-        
         feature = x.permute(0, 2, 1).contiguous() 
         if self.training:
             feature.requires_grad_(True)  
             
-        if prior_heatmap is not None:
-            prior_heatmap = prior_heatmap.permute(0, 2, 1).contiguous()
+        # 1. 라텐트 피처(128ch) 정렬
+        if prior_latent is not None:
+            prior_latent = prior_latent.permute(0, 2, 1).contiguous()
             if self.training:
-                prior_heatmap.requires_grad_(True) 
+                prior_latent.requires_grad_(True) 
+                
+        # 2. 헤드용 히트맵(36ch) 정렬
+        if prior_heatmap is None:
+            # 단독 학습 시 오류 방지용 Dummy 히트맵
+            prior_heatmap = torch.zeros((B, self.dl_args.num_classes, N), device=device)
+        else:
+            prior_heatmap = prior_heatmap.permute(0, 2, 1).contiguous()
             
-        device = x.device
         up_idx_list = []
         down_knn_list = []
         cur_xyz = xyz
         
-        # 계층적 인덱스 사전 계산
         for d in range(self.stage_count):
             num_points = cur_xyz.shape[1]
             safe_k = min(self.dl_args.ks[d], num_points)
@@ -218,25 +215,20 @@ class DeepPA_Wrapper(nn.Module):
         indices = up_idx_list + down_knn_list
         
         # ---------------------------------------------------------------------
-        # 🌟 모델 포워딩 및 Latent Direct Regression
+        # 🌟 모델 포워딩
         # ---------------------------------------------------------------------
-        # 백본 통과 (출력은 더 이상 36이 아닌, 256차원 고차원 텐서입니다)
-        out = self.model(xyz, feature, indices, prior_heatmap=prior_heatmap)
+        # 1. 백본 통과 (HDS 모의고사 반환 포함)
+        out = self.model(xyz, feature, indices, prior_heatmap=prior_latent)
+        
         if isinstance(out, tuple):
-            out = out[0]
+            dense_features, spa_loss, sem_list = out[0], out[1], out[2]
+        else:
+            dense_features, spa_loss, sem_list = out, torch.tensor(0.0).to(device), []
             
-        # 형태 변환: (B, 256, N)
-        dense_features = out.permute(0, 2, 1).contiguous()
+        dense_features = dense_features.permute(0, 2, 1).contiguous() # (B, 256, N)
+        xyz_input = xyz.permute(0, 2, 1).contiguous() # (B, 3, N)
         
-        # 물리 좌표 정렬: (B, 3, N)
-        xyz_input = xyz.permute(0, 2, 1).contiguous() 
+        # 2. [최종단 결합] 다이렉트 헤드를 통과하여 좌표 산출
+        pred_coords = self.regression_head(dense_features, xyz_input, prior_heatmap)
         
-        # [메인 출력] 다이렉트 헤드를 통과하여 서브 밀리미터 단위 좌표 산출
-        pred_coords = self.regression_head(dense_features, xyz_input)
-        
-        # [보조 출력] 학습 시, 라텐트 피처의 위치 정렬을 돕기 위해 보조 히트맵 산출
-        #aux_heatmap = self.aux_heatmap_head(dense_features)
-        
-        # 항상 (좌표, 보조 히트맵)의 튜플 형태로 일관성 있게 반환합니다.
-        #return pred_coords, aux_heatmap
-        return pred_coords, None
+        return pred_coords, spa_loss, sem_list

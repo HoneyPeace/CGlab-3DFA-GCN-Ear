@@ -13,13 +13,13 @@ from utils.cutils import knn_edge_maxpooling
 [NotebookLM을 위한 모듈 요약]
 이 파일은 DeepPA(Deep Position Adaptive) 네트워크의 중추 신경망(Backbone) 역할을 합니다.
 DeepPA_auto 모드에서 '2단계(Local Refinement)'를 담당하며, 
-1단계(PAConv)에서 추출한 '전역적 라텐트 피처(64차원)'를 힌트로 받아들여 
+1단계(PAConv)에서 추출한 '전역적 라텐트 피처(128차원)'를 힌트로 받아들여 
 U-Net 형태의 깊은 레이어(최대 120층)를 통해 로컬 영역의 곡률과 위상을 정밀하게 분석합니다.
 
-[핵심 아키텍처 변화: Latent-to-Latent 구조]
+[핵심 아키텍처 변화: Latent-to-Latent 구조 및 병목 제거]
 기존에는 1단계의 '히트맵'을 받아 최종적으로 다시 '히트맵'을 출력하는 구조였으나, 
-수정된 본 아키텍처에서는 1단계의 '64채널 라텐트 피처'를 직접 주입받고, 
-최종 출력 역시 (다이렉트 좌표 회귀를 위해) '64채널 라텐트 피처' 형태로 정제하여 방출합니다.
+수정된 본 아키텍처에서는 1단계의 '128채널 라텐트 피처'를 직접 주입받고, 
+최종 출력 역시 (다이렉트 좌표 회귀를 위해) '256채널 라텐트 피처' 형태로 정제하여 방출합니다.
 이를 통해 차원 축소로 인한 기하학적 정보 손실(Information Bottleneck)을 원천 차단했습니다.
 """
 
@@ -138,9 +138,8 @@ class Stage_PA(nn.Module):
 
         dim = args.dims[depth]
         
-        # [Latent Feature Projection]
-        # 변경점: 기존에는 args.num_classes(히트맵 36채널)를 입력으로 받았으나,
-        # 이제 1단계(PAConv)가 전달하는 '64차원 라텐트 피처'를 현재 깊이의 차원(dim)으로 투영합니다.
+        # 🌟 [디펜스 포인트 4] Latent Feature Projection
+        # 1단계(PAConv)가 전달하는 '128차원 라텐트 피처'를 현재 깊이의 차원(dim)으로 투영합니다.
         self.prior_proj = nn.Sequential(
             nn.Linear(128, dim, bias=False), 
             nn.BatchNorm1d(dim, momentum=args.bn_momentum),
@@ -203,6 +202,7 @@ class Stage_PA(nn.Module):
         self.reslfe = ResLFE_Block(dim, args.depths[depth], args.drop_paths[depth], args.mlp_ratio, cp_bn_momentum, args.act)
         self.drop = DropPath(args.head_drops[depth])
 
+        # 🌟 [디펜스 포인트 6] HDS 중간 모의고사 (Heatmap)
         self.sem_sup = nn.Sequential(
             nn.Dropout(0.5),
             nn.BatchNorm1d(3, momentum=args.bn_momentum),
@@ -264,8 +264,9 @@ class Stage_PA(nn.Module):
             nbr = self.nbr_proj(nbr)
             x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1)
 
-        # [핵심] Latent Feature Fusion (잔차 연결)
-        if prior_heatmap is not None:
+        # 🌟 [디펜스 포인트 4] Latent Feature Fusion (잔차 연결)
+        # Stage 2 이상에서 외부 힌트를 받으면 융합을 수행합니다.
+        if not self.first and prior_heatmap is not None:
             p_feat = self.prior_proj(prior_heatmap.view(-1, prior_heatmap.shape[-1])).view(B, N, -1)
             fused = torch.cat([x, p_feat], dim=-1) 
             mixed_residual = self.fusion_mlp(fused.view(-1, fused.shape[-1])).view(B, N, -1)
@@ -282,6 +283,7 @@ class Stage_PA(nn.Module):
         x = checkpoint(self.reslfe, x, pe, knn, pts) if self.training and self.cp else self.reslfe(x, pe, knn, pts)
 
         if self.training:
+            # 🌟 [디펜스 포인트 5] HDS 중간 모의고사 채점
             spa_info = xyz_knn - xyz.unsqueeze(2)
             spa_info.mul_(self.cor_std)
             feat_info = self.cor_head(x.view(-1, x.shape[-1])).view(B, N, -1)
@@ -316,7 +318,6 @@ class Stage_PA(nn.Module):
 # 최종 통합 모델 (DeepPA_semseg)
 # =====================================================================
 
-# deeppa_semseg.py 내부 수정 부분
 class DeepPA_semseg(nn.Module):
     """
     [DeepPA 백본 진입점]
@@ -328,7 +329,8 @@ class DeepPA_semseg(nn.Module):
         args.cp_bn_momentum = 1 - (1 - args.bn_momentum)**0.5
         self.stage = Stage_PA(args) 
         
-        # 🌟 [수정] 64로 압축하던 병목을 제거하고 256채널로 확장/유지합니다.
+        # 🌟 [디펜스 포인트 9 기반] 256 병목 유지
+        # 64로 압축하던 병목을 제거하고 256채널로 확장/유지합니다.
         self.latent_head = nn.Sequential(
             nn.BatchNorm1d(args.head_dim, momentum=args.bn_momentum),
             args.act(),
@@ -348,11 +350,11 @@ class DeepPA_semseg(nn.Module):
 
     def forward(self, xyz, x, indices, prior_heatmap=None, pts_list=None):
         indices = indices[:]
-        # Stage_PA 통과 (피처 추출 + 1단계 라텐트 힌트 잔차 결합)
+        # 🌟 [디펜스 포인트 1, 3] Stage_PA 통과 (피처 추출 + 1단계 라텐트 힌트 잔차 결합)
         x, spa, sem = self.stage(x, xyz, None, indices, pts_list, prior_heatmap)
         B, N, C = x.shape
         
-        # Latent Head를 통과하여 고밀도 64차원 기하학 특징 방출
+        # 🌟 Latent Head를 통과하여 고밀도 256차원 기하학 특징 방출
         x = self.latent_head(x.view(-1, C)).view(B, N, -1)
         
         if self.training:
