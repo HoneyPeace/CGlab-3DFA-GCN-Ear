@@ -25,17 +25,17 @@ if __name__ == "__main__":
     raw_user_args = sys.argv[1:]
     
     # 🌟 2. 실험 제어를 위해 스크립트가 직접 바꿀 인자들만 필터링합니다.
-    # (중복 인자 전달로 인한 argparse 에러를 방지합니다)
     protected_keys = ['--use_loss_norm', '--use_rlw_for_heatmap', '--user_tag', '--run_id', '--model']
     base_args = filter_user_args(raw_user_args, protected_keys)
     
-    # My_args를 통해 기본 정보만 파싱 (저장 경로 확인용)
+    # My_args를 통해 기본 정보 파싱 (저장 경로 확인용)
     args, _ = parser.parse_known_args()
     exp_name = args.exp_name
     output_root = args.output_root
+    project_dir = os.path.join(output_root, exp_name)
 
     print(f"==========================================================================")
-    print(f" 🚀 [ALL-PASS ABLATION] 모든 파라미터를 유지하며 정규화 ON 실험 가동")
+    print(f" 🚀 [ALL-PASS ABLATION] 기존 모델 스킵 및 정규화 ON 실험 가동")
     print(f"==========================================================================\n")
 
     experiments = [
@@ -49,29 +49,51 @@ if __name__ == "__main__":
         
         print(f"\n🧪 {exp['desc']} 시작...")
 
-        # [PHASE 1] 학습 (train.py) 실행
-        # 사용자의 모든 인자에 '--use_loss_norm True'와 실험용 RLW 태그만 덧붙입니다.
-        resample = "True" if i == 0 else "False"
-        train_cmd = [sys.executable, "train.py"] + base_args + [
-            "--model", "DeepPA_auto",
-            "--use_loss_norm", "True", 
-            "--use_rlw_for_heatmap", use_rlw,
-            "--user_tag", tag,
-            "--need_resample", resample
-        ]
+        # =================================================================
+        # 🌟 [PHASE 0] 기존 학습된 모델이 있는지 스마트 체크
+        # =================================================================
+        model_exists = False
+        run_id = None
         
-        print(f">>> [EXEC] {' '.join(train_cmd)}")
-        subprocess.run(train_cmd, check=True)
+        if os.path.exists(project_dir):
+            # 현재 태그(tag)가 포함된 실험 폴더들을 찾음
+            folders = [d for d in os.listdir(project_dir) if os.path.isdir(os.path.join(project_dir, d)) and tag in d]
+            if folders:
+                # Run ID (맨 끝 숫자) 기준으로 가장 최신 폴더 탐색
+                latest_folder = max(folders, key=lambda x: int(x.split('_')[-1]))
+                run_id = latest_folder.split('_')[-1]
+                
+                # 해당 폴더 내부의 models 하위 폴더에 .t7 가중치 파일이 있는지 검사
+                model_dir = os.path.join(project_dir, latest_folder, "models")
+                if os.path.exists(model_dir) and glob.glob(os.path.join(model_dir, "*.t7")):
+                    model_exists = True
 
-        # [PHASE 2] 방금 생성된 Run ID 자동 추적
-        time.sleep(2)
-        project_dir = os.path.join(output_root, exp_name)
-        # 태그가 포함된 폴더 중 가장 번호가 높은(최신) 폴더를 찾습니다.
-        folders = [d for d in os.listdir(project_dir) if os.path.isdir(os.path.join(project_dir, d)) and tag in d]
-        run_id = str(max([int(f.split('_')[-1]) for f in folders]))
+        if model_exists:
+            print(f"⏭️ [SKIP] 이미 완료된 학습을 발견했습니다. (Run ID: {run_id})\n   학습(train.py)을 건너뛰고 평가(eval.py)로 직행합니다.")
+        else:
+            # =================================================================
+            # [PHASE 1] 학습 (train.py) 실행 (모델이 없을 때만)
+            # =================================================================
+            resample = "False" if i == 0 else "False"
+            train_cmd = [sys.executable, "train.py"] + base_args + [
+                "--model", "DeepPA_auto",
+                "--use_loss_norm", "True", 
+                "--use_rlw_for_heatmap", use_rlw,
+                "--user_tag", tag,
+                "--need_resample", resample
+            ]
+            
+            print(f">>> [EXEC] {' '.join(train_cmd)}")
+            subprocess.run(train_cmd, check=True)
 
+            # [PHASE 2] 방금 생성된 Run ID 자동 추적
+            time.sleep(2)
+            folders = [d for d in os.listdir(project_dir) if os.path.isdir(os.path.join(project_dir, d)) and tag in d]
+            run_id = str(max([int(f.split('_')[-1]) for f in folders]))
+
+        # =================================================================
         # [PHASE 3] 평가 (eval.py) 실행
-        # 학습 때 쓴 모든 인자 + 정확한 Run ID를 꽂아줍니다.
+        # =================================================================
         eval_cmd = [sys.executable, "eval.py"] + base_args + [
             "--model", "DeepPA_auto",
             "--run_id", run_id,
@@ -82,10 +104,12 @@ if __name__ == "__main__":
         print(f">>> [EXEC] {' '.join(eval_cmd)}")
         subprocess.run(eval_cmd, check=True)
         
-        print(f"✅ {tag} 단계 완료. 10초간 대기합니다...")
+        print(f"✅ {tag} 단계 평가 완료. 10초간 대기합니다...")
         time.sleep(10)
 
+    # =================================================================
     # [STEP 4] 📊 최종 엑셀 병합
+    # =================================================================
     print(f"\n📊 모든 실험이 종료되었습니다. 결과를 통합합니다...")
     excel_pattern = os.path.join(project_dir, "**", "*_Results_ME*.xlsx")
     found_files = glob.glob(excel_pattern, recursive=True)

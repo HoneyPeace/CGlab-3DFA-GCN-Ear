@@ -142,7 +142,7 @@ class Stage_PA(nn.Module):
         # 변경점: 기존에는 args.num_classes(히트맵 36채널)를 입력으로 받았으나,
         # 이제 1단계(PAConv)가 전달하는 '64차원 라텐트 피처'를 현재 깊이의 차원(dim)으로 투영합니다.
         self.prior_proj = nn.Sequential(
-            nn.Linear(64, dim, bias=False), 
+            nn.Linear(128, dim, bias=False), 
             nn.BatchNorm1d(dim, momentum=args.bn_momentum),
             args.act()
         )

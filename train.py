@@ -92,9 +92,11 @@ class JointE2EModel(nn.Module):
 
     def forward(self, x):
         s1_latent = self.stage1_paconv(x)
-        pred_coords, s2_aux_hm = self.stage2_deeppa(x, prior_heatmap=s1_latent)
+        # 🌟 [수정] Stage 2의 보조 히트맵(s2_aux_hm)은 사용하지 않으므로 무시합니다.
+        pred_coords, _ = self.stage2_deeppa(x, prior_heatmap=s1_latent)
         s1_aux_hm = self.s1_aux_head(s1_latent)
-        return pred_coords, s2_aux_hm, s1_aux_hm
+        # s2_aux_hm 자리에 None을 반환하여 구조를 유지합니다.
+        return pred_coords, None, s1_aux_hm
 
 def train(args):
     accum_steps = args.accumulation_steps
@@ -166,12 +168,15 @@ def train(args):
                     point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                     point_input = point_normal.permute(0, 2, 1).contiguous()
                     
+                    # train.py 약 135행 [Phase 2.9] 내부
                     if model_name_lower == 'deeppa_e2e':
-                        pred_coords, s2_aux_hm, s1_aux_hm = model(point_input)
-                        l_hm = (criterion(s2_aux_hm, seg.permute(0, 2, 1).contiguous()) + criterion(s1_aux_hm, seg.permute(0, 2, 1).contiguous())).item() / 2
+                        # 🌟 [수정] s2_aux_hm은 None이므로 s1_aux_hm(Stage 1)의 로스만 HM 지표로 삼습니다.
+                        pred_coords, _, s1_aux_hm = model(point_input)
+                        l_hm = criterion(s1_aux_hm, seg.permute(0, 2, 1).contiguous()).item()
                     else:
-                        pred_coords, s2_aux_hm = model(point_input)
-                        l_hm = criterion(s2_aux_hm, seg.permute(0, 2, 1).contiguous()).item()
+                        # 단독 모델일 경우에도 다이렉트 좌표 위주로 측정
+                        pred_coords, _ = model(point_input)
+                        l_hm = 0.0 # 혹은 기존 로직 유지
                     
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     
@@ -238,14 +243,18 @@ def train(args):
                     # ---------------------------------------------------------
                     # 1. Forward Pass 및 손실 계산 (직접 회귀)
                     # ---------------------------------------------------------
+                    # train.py 약 215행 [Phase 3] 본 학습 내부
                     if model_name_lower == 'deeppa_e2e':
-                        pred_coords, s2_aux_hm, s1_aux_hm = model(point_input)
+                        pred_coords, _, s1_aux_hm = model(point_input)
                         
+                        # 🌟 [수정] Stage 1 히트맵만 위치 가이드(Anchor)로 사용합니다.
                         loss_hm_s1 = criterion(s1_aux_hm, seg.permute(0, 2, 1).contiguous())
-                        loss_hm_s2 = criterion(s2_aux_hm, seg.permute(0, 2, 1).contiguous())
                         norm_hm_s1 = loss_hm_s1 * auto_scales['heatmap']
-                        norm_hm_s2 = loss_hm_s2 * auto_scales['heatmap']
                         s1_raw_hm += loss_hm_s1.item()
+                        
+                        # Stage 2 히트맵 로스 변수는 0으로 초기화 (계산 제외)
+                        norm_hm_s2 = torch.tensor(0.0).to(device)
+                        loss_hm_s2 = torch.tensor(0.0).to(device)
                     else:
                         pred_coords, s2_aux_hm = model(point_input)
                         loss_hm_s2 = criterion(s2_aux_hm, seg.permute(0, 2, 1).contiguous())
@@ -261,32 +270,40 @@ def train(args):
                     norm_struct  = loss_struct  * auto_scales['struct']
 
                     # ---------------------------------------------------------
-                    # 2. 로스 융합 🌟 [분기 제어 핵심] 🌟
+                    # 2. 로스 융합 🌟 [세련된 구조: Stage 1 앵커 전용] 🌟
                     # ---------------------------------------------------------
                     if is_warmup:
-                        total_loss = (1.0 * norm_hm_s1) + (1.0 * norm_hm_s2)
-                        total_loss_raw_reversed = loss_hm_s1 + loss_hm_s2
+                        # 🔥 [수정] Stage 2 히트맵을 제거하고, Stage 1의 위치 가이드(S1_HM)만 학습합니다.
+                        total_loss = 1.0 * norm_hm_s1
+                        total_loss_raw_reversed = loss_hm_s1
                     else:
                         if use_rlw_for_heatmap:
-                            # [Option A: 4-Loss RLW] 히트맵 포함 전면 랜덤
-                            # S1 닻과 S2 닻은 같은 '히트맵' 성격이므로 rand_w[0] 비중을 공유합니다.
+                            # [Option A: 4-Loss RLW] S1_HM을 포함하여 모든 로스를 자율 조율
+                            # 구성: (1) S1_HM, (2) Coord, (3) Surface, (4) Structural
                             rand_w = torch.rand(4).to(device)
                             rand_w = rand_w / rand_w.sum()
                             
-                            total_loss = (rand_w[0] * norm_hm_s1) + (rand_w[0] * norm_hm_s2) + \
-                                         (rand_w[1] * norm_coord) + (rand_w[2] * norm_surface) + (rand_w[3] * norm_struct)
-                                         
-                            total_loss_raw_reversed = (rand_w[0] * loss_hm_s1) + (rand_w[0] * loss_hm_s2) + \
-                                                      (rand_w[1] * loss_coord) + (rand_w[2] * loss_surface) + (rand_w[3] * loss_struct)
+                            total_loss = (rand_w[0] * norm_hm_s1) + \
+                                        (rand_w[1] * norm_coord) + \
+                                        (rand_w[2] * norm_surface) + \
+                                        (rand_w[3] * norm_struct)
+                                        
+                            total_loss_raw_reversed = (rand_w[0] * loss_hm_s1) + \
+                                                    (rand_w[1] * loss_coord) + \
+                                                    (rand_w[2] * loss_surface) + \
+                                                    (rand_w[3] * loss_struct)
                         else:
-                            # [Option B: 3-Loss RLW] 히트맵은 1.0 고정 (추천)
+                            # [Option B: 3-Loss RLW] S1_HM은 1.0 '닻'으로 고정하고 기하학만 조율 (강력 추천)
+                            # 구성: (1.0 fixed) S1_HM, (Random) Coord, Surface, Structural
                             rand_w = torch.rand(3).to(device)
                             rand_w = rand_w / rand_w.sum()
                             
-                            total_loss = (1.0 * norm_hm_s1) + (1.0 * norm_hm_s2) + \
-                                         (rand_w[0] * norm_coord) + (rand_w[1] * norm_surface) + (rand_w[2] * norm_struct)
-                                         
-                            total_loss_raw_reversed = loss_hm_s1 + loss_hm_s2 + loss_coord + loss_surface + loss_struct
+                            total_loss = (1.0 * norm_hm_s1) + \
+                                        (rand_w[0] * norm_coord) + \
+                                        (rand_w[1] * norm_surface) + \
+                                        (rand_w[2] * norm_struct)
+                                        
+                            total_loss_raw_reversed = loss_hm_s1 + loss_coord + loss_surface + loss_struct
                     
                     loss = total_loss / accum_steps
                     loss.backward()
@@ -319,27 +336,54 @@ def train(args):
             
             with torch.no_grad():
                 for point, landmark, seg in test_loader:
+                    # test_loader는 배치 사이즈 1입니다.
                     point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
+                    
+                    # 🌟 [수정 1] 현재 샘플(1개)에 맞는 스케일링 변수(avg_m)를 매번 계산해야 합니다.
                     point_xyz = point[:, :, :3]
                     avg_m = torch.mean(torch.max(torch.sqrt(torch.sum((point_xyz - torch.mean(point_xyz, axis=1, keepdim=True)) ** 2, axis=2)), axis=1)[0]).item()
+                    
+                    # 🌟 [수정 2] '중략'된 정규화 로직을 루프 내부에서 새로 수행하여 point_input(Size 1)을 갱신합니다.
                     point_normal, landmark_normal = normalize_data(point, landmark)
-                    point_input = point_normal.permute(0, 2, 1).contiguous()
+                    point_input = point_normal.permute(0, 2, 1).contiguous() 
                     
                     if model_name_lower == 'deeppa_e2e':
+                        # 이제 pred_coords와 s1_aux_hm은 정확히 배치 사이즈 1로 나옵니다.
                         pred_coords, s2_aux_hm, s1_aux_hm = model(point_input)
-                        val_hm += (criterion(s2_aux_hm, seg.permute(0, 2, 1).contiguous()) + criterion(s1_aux_hm, seg.permute(0, 2, 1).contiguous())).item() / 2
+                        
+                        target_seg = seg.permute(0, 2, 1).contiguous()
+                        
+                        # 🌟 [수정 3] Stage 2 히트맵이 None인 경우에 대한 완벽한 방어 로직
+                        if s2_aux_hm is not None:
+                            val_hm += (criterion(s2_aux_hm, target_seg) + criterion(s1_aux_hm, target_seg)).item() / 2
+                        else:
+                            # 세련된 구조(S2 HM 제거)에서는 Stage 1의 닻 로스만 검증 지표로 사용합니다. [cite: 2025-11-05]
+                            val_hm += criterion(s1_aux_hm, target_seg).item()
                     else:
+                        # 단독 모델(DeepPA_Wrapper 등) 대응
                         pred_coords, s2_aux_hm = model(point_input)
-                        val_hm += criterion(s2_aux_hm, seg.permute(0, 2, 1).contiguous()).item()
+                        if s2_aux_hm is not None:
+                            val_hm += criterion(s2_aux_hm, seg.permute(0, 2, 1).contiguous()).item()
 
+                    # 🌟 [수정 4] mm 오차 계산 시에도 현재 루프의 landmark_normal을 사용합니다.
                     val_mm += F.l1_loss(pred_coords, landmark_normal).item() * avg_m
-
-            v_hm, v_mm = val_hm/len(test_loader), val_mm/len(test_loader)
             
+            # --- Validation 종료 ---
+            # 🌟 [수정 1] 누락된 평균값 계산 로직을 추가합니다.
+            # 이 줄이 있어야 하단의 print 문에서 v_mm을 인식할 수 있습니다.
+            v_hm = val_hm / len(test_loader)
+            v_mm = val_mm / len(test_loader)
+            
+            # 🌟 [수정 2] 교수님이 좋아하시는 '세련된' 출력 구조로 변경
+            # Stage 2에서는 히트맵을 안 쓰므로 HM 항목을 제거하거나 0으로 표시합니다. [cite: 2025-11-05]
             print(f" [{stage_name} Ep {epoch+1:03d}] T_Norm: {t_loss_n:.2f} | T_mm: {t_mm:.2f} || V_mm: {v_mm:.2f}")
-            print(f"  ├─ [S2_DeepPA] HM(Anchor): {t_hm_raw:.4f} | Crd: {t_crd_raw:.4f} | Srf: {t_srf_raw:.4f} | Str: {t_str_raw:.4f}")
+            
+            # S2는 정밀화(Refinement), S1은 위치(Localization)임을 명시합니다. [cite: 2025-11-05]
+            print(f"  ├─ [S2_Refinement] Crd: {t_crd_raw:.4f} | Srf: {t_srf_raw:.4f} | Str: {t_str_raw:.4f}")
+            
             if model_name_lower == 'deeppa_e2e':
-                print(f"  └─ [S1_PAConv] HM(Anchor): {s1_raw_hm/num_b:.4f}")
+                # Stage 1의 닻(Anchor) 성적표
+                print(f"  └─ [S1_Localization] HM(Anchor): {s1_raw_hm/num_b:.4f}")
 
             # 🌟 Patience Checker (Plateau 기반 Warm-up 해제)
             if is_warmup:

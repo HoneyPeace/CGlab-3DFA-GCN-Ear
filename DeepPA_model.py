@@ -164,7 +164,7 @@ class DeepPA_Wrapper(nn.Module):
         
         # 학습용 보조 닻(Auxiliary Anchor) 경로
         # 256채널 라텐트가 공간적 위치 감각을 잃지 않도록 감독하는 역할입니다.
-        self.aux_heatmap_head = nn.Conv1d(dl_args.head_dim, dl_args.num_classes, 1)
+        #self.aux_heatmap_head = nn.Conv1d(dl_args.head_dim, dl_args.num_classes, 1)
 
     def forward(self, x, prior_heatmap=None):
         B, C, N = x.shape
@@ -235,7 +235,8 @@ class DeepPA_Wrapper(nn.Module):
         pred_coords = self.regression_head(dense_features, xyz_input)
         
         # [보조 출력] 학습 시, 라텐트 피처의 위치 정렬을 돕기 위해 보조 히트맵 산출
-        aux_heatmap = self.aux_heatmap_head(dense_features)
+        #aux_heatmap = self.aux_heatmap_head(dense_features)
         
         # 항상 (좌표, 보조 히트맵)의 튜플 형태로 일관성 있게 반환합니다.
-        return pred_coords, aux_heatmap
+        #return pred_coords, aux_heatmap
+        return pred_coords, None

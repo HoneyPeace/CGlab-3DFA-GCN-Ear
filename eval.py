@@ -5,8 +5,10 @@
 '''
 
 from __future__ import print_function, division
+
 import sys
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import pandas as pd
@@ -143,28 +145,33 @@ def evaluate_target_model(eval_name, eval_model):
         
         with torch.no_grad():
             if device.type == 'cuda': torch.cuda.synchronize()
-            start_time = time.time()
+            start_time = time.time()  # 🌟 모델 투입 직전 타이머 시작!
 
             point_input = point_norm.permute(0, 2, 1).contiguous()
             
-            # 🌟 [다이렉트 회귀 모드]
+            # 1. 모델에서 결과 3개를 받습니다. (S2 히트맵은 None일 수 있음)
             pred_coords_norm, s2_aux_hm, s1_aux_hm = eval_model(point_input)
             
-            # 예측 좌표 Denormalization (mm 단위 복구)
+            if device.type == 'cuda': torch.cuda.synchronize()
+            time_list.append(time.time() - start_time)  # 🌟 연산 종료 직후 타이머 스톱!
+            
+            # 2. 🌟 [핵심 수정] 평가용 히트맵 타겟 결정 
+            # Stage 2에 히트맵이 없으면(None), Stage 1의 히트맵으로 위치 정확도를 평가합니다.
+            eval_target_hm = s1_aux_hm if s2_aux_hm is None else s2_aux_hm
+
+            # 3. mm 단위 좌표 복구 (Direct Regression의 결과물)
             pred_landmark = (pred_coords_norm * scale) + centroid
 
-            if device.type == 'cuda': torch.cuda.synchronize()
-            time_list.append(time.time() - start_time)
-
-            # 🌟 보조 닻(Aux Anchor) 성능 평가 (기존의 히트맵 평가 로직 재활용)
-            pred_heatmap = s2_aux_hm.permute(0, 2, 1)
+            # 4. 히트맵 지표 계산 (이제 eval_target_hm을 사용합니다)
+            pred_heatmap = eval_target_hm.permute(0, 2, 1) 
             pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
             cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
             cos_sim_list.append(cos_sim_k.mean().item()) 
             per_landmark_cos_sim_list.append(cos_sim_k.cpu().numpy()) 
 
             threshold = 0.1
-            pred_mask, gt_mask = (s2_aux_hm > threshold).float(), (gt_heatmap > threshold).float()     
+            pred_mask = (pred_heatmap > threshold).float() 
+            gt_mask = (gt_heatmap > threshold).float()  
             intersection_k = (pred_mask * gt_mask).sum(dim=1) 
             union_k = (pred_mask + gt_mask).clamp(0, 1).sum(dim=1)
             iou_k = ((intersection_k + 1e-6) / (union_k + 1e-6)) * 100.0
@@ -189,7 +196,7 @@ def evaluate_target_model(eval_name, eval_model):
             
             np.savetxt(os.path.join(current_asc_dir, f"{eval_name}_pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
-    # ------------------ 최종 집계 및 Excel 저장 (연구자님의 훌륭한 로직 유지) ------------------
+    # ------------------ 최종 집계 및 Excel 저장 ------------------
     if len(per_landmark_me_list) > 0:
         per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) 
         lm_means, lm_stds, lm_me_95 = np.mean(per_landmark_me_array, axis=0), np.std(per_landmark_me_array, axis=0), np.percentile(per_landmark_me_array, 95, axis=0)
