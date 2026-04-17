@@ -177,7 +177,8 @@ class DeepPA_Wrapper(nn.Module):
             # 단독 학습 시 오류 방지용 Dummy 히트맵
             prior_heatmap = torch.zeros((B, self.dl_args.num_classes, N), device=device)
         else:
-            prior_heatmap = prior_heatmap.permute(0, 2, 1).contiguous()
+            # 🌟 [수정 포인트]: permute 제거하고 연속성만 보장!
+            prior_heatmap = prior_heatmap.contiguous()
             
         up_idx_list = []
         down_knn_list = []

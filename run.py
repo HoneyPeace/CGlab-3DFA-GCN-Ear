@@ -90,14 +90,18 @@ if __name__ == "__main__":
     if "--Eval_DataType" not in user_args:
         eval_cmd.extend(["--Eval_DataType", "test"])
 
-    # 🌟 [핵심 추가] train.py에서 최적화한 _last.t7 파일을 자동으로 타겟팅하도록 주입
+    # 🌟 [디펜스 포인트: 평가 파일 자동 매핑 완벽 동기화]
     if "--model_epoch" not in user_args:
-        if args.model.lower() != 'deeppa_auto':
-            # Single 모델일 경우 해당 모델의 마지막 저장 파일을 자동으로 가리킴
-            eval_cmd.extend(["--model_epoch", f"Single_{args.model}_last.t7"])
+        target_model = args.model.lower()
+        if target_model in ['deeppa_frozen', 'deeppa_auto']:
+            # Frozen 모드는 Frozen_Hybrid_last.t7을 로드
+            eval_cmd.extend(["--model_epoch", "Frozen_Hybrid_last.t7"])
+        elif target_model == 'deeppa_e2e':
+            # E2E 모드는 E2E_Hybrid_last.t7을 로드
+            eval_cmd.extend(["--model_epoch", "E2E_Hybrid_last.t7"])
         else:
-            # deeppa_auto 모드일 때는 eval_all.py 내부에서 알아서 Stage1/Stage2_last.t7을 찾음
-            pass
+            # 단일 모델(PAConv 등)은 Single_ 이름표를 붙여서 로드
+            eval_cmd.extend(["--model_epoch", f"Single_{args.model}_last.t7"])
 
     try:
         subprocess.run(eval_cmd, check=True)

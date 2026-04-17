@@ -28,7 +28,7 @@ parser.add_argument('--exp_name', type=str, default='Ear_Project_Final', metavar
 # [의도] DeepPA_auto는 Two-stage 학습 파이프라인입니다.
 # 1단계(PAConv): 전체적인 형태를 보고 랜드마크의 대략적인 위치(Global Context)를 잡음.
 # 2단계(DeepPA): 기하학적 로스(Curvature/Direction)를 켜서 표면의 굴곡에 완벽히 밀착되도록 미세 조정(Local Refinement)함.
-parser.add_argument('--model', type=str, default='DeepLA', metavar='N', choices=['PAConv_heat', 'PAConv', 'DeepLA', 'DeepPA', 'DeepPA_auto'], help='Model to use')
+parser.add_argument('--model', type=str, default='deeppa_frozen', metavar='N', choices=['PAConv_heat', 'PAConv', 'DeepLA', 'DeepPA', 'deeppa_frozen', 'deeppa_e2e'], help='Model to use')
 parser.add_argument('--no_cuda', type=str2bool, default=False, help='enables CUDA training')
 parser.add_argument('--model_path', type=str, default='', metavar='N', help='Pretrained model path')
 
@@ -50,7 +50,7 @@ parser.add_argument('--in_channels', type=int, default=7, help='Input channels: 
 # [2] 학습 설정 (Train Args) & Two-stage 스케줄링
 # =============================================================================
 parser.add_argument('--eval', type=str2bool, default=False, help='evaluate the model')
-parser.add_argument('--batch_size', type=int, default=32, metavar='batch_size', help='Size of batch')
+parser.add_argument('--batch_size', type=int, default=8, metavar='batch_size', help='Size of batch')
 parser.add_argument('--test_batch_size', type=int, default=1, metavar='batch_size', help='Size of batch')
 parser.add_argument('--epochs', type=int, default=500, metavar='N', help='number of episode to train')
 
@@ -87,7 +87,7 @@ parser.add_argument('--num_points', type=int, default=8192, help='num of points 
 parser.add_argument('--sigma', type=float, default=10.0, metavar='Sig', help='Gaussian Variance of heatmap')
 parser.add_argument('--k', type=int, default=30, metavar='N', help='Num of nearest neighbors')
 parser.add_argument('--emb_dims', type=int, default=1024, metavar='N', help='Dimension of embeddings')
-parser.add_argument('--landmark_num', type=int, default=40, metavar='L', help='the number of landmark')
+parser.add_argument('--landmark_num', type=int, default=36, metavar='L', help='the number of landmark')
 
 # =============================================================================
 # [5] 모델 구조 설정 (PAConv Args)
@@ -123,7 +123,7 @@ parser.add_argument('--dir_beta', type=float, default=1.0, help='[Beta] Penalty 
 # [Focal Loss 및 스케일 정규화]
 parser.add_argument('--focal_gamma', type=float, default=1.0, help='Gamma for dynamic focal loss')
 parser.add_argument('--focal_max', type=float, default=10.0, help='Max clamp for focal weights')
-parser.add_argument('--use_loss_norm', type=str2bool, default=True, help='Use Initial Loss Normalization')
+parser.add_argument('--use_loss_norm', type=str2bool, default=False, help='Use Initial Loss Normalization')
 parser.add_argument('--target_norm', type=float, default=1.0, help='Target scale for Loss Normalization')
 
 # =============================================================================
@@ -140,3 +140,10 @@ parser.add_argument('--use_direct_regression', type=str2bool, default=True, help
 # - False (추천/기본값): 닻(Anchor) 모드. 히트맵을 1.0 가중치로 고정하고 기하학 3-Loss만 RLW로 경쟁시킵니다. (계층적 최적화)
 # - True : 전면 랜덤 모드. 히트맵마저 RLW에 포함시켜 모든 4-Loss가 완전히 자율적으로 조율되게 합니다.
 parser.add_argument('--use_rlw_for_heatmap', type=str2bool, default=False, help='히트맵 로스를 RLW 풀에 포함시킬지 여부 (False 시 1.0 고정 닻으로 작동)')
+
+# =============================================================================
+# [9] 🌟 논문 Equation (5) HDS 파라미터 (디펜스용)
+# =============================================================================
+parser.add_argument('--hds_alpha', type=float, default=0.3, help='Eq(5) L_sem 시작 가중치 (논문 최적값 0.3)')
+parser.add_argument('--hds_beta', type=float, default=0.005, help='Eq(5) L_spa 시작 가중치 (논문 최적값 0.005)')
+parser.add_argument('--hds_decay', type=float, default=0.95, help='수렴 안정성을 위한 지수 감쇠율')

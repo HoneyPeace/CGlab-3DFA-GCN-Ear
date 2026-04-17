@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher)
 @File: eval.py
-@Description: Frozen Hybrid (DeepPA + PAConv) 다이렉트 회귀 맞춤형 평가 스크립트
+@Description: Unified Evaluation Script (PAConv / Frozen / E2E 완벽 호환 + TXT 추출)
 '''
 
 from __future__ import print_function, division
@@ -25,9 +25,6 @@ from My_args import parser
 # 🌟 새로운 아키텍처 임포트
 from DeepPA_model import DeepPA_Wrapper  
 from PAConv_model import PAConv          
-
-# Soft-argmax는 제거되었지만 다른 loss 함수에서 import 구조 유지용
-from loss import get_differentiable_coords
 
 matplotlib.use('Agg')
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -92,34 +89,39 @@ test_dataset = TensorDataset(
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # -----------------------------------------------------------------------------
-# 2. 🌟 평가용 Frozen Hybrid Model 래퍼
+# 2. 🌟 평가용 통합 Hybrid Pipeline (train.py와 구조 100% 동기화)
 # -----------------------------------------------------------------------------
-class FrozenHybridModel_Eval(nn.Module):
-    def __init__(self, args, landmark_num):
+class HybridPipeline_Eval(nn.Module):
+    def __init__(self, args, landmark_num, mode='frozen'):
         super().__init__()
+        self.mode = mode.lower()
         self.stage1_paconv = PAConv(args, landmark_num)
-        # 🌟 PAConv 라텐트는 128채널입니다. (기존 64에서 수정됨)
-        self.s1_aux_head = nn.Conv1d(128, landmark_num, 1)
-        self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
+        self.s1_aux_head = nn.Conv1d(128, landmark_num, 1) 
+        
+        # Stage 1이 아닐 때만 DeepPA 부착
+        if self.mode in ['frozen', 'e2e']:
+            self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
 
     def forward(self, x):
-        # 1. PAConv에서 라텐트(128ch)와 히트맵(36ch) 추출
-        s1_latent = self.stage1_paconv(x)
-        s1_hm = self.s1_aux_head(s1_latent)
-        
-        # 2. DeepPA에 명시적으로 분리하여 주입 (결과: 좌표, spa_loss, sem_list)
-        out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
-        pred_coords = out[0] # 첫 번째 반환값이 예측 좌표
-        
-        # 평가 스크립트에서는 최종 좌표와 닻(Anchor) 히트맵만 반환합니다.
-        return pred_coords, s1_hm
+        if self.mode == 'stage1':
+            s1_latent = self.stage1_paconv(x)
+            s1_hm = self.s1_aux_head(s1_latent)
+            # PAConv 단독 모드는 회귀 좌표가 없으므로 더미(Dummy) 값 반환
+            dummy_coords = torch.zeros((x.shape[0], self.s1_aux_head.out_channels, 3), device=x.device)
+            return dummy_coords, s1_hm
+            
+        elif self.mode in ['frozen', 'e2e']:
+            s1_latent = self.stage1_paconv(x)
+            s1_hm = self.s1_aux_head(s1_latent)
+            out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
+            return out[0], s1_hm
 
 # -----------------------------------------------------------------------------
 # 3. 평가 수행 코어 함수
 # -----------------------------------------------------------------------------
-def evaluate_target_model(eval_name, eval_model):
+def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     print(f"\n==================================================")
-    print(f" 🚀 [EVALUATION START] 대상 모델: {eval_name}")
+    print(f" 🚀 [EVALUATION START] 대상 모델: {eval_name} (Mode: {pipeline_mode})")
     print(f"==================================================")
     
     current_hm_dir = os.path.join(heatmap_save_dir_base, eval_name)
@@ -138,7 +140,7 @@ def evaluate_target_model(eval_name, eval_model):
         real_name = name_sample[idx]
         B, N, C = point.shape
         
-        # [정규화 복원 (Denormalization) 준비]
+        # [정규화 복원]
         point_xyz = point[:, :, :3]
         centroid = torch.mean(point_xyz, axis=1, keepdim=True)
         point_centered = point_xyz - centroid
@@ -156,19 +158,15 @@ def evaluate_target_model(eval_name, eval_model):
 
             point_input = point_norm.permute(0, 2, 1).contiguous()
             
-            # 🌟 [수정] 모델에서 결과 2개(좌표, 닻 히트맵)를 받습니다.
+            # 통합 모델 포워딩
             pred_coords_norm, s1_aux_hm = eval_model(point_input)
             
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)  
             
-            # 🌟 S2 히트맵이 제거되었으므로 닻(Anchor)을 시각화/IoU 평가 타겟으로 씁니다.
+            # 히트맵 평가 타겟
             eval_target_hm = s1_aux_hm
 
-            # mm 단위 좌표 복구
-            pred_landmark = (pred_coords_norm * scale) + centroid
-
-            # 히트맵 지표 계산
             pred_heatmap = eval_target_hm.permute(0, 2, 1) 
             pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
             cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
@@ -190,37 +188,34 @@ def evaluate_target_model(eval_name, eval_model):
                 for lm_idx in range(heatmap_np.shape[1]):
                      save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], current_hm_dir, real_name, lm_idx, f"pred_{eval_name}")
 
-            pred_np = pred_landmark.cpu().numpy().squeeze(0)
-            gt_np = gt_landmark.cpu().numpy().squeeze(0)
-                
-            # [Metric: Mean Error (L2 Euclidean Distance)]
-            dists = np.linalg.norm(pred_np - gt_np, axis=1)
-            me = np.mean(dists)
-            
-            me_list.append(me)
-            per_landmark_me_list.append(dists)
-            
-            np.savetxt(os.path.join(current_asc_dir, f"{eval_name}_pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
+            # 좌표 회귀 로직 (Stage 1일 때는 제외)
+            if pipeline_mode != 'stage1':
+                pred_landmark = (pred_coords_norm * scale) + centroid
+                pred_np = pred_landmark.cpu().numpy().squeeze(0)
+                gt_np = gt_landmark.cpu().numpy().squeeze(0)
+                    
+                dists = np.linalg.norm(pred_np - gt_np, axis=1)
+                me = np.mean(dists)
+                me_list.append(me)
+                per_landmark_me_list.append(dists)
+                np.savetxt(os.path.join(current_asc_dir, f"{eval_name}_pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
-    # ------------------ 최종 집계 및 Excel 저장 ------------------
-    if len(per_landmark_me_list) > 0:
-        per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) 
-        lm_means, lm_stds, lm_me_95 = np.mean(per_landmark_me_array, axis=0), np.std(per_landmark_me_array, axis=0), np.percentile(per_landmark_me_array, 95, axis=0)
-        average_me, std_me, me_95_global = np.mean(lm_means), np.mean(lm_stds), np.percentile(me_list, 95)
-        
-        per_landmark_cos_array = np.vstack(per_landmark_cos_sim_list) 
-        lm_cos_means, lm_cos_stds, lm_cos_5 = np.mean(per_landmark_cos_array, axis=0), np.std(per_landmark_cos_array, axis=0), np.percentile(per_landmark_cos_array, 5, axis=0)
-        
-        per_landmark_iou_array = np.vstack(per_landmark_iou_list) 
-        lm_iou_means, lm_iou_stds, lm_iou_5 = np.mean(per_landmark_iou_array, axis=0), np.std(per_landmark_iou_array, axis=0), np.percentile(per_landmark_iou_array, 5, axis=0)
-    else:
-        return
-
-    sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
-    sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
+    # ------------------ 최종 집계 및 저장 ------------------
     avg_cos_sim, cos_sim_5_global = np.mean(cos_sim_list), np.percentile(cos_sim_list, 5)
     avg_iou, iou_5_global = np.mean(iou_list), np.percentile(iou_list, 5)
     avg_time = np.mean(time_list) * 1000.0
+
+    if pipeline_mode != 'stage1' and len(per_landmark_me_list) > 0:
+        per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) 
+        lm_means, lm_stds, lm_me_95 = np.mean(per_landmark_me_array, axis=0), np.std(per_landmark_me_array, axis=0), np.percentile(per_landmark_me_array, 95, axis=0)
+        average_me, std_me, me_95_global = np.mean(lm_means), np.mean(lm_stds), np.percentile(me_list, 95)
+        sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
+        sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
+    else:
+        # Stage 1 (PAConv 단독)인 경우 더미 값 처리
+        average_me, std_me, me_95_global, sr_10, sr_5 = 0.0, 0.0, 0.0, 0.0, 0.0
+        lm_means, lm_stds, lm_me_95 = np.zeros(args.landmark_num), np.zeros(args.landmark_num), np.zeros(args.landmark_num)
+        worst_indices = np.arange(10)
 
     filename_excel = f"{eval_name}_Results_ME{average_me:.4f}.xlsx"
     result_excel_path = os.path.join(run_root, filename_excel)
@@ -248,7 +243,7 @@ def evaluate_target_model(eval_name, eval_model):
         f"{eval_name} (95%ile)": np.round(lm_me_95, 3)
     })
 
-    worst_indices = np.argsort(lm_means)[::-1][:10]
+    worst_indices = np.argsort(lm_means)[::-1][:10] if pipeline_mode != 'stage1' else np.arange(10)
     df_top10 = pd.DataFrame({
         "순위": [f"{r+1}" for r in range(10)],
         eval_name: [f"LM {i+1:02d} ({lm_means[i]:.3f} ± {lm_stds[i]:.3f})" for i in worst_indices],
@@ -261,40 +256,55 @@ def evaluate_target_model(eval_name, eval_model):
         df_top10.to_excel(writer, sheet_name='3_Top10_Hardest', index=False)
 
     print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
-    print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
+    if pipeline_mode != 'stage1':
+        print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
+        
+    # 🌟 [요청 기능 추가] 텍스트(.txt) 파일로 요약본 자동 추출
+    txt_path = result_excel_path.replace(".xlsx", ".txt")
+    with open(txt_path, 'w', encoding='utf-8') as f:
+        f.write("==================================================\n")
+        f.write(f" 🚀 Evaluation Summary: {eval_name} (Run ID: {target_folder_name})\n")
+        f.write("==================================================\n\n")
+        f.write("[Overall Performance]\n")
+        if pipeline_mode != 'stage1':
+            f.write(f"- Average ME: {average_me:.4f} ± {std_me:.4f} mm\n")
+            f.write(f"- 95%ile ME: {me_95_global:.4f} mm\n")
+            f.write(f"- Success Rate (<10mm): {sr_10:.2f} %\n")
+            f.write(f"- Success Rate (<5mm): {sr_5:.2f} %\n")
+        f.write(f"- Average Inference Time: {avg_time:.2f} ms\n")
+        f.write(f"- Heatmap Cosine Similarity: {avg_cos_sim:.2f} %\n")
+        f.write(f"- Heatmap mIoU (@0.1): {avg_iou:.2f} %\n\n")
+        
+        if pipeline_mode != 'stage1':
+            f.write("[Top 10 Hardest Landmarks (Worst Error)]\n")
+            for r, i in enumerate(worst_indices):
+                f.write(f"  {r+1}위: 랜드마크 {i+1:02d} (오차: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm)\n")
+                
+    print(f"  └─ 📄 Text summary saved to: {os.path.basename(txt_path)}")
 
 # -----------------------------------------------------------------------------
 # 4. 모델 로드 및 평가 분기
 # -----------------------------------------------------------------------------
-if args.model.lower() == 'deeppa_auto':
-    print(">>> [INFO] 🚀 Direct Regression Evaluation Mode (Frozen Hybrid)")
-    model = FrozenHybridModel_Eval(args, args.landmark_num).to(device)
-    
-    # 🌟 [수정] 유연한 모델 가중치 로드
-    # 1. PAConv 가중치 로드 (사전 학습된 모델 우선, 없으면 현재 run_root)
-    paconv_pretrained_path = os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
-    stage1_path_old = os.path.join(run_root, 'models', 'Stage1_PAConv_last.t7')
-    
-    if os.path.exists(paconv_pretrained_path):
-        print("📦 Pretrained PAConv 가중치를 로드합니다.")
-        model.stage1_paconv.load_state_dict(torch.load(paconv_pretrained_path, map_location=device))
-    elif os.path.exists(stage1_path_old):
-        print("📦 로컬 Run의 PAConv 가중치를 로드합니다.")
-        model.stage1_paconv.load_state_dict(torch.load(stage1_path_old, map_location=device))
-    else:
-        print("⚠️ [Warning] PAConv 가중치를 찾을 수 없습니다.")
+model_name_lower = args.model.lower()
+if model_name_lower == 'paconv': pipeline_mode = 'stage1'
+elif model_name_lower in ['deeppa_frozen', 'deeppa_auto']: pipeline_mode = 'frozen'
+elif model_name_lower == 'deeppa_e2e': pipeline_mode = 'e2e'
+else: pipeline_mode = 'single_custom' 
 
-    # 2. DeepPA 가중치 로드
-    stage2_path_new = os.path.join(run_root, 'models', 'Frozen_Hybrid_DeepPA_last.t7')
-    stage2_path_old = os.path.join(run_root, 'models', 'Stage2_DeepPA_last.t7')
-    
-    if os.path.exists(stage2_path_new):
-        model.stage2_deeppa.load_state_dict(torch.load(stage2_path_new, map_location=device))
-    elif os.path.exists(stage2_path_old):
-        model.stage2_deeppa.load_state_dict(torch.load(stage2_path_old, map_location=device))
-    else:
-        print("⚠️ [Warning] DeepPA 가중치를 찾을 수 없습니다.")
-    
-    evaluate_target_model("DeepPA_Direct", model)
+print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()}")
+model = HybridPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)
+
+# 🌟 run_frozen.py가 전달한 args.model_epoch 를 사용하여 단번에 가중치 로드
+target_weight_path = os.path.join(run_root, 'models', args.model_epoch)
+
+if os.path.exists(target_weight_path):
+    print(f"📦 모델 가중치 로드 성공: {args.model_epoch}")
+    # strict=False를 통해 PAConv 단독 모드일 때 없는 DeepPA 가중치를 유연하게 무시함
+    model.load_state_dict(torch.load(target_weight_path, map_location=device), strict=False)
+else:
+    print(f"🚨 [ERROR] 가중치 파일을 찾을 수 없습니다: {target_weight_path}")
+    sys.exit(1)
+
+evaluate_target_model(args.model, model, pipeline_mode)
 
 print("\n>>> [ALL EVALUATION COMPLETED]")

@@ -104,10 +104,10 @@ class PAConv(nn.Module):
         # 기존: self.conv9 = nn.Conv1d(128, landmark_num, kernel_size=1, bias=True)
         # 변경: 128채널 정보를 64채널의 '라텐트 피처'로 정제하여 출력합니다.
         # 이는 Stage 2(DeepPA)의 초기 수용 차원(64채널)과 구조적 대칭성(Structural Symmetry)을 
-        # 이루기 위한 매우 의도적인 차원 동기화 설계입니다.
+        # 수정: 128채널의 풍부한 기하 특징을 정제하여 DeepPA로 넘겨주는 구조
         self.conv9 = nn.Sequential(
-            nn.Conv1d(128, 64, kernel_size=1, bias=False),
-            nn.BatchNorm1d(64, momentum=0.1),
+            nn.Conv1d(128, 128, kernel_size=1, bias=False),
+            nn.BatchNorm1d(128, momentum=0.1),
             nn.ReLU(inplace=True)
         )
 
@@ -185,9 +185,9 @@ class PAConv(nn.Module):
         
         # [핵심 변경 사항: 순수 기하학 특징 방출]
         # 1. 64채널 피처맵 통과 (Stage 2에 전달할 순수한 특징의 덩어리)
-        x_res = self.conv9(x_res) 
+        x_res = self.conv9(x_res)
         
         # 2. [삭제] 확률로 바꾸는 Softmax는 정보 손실의 주범이므로 제거합니다! 
         # 이제 모델은 확률 분포(0~1)가 아닌 무한한 가능성을 가진 기하학 특징 텐서를 내뿜습니다.
         
-        return x_res # 형태: (B, 64, N)
+        return x_res # 형태: (B, 128, N)

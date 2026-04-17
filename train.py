@@ -1,6 +1,6 @@
 # @Author: Yuan Wang (Modified by Researcher)
 # @File: train.py
-# @Description: 전면 프리징(Freezing) 기반 Task Disentanglement + HDS 커리큘럼 학습
+# @Description: Unified Hybrid Pipeline (Stage1 / Frozen / E2E 완벽 지원)
 # ==============================================================================
 
 import os
@@ -34,11 +34,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def weight_init(m):
     if isinstance(m, torch.nn.Linear):
         torch.nn.init.xavier_normal_(m.weight)
-        if m.bias is not None:
-            torch.nn.init.constant_(m.bias, 0)
-    elif isinstance(m, torch.nn.Conv2d):
-        torch.nn.init.kaiming_normal_(m.weight)
-    elif isinstance(m, torch.nn.Conv1d):
+        if m.bias is not None: torch.nn.init.constant_(m.bias, 0)
+    elif isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Conv1d):
         torch.nn.init.kaiming_normal_(m.weight)
 
 def get_experiment_paths(args, train_len):
@@ -53,14 +50,10 @@ def get_experiment_paths(args, train_len):
         run_name = f"{setting_str}_{count}"
         run_dir = os.path.join(project_dir, run_name)
         if not os.path.exists(run_dir):
-            os.makedirs(run_dir)
-            break
+            os.makedirs(run_dir); break
         count += 1
     
-    paths = {
-        'root': run_dir, 'models': os.path.join(run_dir, 'models'),
-        'npy_backup': os.path.join(run_dir, 'npy_data'), 'gt_heatmap': os.path.join(run_dir, 'GT_Heatmaps')
-    }
+    paths = {'root': run_dir, 'models': os.path.join(run_dir, 'models'), 'npy_backup': os.path.join(run_dir, 'npy_data')}
     for p in paths.values(): os.makedirs(p, exist_ok=True)
     return paths
 
@@ -72,45 +65,51 @@ def process_data_storage(dataset, prefix, paths):
 
 """
 ================================================================================
-🌟 [디펜스 핵심: Frozen Hybrid Model]
-- Point 1, 2: PAConv(Stage 1)를 전면 프리징하여 지식을 보존하고 역전파를 차단합니다.
-- Point 8: 추출된 힌트는 .detach()를 통해 안전하게 DeepPA(Stage 2)로 주입됩니다.
+🌟 [핵심 수리 완료] Unified Hybrid Pipeline
+- Stage1 모드: PAConv + Aux Head만 학습 (히트맵 생성기 훈련용)
+- Frozen 모드: PAConv 잠금 + DeepPA 회귀 훈련
+- E2E 모드: 전체 동시 학습
 ================================================================================
 """
-class FrozenHybridModel(nn.Module):
-    def __init__(self, args, landmark_num):
+class HybridPipeline(nn.Module):
+    def __init__(self, args, landmark_num, mode='frozen'):
         super().__init__()
+        self.mode = mode.lower()
         self.stage1_paconv = PAConv(args, landmark_num)
-        self.s1_aux_head = nn.Conv1d(64, landmark_num, 1)
+        self.s1_aux_head = nn.Conv1d(128, landmark_num, 1) 
         
-        # 🌟 [디펜스 포인트 2] PAConv 전면 프리징
-        for param in self.stage1_paconv.parameters():
-            param.requires_grad = False
-        for param in self.s1_aux_head.parameters():
-            param.requires_grad = False
-            
-        self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
+        if self.mode == 'frozen':
+            for param in self.stage1_paconv.parameters(): param.requires_grad = False
+            for param in self.s1_aux_head.parameters(): param.requires_grad = False
+                
+        # Stage 1이 아닐 때만 DeepPA 부착
+        if self.mode in ['frozen', 'e2e']:
+            self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
 
     def forward(self, x):
-        # 🌟 [디펜스 포인트 1] Stage 1은 평가 모드로 동작 (가이드 역할만 수행)
-        self.stage1_paconv.eval()
-        self.s1_aux_head.eval()
-        
-        with torch.no_grad():
+        if self.mode == 'stage1':
+            # 🌟 [Stage 1 모드]: 오직 PAConv만 작동. DeepPA는 거치지 않음.
             s1_latent = self.stage1_paconv(x)
             s1_hm = self.s1_aux_head(s1_latent)
+            dummy_coords = torch.zeros((x.shape[0], self.s1_aux_head.out_channels, 3), device=x.device)
+            return dummy_coords, torch.tensor(0.0).to(x.device), [s1_hm], s1_hm
             
-        # 🌟 [디펜스 포인트 4, 8] 라텐트 힌트 주입 (detach로 그래디언트 차단)
-        # DeepPA_Wrapper가 (pred_coords, spa_loss, sem_list)를 반환하도록 설계됨
-        out = self.stage2_deeppa(x, prior_latent=s1_latent.detach(), prior_heatmap=s1_hm_anchor.detach())
-        
-        # 반환값 호환성 처리 (deeppa_semseg 구조 반영)
-        if len(out) >= 3:
-            pred_coords, spa_loss, sem_list = out[0], out[1], out[2]
-        else:
-            pred_coords, spa_loss, sem_list = out[0], torch.tensor(0.0).to(x.device), []
+        elif self.mode == 'frozen':
+            self.stage1_paconv.eval()
+            self.s1_aux_head.eval()
+            with torch.no_grad():
+                s1_latent = self.stage1_paconv(x)
+                s1_hm = self.s1_aux_head(s1_latent)
+            out = self.stage2_deeppa(x, prior_latent=s1_latent.detach(), prior_heatmap=s1_hm.detach())
             
+        elif self.mode == 'e2e':
+            s1_latent = self.stage1_paconv(x)
+            s1_hm = self.s1_aux_head(s1_latent)
+            out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
+            
+        pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
         return pred_coords, spa_loss, sem_list, s1_hm
+
 
 def train(args):
     accum_steps = args.accumulation_steps
@@ -140,55 +139,56 @@ def train(args):
 
     def execute_stage(current_model_name, current_epochs, disable_norm=False, stage_name=""):
         model_name_lower = current_model_name.lower()
-        if model_name_lower == 'deeppa_e2e': 
-            model = FrozenHybridModel(args, args.landmark_num).to(device)
-            # 사전 학습된 PAConv 가중치 로드 (경로를 맞게 수정해주세요)
-            paconv_path = os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
-            if os.path.exists(paconv_path):
-                print(f"📦 [Pretrained Load] 사전 학습된 PAConv 모델을 불러왔습니다.")
-                model.stage1_paconv.load_state_dict(torch.save(paconv_path))
-            else:
-                print(f"⚠️ [Warning] 사전 학습된 PAConv 모델을 찾을 수 없습니다. 랜덤 가중치로 프리징됩니다.")
+        
+        # 🌟 모델 모드 매핑
+        if model_name_lower == 'paconv': pipeline_mode = 'stage1'
+        elif model_name_lower in ['deeppa_frozen', 'deeppa_auto']: pipeline_mode = 'frozen'
+        elif model_name_lower == 'deeppa_e2e': pipeline_mode = 'e2e'
+        else: pipeline_mode = 'single_custom' # 예외 처리
+            
+        if pipeline_mode in ['stage1', 'frozen', 'e2e']: 
+            model = HybridPipeline(args, args.landmark_num, mode=pipeline_mode).to(device)
+            
+            # Frozen이나 E2E일 때 사전학습 가중치 로드
+            if pipeline_mode in ['frozen', 'e2e']:
+                paconv_path = os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
+                if os.path.exists(paconv_path):
+                    print(f"📦 [Pretrained Load] 사전 학습된 PAConv 로드 완료! (Mode: {pipeline_mode.upper()})")
+                    model.load_state_dict(torch.load(paconv_path, map_location=device), strict=False)
+                else:
+                    print(f"⚠️ [Warning] 사전 학습된 PAConv를 찾을 수 없습니다. 랜덤 가중치로 시작합니다.")
         else: 
             model = DeepPA_Wrapper(args, args.landmark_num).to(device)
             
         model.apply(weight_init)
         
         surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
-        criterion = AdaptiveWingLoss() if args.loss == 'adaptive_wing' else torch.nn.MSELoss()
-        hm_criterion = nn.BCEWithLogitsLoss() # 히트맵 훈련용 로스
+        hm_criterion = nn.BCEWithLogitsLoss() 
         
         opt = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
-        scheduler = CosineAnnealingLR(opt, T_max=current_epochs) if args.scheduler == 'cos' else StepLR(opt, step_size=40, gamma=0.9)
+        scheduler = CosineAnnealingLR(opt, T_max=current_epochs) if getattr(args, 'scheduler', 'cos') == 'cos' else StepLR(opt, step_size=40, gamma=0.9)
 
         excel_log_path = os.path.join(paths['root'], f'Training_Log_{stage_name}.xlsx')
         log_records = []
-        target_norm = 1.0 
-        auto_scales = {'coord': 1.0, 'surface': 1.0, 'struct': 1.0}
-        df_calib = None 
+        auto_scales = {'coord': 1.0, 'surface': 1.0, 'struct': 1.0}; target_norm = 1.0
+        use_loss_norm = getattr(args, 'use_loss_norm', False)
 
-        # =========================================================================
-        # 🟢 [Phase 3] 본 학습 (Main Training - Deterministic Decay)
-        # =========================================================================
         for epoch in range(current_epochs):
             model.train() 
-            if model_name_lower == 'deeppa_e2e':
-                model.stage1_paconv.eval() # 프리징 모델은 항상 eval 유지
-                model.s1_aux_head.eval()
                 
-            train_loss_norm = 0.0
-            t_hm_aux, t_crd, t_srf, t_str = 0.0, 0.0, 0.0, 0.0
-            train_mm = 0.0
+            train_loss_norm = 0.0; t_hm_aux, t_crd, t_srf, t_str = 0.0, 0.0, 0.0, 0.0; train_mm = 0.0
             opt.zero_grad() 
             
-            # 🌟 [디펜스 포인트 7] 결정론적 로스 스케줄링 (Curriculum Learning)
-            # 학습 초반에는 HDS 모의고사가 길을 잡고, 에폭이 지날수록 다이렉트 좌표 예측 비중이 1.0에 수렴
-            decay_rate = 0.95
-            w_sem = 0.3 * (decay_rate ** epoch)
-            w_spa = 0.005 * (decay_rate ** epoch)
-            w_pred = 1.0 - (w_sem + w_spa)
-            
-            current_phase_str = f"Frozen + HDS Decay (Pred: {w_pred:.2f})"
+            # 🌟 [안전장치]: Stage 1(PAConv)일 경우 강제로 HDS 로스 가중치 차단
+            if not getattr(args, 'use_direct_regression', True):
+                w_sem, w_spa, w_pred = 1.0, 0.0, 0.0
+                current_phase_str = f"STAGE1 Heatmap Only"
+            else:
+                decay_rate = 0.95
+                w_sem = 0.3 * (decay_rate ** epoch)
+                w_spa = 0.005 * (decay_rate ** epoch)
+                w_pred = 1.0 - (w_sem + w_spa)
+                current_phase_str = f"{pipeline_mode.upper()} Decay (Pred: {w_pred:.2f})"
             
             with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"{stage_name} Ep {epoch+1:03d}", unit="batch", leave=False) as tepoch:
                 for i, (point, landmark, seg) in tepoch:
@@ -204,38 +204,36 @@ def train(args):
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     target_hm = seg.permute(0, 2, 1).contiguous()
                     
-                    # ---------------------------------------------------------
-                    # 1. Forward Pass (다이렉트 회귀 + HDS 반환)
-                    # ---------------------------------------------------------
-                    if model_name_lower == 'deeppa_e2e':
-                        pred_coords, spa_loss, sem_list, s1_hm_anchor = model(point_input)
+                    # 1. Forward Pass
+                    if pipeline_mode in ['stage1', 'frozen', 'e2e']:
+                        pred_coords, spa_loss, sem_list, _ = model(point_input)
                     else:
                         out = model(point_input)
                         pred_coords, spa_loss, sem_list = out[0], torch.tensor(0.0).to(device), []
                         
-                    # ---------------------------------------------------------
-                    # 2. 로스 계산 🌟 [디펜스 포인트 5, 6: HDS 모의고사]
-                    # ---------------------------------------------------------
+                    # 2. 로스 계산 (HDS 모의고사)
                     L_spa = spa_loss if isinstance(spa_loss, torch.Tensor) else torch.tensor(0.0).to(device)
                     
-                    L_sem = 0.0
-                    if len(sem_list) > 0:
-                        for sem_pred in sem_list:
-                            L_sem += hm_criterion(sem_pred, target_hm)
-                        L_sem = L_sem / len(sem_list)
-                    else:
-                        L_sem = torch.tensor(0.0).to(device)
+                    # 🌟 [에러 해결]: 어떠한 차원이 와도 target_hm과 맞도록 자동 형변환 (방어 코드)
+                    safe_sem_list = []
+                    for sp in sem_list:
+                        if sp.shape[1] != target_hm.shape[1]: sp = sp.permute(0, 2, 1).contiguous()
+                        safe_sem_list.append(sp)
+                    L_sem = sum([hm_criterion(sp, target_hm) for sp in safe_sem_list]) / len(safe_sem_list) if len(safe_sem_list) > 0 else torch.tensor(0.0).to(device)
                         
-                    # [디펜스 포인트 9: 최종 회귀 로스 계산]
+                    # 최종 회귀 로스 계산 (Stage 1일때는 계산 무시됨)
                     loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                     loss_surface, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
                     loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
-                    
-                    L_pred = loss_coord + loss_surface + loss_struct
 
-                    # ---------------------------------------------------------
-                    # 3. 로스 융합 및 역전파 (커리큘럼 가중치 적용)
-                    # ---------------------------------------------------------
+                    if use_loss_norm and epoch == 0 and i == 0 and w_pred > 0:
+                        auto_scales['coord'] = target_norm / loss_coord.item() if loss_coord.item() > 0 else 1.0
+                        auto_scales['surface'] = target_norm / loss_surface.item() if loss_surface.item() > 0 else 1.0
+                        auto_scales['struct'] = target_norm / loss_struct.item() if loss_struct.item() > 0 else 1.0
+
+                    L_pred = (loss_coord * auto_scales['coord']) + (loss_surface * auto_scales['surface']) + (loss_struct * auto_scales['struct'])
+
+                    # 3. 로스 융합 및 역전파
                     total_loss = (w_sem * L_sem) + (w_spa * L_spa) + (w_pred * L_pred)
                                         
                     loss = total_loss / accum_steps
@@ -246,14 +244,14 @@ def train(args):
                         opt.zero_grad() 
 
                     with torch.no_grad():
-                        mm_error = F.l1_loss(pred_coords, augmented_landmark).item() * avg_m
+                        mm_error = F.l1_loss(pred_coords, augmented_landmark).item() * avg_m if w_pred > 0 else 0.0
 
                     train_loss_norm += total_loss.item()
                     t_hm_aux += L_sem.item(); t_crd += loss_coord.item(); t_srf += loss_surface.item(); t_str += loss_struct.item()
                     train_mm += mm_error
                     
                     vram_str = f"{torch.cuda.max_memory_allocated() / (1024 ** 3):.1f}GB" if torch.cuda.is_available() else "CPU"
-                    tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", mm=f"{mm_error:.2f}", VRAM=vram_str)
+                    tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", VRAM=vram_str)
 
             num_b = len(train_loader)
             t_loss_n = train_loss_norm / num_b
@@ -272,20 +270,23 @@ def train(args):
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1).contiguous() 
                     
-                    if model_name_lower == 'deeppa_e2e':
+                    if pipeline_mode in ['stage1', 'frozen', 'e2e']:
                         pred_coords, _, _, _ = model(point_input)
                     else:
                         pred_coords = model(point_input)[0]
 
-                    val_mm += F.l1_loss(pred_coords, landmark_normal).item() * avg_m
+                    val_mm += F.l1_loss(pred_coords, landmark_normal).item() * avg_m if w_pred > 0 else 0.0
             
             v_mm = val_mm / len(test_loader)
             
             # --- 성적표 출력 ---
-            print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f}")
-            print(f"  ├─ [Weights] w_sem: {w_sem:.4f} | w_spa: {w_spa:.4f} | w_pred: {w_pred:.4f}")
-            print(f"  ├─ [S2_Pred_Loss] Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}")
-            print(f"  └─ [HDS_Aux_Loss] L_sem(Heatmap): {t_hm_aux/num_b:.4f}")
+            if pipeline_mode == 'stage1':
+                print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | L_sem(Heatmap): {t_hm_aux/num_b:.4f}")
+            else:
+                print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f}")
+                print(f"  ├─ [Weights] w_sem: {w_sem:.4f} | w_spa: {w_spa:.4f} | w_pred: {w_pred:.4f}")
+                print(f"  ├─ [S2_Pred_Loss] Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}")
+                print(f"  └─ [HDS_Aux_Loss] L_sem(Heatmap): {t_hm_aux/num_b:.4f}")
 
             log_records.append({
                 'Epoch': epoch + 1, 'Phase': current_phase_str,
@@ -303,19 +304,23 @@ def train(args):
         print(f"\n💾 [Model Save] 학습 완료! 모델을 저장합니다.")
         last_save_path = os.path.join(paths['models'], f'{stage_name}_last.t7')
         
-        if model_name_lower == 'deeppa_e2e':
-            # 프리징된 PAConv는 굳이 저장할 필요 없으므로 DeepPA 가중치만 저장
-            torch.save(model.stage2_deeppa.state_dict(), last_save_path)
-        else:
-            torch.save(model.state_dict(), last_save_path)
+        # 🌟 모두 동일한 방식으로 저장하여 호환성 100% 보장
+        torch.save(model.state_dict(), last_save_path)
             
         return model 
 
-    print(f"\n=== [Phase 3] Start Task Disentangled Pipeline ===")
+    print(f"\n=== [Pipeline Start] ===")
     
-    if args.model.lower() == 'deeppa_auto':
-        print(f">>> [DEFENSE MODE] 🛡️ PAConv 전면 프리징 + HDS 커리큘럼 스케줄링 가동")
-        execute_stage('deeppa_e2e', args.epochs, disable_norm=True, stage_name=f"Frozen_Hybrid_DeepPA")
+    target_model = args.model.lower()
+    if target_model == 'paconv':
+        print(f">>> [MODE: STAGE 1] 🎯 PAConv 단독 학습 (히트맵 100%)")
+        execute_stage('paconv', args.epochs, stage_name=f"Single_PAConv")
+    elif target_model in ['deeppa_frozen', 'deeppa_auto']:
+        print(f">>> [MODE: FROZEN] ❄️ PAConv 프리징 + HDS 커리큘럼")
+        execute_stage('deeppa_frozen', args.epochs, stage_name=f"Frozen_Hybrid")
+    elif target_model == 'deeppa_e2e':
+        print(f">>> [MODE: E2E] 🔥 PAConv 동시 학습(Joint Opt) + HDS 커리큘럼")
+        execute_stage('deeppa_e2e', args.epochs, stage_name=f"E2E_Hybrid")
     else:
         execute_stage(args.model, args.epochs, disable_norm=True, stage_name=f"Single_{args.model}")
         
