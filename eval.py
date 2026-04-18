@@ -106,8 +106,14 @@ class HybridPipeline_Eval(nn.Module):
     def forward(self, x):
         if self.mode == 'stage1':
             s1_latent, s1_hm_anchor = self.stage1_paconv(x)
-            dummy_coords = torch.zeros((x.shape[0], s1_hm_anchor.shape[1], 3), device=x.device)
-            return dummy_coords, s1_hm_anchor
+            
+            # 🌟 [봉인 해제 1] 더미 좌표(zeros) 대신, 히트맵에서 가장 높은 점의 좌표를 직접 뜯어옵니다.
+            max_idx = torch.argmax(s1_hm_anchor, dim=1) 
+            xyz_permuted = x[:, :3, :].permute(0, 2, 1).contiguous()
+            gather_idx = max_idx.unsqueeze(-1).expand(-1, -1, 3) 
+            pred_coords = torch.gather(xyz_permuted, 1, gather_idx) 
+            
+            return pred_coords, s1_hm_anchor
             
         elif self.mode in ['frozen', 'e2e']:
             s1_latent, s1_hm = self.stage1_paconv(x)
@@ -209,8 +215,8 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     avg_iou, iou_5_global = np.mean(iou_list), np.percentile(iou_list, 5)
     avg_time = np.mean(time_list) * 1000.0
 
-    if pipeline_mode != 'stage1' and len(per_landmark_me_list) > 0:
-        per_landmark_me_array = np.stack(per_landmark_me_list, axis=0) 
+    if len(per_landmark_me_list) > 0:
+        per_landmark_me_array = np.stack(per_landmark_me_list, axis=0)
         lm_means, lm_stds, lm_me_95 = np.mean(per_landmark_me_array, axis=0), np.std(per_landmark_me_array, axis=0), np.percentile(per_landmark_me_array, 95, axis=0)
         average_me, std_me, me_95_global = np.mean(lm_means), np.mean(lm_stds), np.percentile(me_list, 95)
         sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
@@ -271,21 +277,20 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         f.write(f"- Heatmap Cosine Sim     : {avg_cos_sim:.2f} % (95%ile: {cos_sim_5_global:.2f} %)\n")
         f.write(f"- Heatmap mIoU (@0.1)    : {avg_iou:.2f} % (95%ile: {iou_5_global:.2f} %)\n")
         
-        if pipeline_mode != 'stage1':
-            f.write(f"- Average ME             : {average_me:.4f} ± {std_me:.4f} mm\n")
-            f.write(f"- 95%ile ME              : {me_95_global:.4f} mm\n")
-            f.write(f"- Success Rate (<10mm)   : {sr_10:.2f} %\n")
-            f.write(f"- Success Rate (<5mm)    : {sr_5:.2f} %\n")
+
+        f.write(f"- Average ME             : {average_me:.4f} ± {std_me:.4f} mm\n")
+        f.write(f"- 95%ile ME              : {me_95_global:.4f} mm\n")
+        f.write(f"- Success Rate (<10mm)   : {sr_10:.2f} %\n")
+        f.write(f"- Success Rate (<5mm)    : {sr_5:.2f} %\n")
+        
+        f.write("\n[2. Per-Landmark Errors (All 36)]\n")
+        for i in range(lm_means.shape[0]):
+            f.write(f"  LM {i+1:02d} : {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm  (95%ile: {lm_me_95[i]:.3f} mm)\n")
             
-            f.write("\n[2. Per-Landmark Errors (All 36)]\n")
-            for i in range(lm_means.shape[0]):
-                f.write(f"  LM {i+1:02d} : {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm  (95%ile: {lm_me_95[i]:.3f} mm)\n")
-                
-            f.write("\n[3. Top 10 Hardest Landmarks (Worst Error)]\n")
-            for r, i in enumerate(worst_indices):
-                f.write(f"  {r+1}위: LM {i+1:02d} (오차: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm)\n")
-        else:
-            f.write("\n[Note] Stage 1 (PAConv) 모드이므로 3D 좌표 회귀 지표(ME)는 평가하지 않습니다.\n")
+        f.write("\n[3. Top 10 Hardest Landmarks (Worst Error)]\n")
+        for r, i in enumerate(worst_indices):
+            f.write(f"  {r+1}위: LM {i+1:02d} (오차: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm)\n")
+
                 
     print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
     print(f"  └─ 📄 Text summary perfectly synchronized & saved to: {os.path.basename(txt_path)}")
