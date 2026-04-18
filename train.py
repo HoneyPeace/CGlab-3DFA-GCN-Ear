@@ -214,21 +214,31 @@ def train(args):
                     L_spa = spa_loss if isinstance(spa_loss, torch.Tensor) else torch.tensor(0.0).to(device)
                     
                     # ---------------------------------------------------------
-                    # 🌟 [핵심 수정 2]: 2048해상도 보조 히트맵을 8192로 자동 보간(Interpolate)
+                    # 🌟 [연구자님 의도 반영]: 기하학적 1:1 매칭 HDS (Gather 방식)
                     # ---------------------------------------------------------
                     safe_sem_list = []
-                    for sp in sem_list:
+                    target_list = []
+
+                    for idx, sp in enumerate(sem_list):
                         if sp is None: continue
                         if sp.shape[1] != target_hm.shape[1]: 
                             sp = sp.permute(0, 2, 1).contiguous()
                         
-                        # 점의 개수(N)가 다르면 Nearest Neighbor 방식으로 강제 펌핑!
-                        if sp.shape[2] != target_hm.shape[2]:
-                            sp = F.interpolate(sp, size=target_hm.shape[2], mode='nearest')
+                        curr_N = sp.shape[2]
+                        if curr_N == 8192:
+                            safe_sem_list.append(sp)
+                            target_list.append(target_hm)
+                        else:
+                            # 🚨 정답지(8192)를 모델이 선택한 2048개의 위치에 맞춰 깎아옴
+                            # indices[-(idx+1)]은 모델 내부에서 사용한 FPS 인덱스
+                            stage_idx = indices[-(idx+1)] 
+                            gathered_target = torch.gather(target_hm, 2, stage_idx.unsqueeze(1).expand(-1, 36, -1))
                             
-                        safe_sem_list.append(sp)
-                        
-                    L_sem = sum([hm_criterion(sp, target_hm) for sp in safe_sem_list]) / len(safe_sem_list) if len(safe_sem_list) > 0 else torch.tensor(0.0).to(device)
+                            safe_sem_list.append(sp)
+                            target_list.append(gathered_target)
+
+                    # 1:1 대응된 리스트로 채점 (제외 없음!)
+                    L_sem = sum([hm_criterion(s, t) for s, t in zip(safe_sem_list, target_list)]) / len(safe_sem_list)
                         
                     # 최종 회귀 로스 계산 
                     loss_coord = dynamic_focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
