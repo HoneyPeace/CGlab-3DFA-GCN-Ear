@@ -45,12 +45,13 @@ def load_face_data(data_root, data_name, partition, in_channels=3):
     if not os.path.exists(heat_path):
         raise FileNotFoundError(f"File not found: {heat_path}\nMake sure 'train.py' generated the NPY files correctly.")
 
-    # numpy array 객체로 일괄 로드 (allow_pickle=True는 객체 배열 허용)
-    Heat_data_sample = np.load(heat_path, allow_pickle=True)
-    Shape_sample = np.load(shape_path, allow_pickle=True)
-    landmark_position_select_all = np.load(land_path, allow_pickle=True)
+    # 🌟 [디펜스 포인트: 메모리 최적화]
+    # RAM 사용량을 반토막 내고 CPU 병목을 없애기 위해 로드 즉시 float32로 캐스팅합니다.
+    Heat_data_sample = np.load(heat_path, allow_pickle=True).astype(np.float32)
+    Shape_sample = np.load(shape_path, allow_pickle=True).astype(np.float32)
+    landmark_position_select_all = np.load(land_path, allow_pickle=True).astype(np.float32)
     
-    # 데이터 이름(예: 'Ear296_001') 로드. 평가나 시각화 시 어느 데이터인지 추적하기 위함.
+    # 데이터 이름 로드
     if os.path.exists(name_path):
         Name_sample = np.load(name_path, allow_pickle=True)
     else:
@@ -63,22 +64,24 @@ def load_face_data(data_root, data_name, partition, in_channels=3):
 class FaceLandmarkData(Dataset):
     """
     [PyTorch 표준 Dataset 클래스 상속]
-    - __init__: 초기화 시 전체 데이터를 RAM에 한 번에 올려놓습니다.
-    - __getitem__: DataLoader가 배치를 만들 때 호출되며, 개별 Numpy 배열을 PyTorch Tensor로 변환하여 던져줍니다.
     """
     def __init__(self, data_root, partition='train', data='Ear296_Korean', in_channels=3):
         self.data_root = data_root
         self.partition = partition
         self.DATA = data
-        self.in_channels = in_channels # 🌟 여기서 채널 개수를 전달받아 로더를 결정함
-        # 미리 만들어둔 파서 함수 호출
-        self.data, self.landmark, self.seg, self.names = load_face_data(self.data_root, self.DATA, self.partition, self.in_channels)
+        self.in_channels = in_channels
+        
+        # 전체 데이터를 RAM에 한 번에 로드 (위에서 float32로 최적화됨)
+        self.data, self.landmark, self.seg, self.names = load_face_data(
+            self.data_root, self.DATA, self.partition, self.in_channels
+        )
 
     def __getitem__(self, item):
-        # Numpy 배열(float64 등)을 PyTorch 학습용 FloatTensor(float32)로 타입 캐스팅
-        face = torch.from_numpy(self.data[item]).float()
-        landmark = torch.from_numpy(self.landmark[item]).float()
-        heatmap = torch.from_numpy(self.seg[item]).float()  # seg는 Heatmap(히트맵 확률 지도)을 의미함
+        # 🌟 [디펜스 포인트: Zero-copy 텐서 변환]
+        # 데이터가 이미 float32이므로 torch.as_tensor()를 사용하면 메모리 복사 없이 초고속으로 GPU로 날아갈 준비를 합니다.
+        face = torch.as_tensor(self.data[item])
+        landmark = torch.as_tensor(self.landmark[item])
+        heatmap = torch.as_tensor(self.seg[item])  
         
         return face, landmark, heatmap
 

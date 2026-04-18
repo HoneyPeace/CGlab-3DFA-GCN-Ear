@@ -1,5 +1,5 @@
 '''
-@Author: Yuan Wang (Modified by Researcher 2 & AI Assistant)
+@Author: Yuan Wang (Modified by Researcher)
 @File: util.py
 @Description: 
 [NotebookLM을 위한 모듈 요약]
@@ -26,9 +26,6 @@ from functools import reduce
 # ==========================================================
 # 🚀 데이터 전처리용 초고속 C++ FPS 커널 로드
 # ==========================================================
-# [의도] FPS(가장 먼 점 샘플링)는 점의 개수 N에 대해 O(N^2)의 연산량을 가집니다.
-# 파이썬(PyTorch) 네이티브 구현으로는 대용량 Point Cloud 처리 시 병목이 발생하므로,
-# C++로 컴파일된 PointNet++의 CUDA 커널을 직접 호출하여 연산 속도를 극대화합니다.
 import sys
 from pathlib import Path
 
@@ -91,15 +88,12 @@ def read_asc_files_from_folder(folder_path):
     return lm_list
 
 # -----------------------------------------------------------------------------
-# 1. Shape Data Load (partition 인자 유지)
+# 1. Shape Data Load
 # -----------------------------------------------------------------------------
 def load_shape_data(dataset, data_root, partition=None):
-    """ 다양한 데이터셋 포맷(Ply 폴더, Mat 파일, H5 파일)을 파싱하여 3D 좌표 형태로 통일함 """
     target_folder_name = None
-    if partition == 'train':
-        target_folder_name = 'train' 
-    elif partition == 'test':
-        target_folder_name = 'test'
+    if partition == 'train': target_folder_name = 'train' 
+    elif partition == 'test': target_folder_name = 'test'
         
     if target_folder_name:
         target_path = os.path.join(data_root, target_folder_name)
@@ -137,15 +131,12 @@ def load_shape_data(dataset, data_root, partition=None):
     return [], []
 
 # -----------------------------------------------------------------------------
-# 2. Landmark Position Load (partition 인자 유지)
+# 2. Landmark Position Load
 # -----------------------------------------------------------------------------
 def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
-    """ 정답(GT) 랜드마크의 3D 좌표를 추출함. (인덱스 매핑 방식과 직접 좌표 로드 방식 모두 지원) """
     target_folder_name = None
-    if partition == 'train':
-        target_folder_name = 'train'
-    elif partition == 'test':
-        target_folder_name = 'test'
+    if partition == 'train': target_folder_name = 'train'
+    elif partition == 'test': target_folder_name = 'test'
 
     if target_folder_name:
         target_path = os.path.join(data_root, target_folder_name)
@@ -203,16 +194,9 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
     return []
 
 # -----------------------------------------------------------------------------
-# Core Processing (가우시안 히트맵 및 샘플링)
+# Core Processing
 # -----------------------------------------------------------------------------
 def Gaussian_Heatmap(Distance, sigma):
-    """
-    [히트맵 생성 수학적 로직]
-    이산적인 점(Discrete point) 하나를 정답으로 주면 모델이 학습하기 매우 어렵습니다.
-    따라서 정답 랜드마크를 중심으로 반경(sigma)만큼 퍼져나가는 
-    연속적인 가우시안 확률 분포(Continuous Probability Distribution)를 생성합니다.
-    공식: exp(-(d^2) / (2 * sigma^2))
-    """
     D2 = Distance * Distance
     S2 = 2.0 * sigma * sigma
     Exponent = D2 / S2
@@ -220,9 +204,7 @@ def Gaussian_Heatmap(Distance, sigma):
     return heatmap
 
 def calculateHeatMap_Euclidean(shape_all, landmark_position_sample, sigma):
-    """ 모든 Point Cloud에 대해 각 랜드마크 위치로부터의 유클리디안 거리를 구해 히트맵을 생성합니다. """
     Heat_data_all = []
-    
     for i in tqdm(range(len(shape_all)), desc="   Calc Heatmaps", unit="shape"):
         shape_i = shape_all[i]
         lm_i = landmark_position_sample[i]
@@ -251,18 +233,11 @@ def get_dists(points1, points2):
     return torch.sqrt(dists).float()
 
 def fps(xyz, M):
-    """
-    [Farthest Point Sampling (FPS) 로직]
-    수만 개의 3D 점들을 모델 입력 크기(예: 2048개)로 줄일 때, 
-    무작위로 뽑지 않고 서로 가장 멀리 떨어져 있는 점들을 순차적으로 뽑는 방식입니다.
-    이로 인해 3D 표면 전체의 기하학적 형태(Geometry)를 균일하게 유지하며 샘플링할 수 있습니다.
-    """
     if USE_CPP_FPS_UTIL and xyz.is_cuda:
         xyz = xyz.contiguous()
-        idx = fps_cpp(xyz, M) # C++ 커널 호출
+        idx = fps_cpp(xyz, M)
         return idx.long()
     else:
-        # PyTorch 기반 폴백(Fallback) 로직
         device = xyz.device
         B, N, C = xyz.shape
         centroids = torch.zeros(size=(B, M), dtype=torch.long).to(device)
@@ -288,21 +263,12 @@ def random_sample(shape_all, Heat_data_all, num_points, rand_seed, sample_way, d
         shape_sample     = [np.array(shape_all[j])[FPS_matrix[j].squeeze(0).cpu(), :]
                             for j in range(len(shape_all))]
         return Heat_data_sample, shape_sample
-
     elif sample_way == 'Random':
-        try:
-             pass 
-        except:
-            return [], []
-            
+        try: pass 
+        except: return [], []
     return [], []
 
-# 🔥 복구된 평가/회귀 함수들 (절대 삭제 금지!)
 def get_rigid(src, dst):
-    """
-    [Rigid Transformation (ICP 방식) 계산]
-    SVD(특이값 분해)를 사용하여 두 점군 간의 최적의 회전 행렬(R)과 평행 이동 벡터(T)를 찾습니다.
-    """
     src_mean = src.mean(0)
     dst_mean = dst.mean(0)
     H = reduce(lambda s, p: s + np.outer(p[0], p[1]), zip(src - src_mean, dst - dst_mean), np.zeros((3,3)))
@@ -313,21 +279,14 @@ def get_rigid(src, dst):
     return np.hstack((R, T[:, np.newaxis]))
 
 def landmark_regression(shape, Heatmap, regression_point_num, idx=None):
-    """
-    [예측된 히트맵에서 3D 랜드마크 복원]
-    모델이 예측한 히트맵(확률)을 기반으로, 가장 확률이 높은 이웃 점들을 모은 뒤
-    MDS(다차원 척도법)와 Rigid Transform을 사용하여 소수점 단위의 정밀한 3D 좌표를 역산해냅니다.
-    단순한 Soft-argmax보다 표면 제약을 더 잘 유지하는 포스트 프로세싱 기법입니다.
-    """
     shape   = shape.cpu().numpy()
     Heatmap = Heatmap.cpu().numpy()
-
     sortIdx = np.argsort(Heatmap, 0)
 
     shape_sort_select = np.array([shape[sortIdx[-regression_point_num:, ld]]
                                   for ld in range(Heatmap.shape[1])])
     Heatmap_sort_select = np.array([Heatmap[sortIdx[-regression_point_num:, ld], ld]
-                                    for ld in range(Heatmap.shape[1])]).reshape(-1, regression_point_num, 1)
+                               for ld in range(Heatmap.shape[1])]).reshape(-1, regression_point_num, 1)
 
     shape_sort_select_rep = np.expand_dims(shape_sort_select, axis=-1).repeat(regression_point_num, axis=-1)
     shape2_exp_eer = shape_sort_select_rep.transpose(0, 1, 3, 2) - shape_sort_select_rep.transpose(0, 3, 1, 2)
@@ -369,7 +328,6 @@ def landmark_regression(shape, Heatmap, regression_point_num, idx=None):
     return torch.from_numpy(landmark3D).unsqueeze(0).to(device)
 
 def get_3D_FAN_NME(pred_landmark, gt_landmark):
-    """ NME(Normalized Mean Error) 기반 평가 지표 계산 """
     NME_single = torch.sum(torch.norm(pred_landmark - gt_landmark, dim=2), 0)
     NME = torch.mean(NME_single)
     return NME, NME_single
@@ -378,27 +336,14 @@ def get_3D_FAN_NME(pred_landmark, gt_landmark):
 # 🌟 [신규 업데이트] Offline 7-Channel 피처 생성기 (Eigenvector 3 + Eigenvalue 1)
 # =============================================================================
 def compute_geometric_features_7ch(shapes, k=15):
-    """
-    [PCA / Eigen Decomposition 기반 기하학적 특징 추출기]
-    - 목적: 학습 중 loss.py에서 매번 계산하면 GPU 부하가 너무 크기 때문에,
-            전처리 단계에서 미리 표면의 '주방향(뼈대 방향)'과 '곡률(뾰족한 정도)'을 계산해 둡니다.
-    - 과정:
-      1. 각 점마다 K-NN으로 주변 이웃 점들을 모아 공분산 행렬(Covariance Matrix)을 만듭니다.
-      2. 이 행렬을 고유 분해(Eigen Decomposition)합니다.
-      3. 가장 큰 고유값에 해당하는 고유벡터(Eigenvector)는 그 부위가 뻗어있는 주방향(3D)을 나타냅니다.
-      4. 가장 작은 고유값을 고유값의 합으로 나누면 곡률(Curvature Magnitude, 1D)을 얻을 수 있습니다.
-    - 결과: 반환된 4채널 특징은 나중에 기존 XYZ(3)와 합쳐져 총 7채널이 됩니다.
-    """
-    # GPU VRAM OOM 방지를 위해 배치(Batch) 단위로 쪼개서 연산합니다.
     geom_list = []
-    batch_size = 32 # VRAM 안전선
+    batch_size = 32 
     
     for i in tqdm(range(0, len(shapes), batch_size), desc="   Calc 7-Ch Geometrics"):
         batch_shapes = shapes[i:i+batch_size]
         shapes_tensor = torch.tensor(np.array(batch_shapes), dtype=torch.float32).to(device)
         B, N, _ = shapes_tensor.shape
         
-        # 1. K-NN 거리 계산 및 이웃 추출
         dist_matrix = torch.cdist(shapes_tensor, shapes_tensor)
         _, knn_indices = torch.topk(dist_matrix, k, dim=2, largest=False)
         
@@ -406,36 +351,29 @@ def compute_geometric_features_7ch(shapes, k=15):
         shapes_expanded = shapes_tensor.unsqueeze(1).expand(-1, N, -1, -1)
         knn_points = torch.gather(shapes_expanded, 2, idx_expanded)
         
-        # 2. 공분산 행렬 생성 및 아이겐 분해 (Eigen Decomposition)
         center = knn_points.mean(dim=2, keepdim=True)
         centered = knn_points - center
-        cov = torch.matmul(centered.transpose(2, 3), centered)
+        
+        # 🌟 수학적 무결성 확보: 공분산 계산 시 이웃의 개수(k-1)로 나누어 편향 제거
+        cov = torch.matmul(centered.transpose(2, 3), centered) / (k - 1)
         eigval, eigvec = torch.linalg.eigh(cov)
         
-        # 🔥 3. 아이겐벡터: 가장 긴 축(주방향) 추출 (3채널)
         principal_dir = eigvec[..., 2]
         dot_product = torch.sum(principal_dir * center.squeeze(2), dim=-1, keepdim=True)
-        principal_dir = principal_dir * torch.sign(dot_product) # PCA 벡터의 방향성(부호) 통일
+        principal_dir = principal_dir * torch.sign(dot_product)
         
-        # 🔥 4. 아이겐밸류: 가장 작은 값을 이용해 표면 변동성(Surface Variation), 즉 곡률 추출 (1채널)
         sum_eig = torch.sum(eigval, dim=-1) + 1e-6
         curvature = (eigval[..., 0] / sum_eig).unsqueeze(-1) 
         
-        # 5. 방향(3) + 곡률(1) 병합하여 4채널 피처 생성
         geom_features = torch.cat([principal_dir, curvature], dim=-1)
-        
         geom_list.extend(geom_features.cpu().numpy())
         
     return geom_list
 
 # -----------------------------------------------------------------------------
-# Main Sampling Function (7채널 병합 및 저장 로직 적용)
+# Main Sampling Function
 # -----------------------------------------------------------------------------
 def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data', partition=None):
-    """
-    [데이터 전처리 파이프라인의 오케스트레이터]
-    1. 원본 데이터 로드 -> 2. 히트맵 생성 -> 3. FPS 다운샘플링 -> 4. 기하학적 특징 계산 -> 5. NPY 파일로 저장
-    """
     suffix = "sample" 
     if partition == 'train': suffix = "train"
     elif partition == 'test': suffix = "test"
@@ -462,14 +400,11 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
         print("Sampling failed or empty.")
         return
 
-    # 🌟 [핵심 파트] 7채널(XYZ 3 + 주방향 3 + 곡률 1) 데이터 오프라인 베이킹
-    # 학습 시간을 단축하기 위해 무거운 연산을 여기서 미리 수행합니다.
     print('   Baking 7-Channel Geometric Features (Eigenvectors & Eigenvalues)...')
     geom_features = compute_geometric_features_7ch(shape_sample, k=15)
     
     shape_7ch_sample = []
     for i in range(len(shape_sample)):
-        # 공간 좌표 (2048, 3) 과 미리 계산한 특징 (2048, 4) 를 이어붙여 최종 (2048, 7) 텐서로 결합
         shape_7ch = np.concatenate([shape_sample[i], geom_features[i]], axis=-1)
         shape_7ch_sample.append(shape_7ch)
 
@@ -478,10 +413,7 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
     
     print(f"   Saving to: {save_base_dir} (Suffix: _{suffix})")
     np.save(os.path.join(save_base_dir, f'Heat_data_{suffix}.npy'), Heat_data_sample)
-    
-    # 모델(train.py, eval_all.py)에서 읽어들일 수 있도록 shape_{suffix}.npy 에 7채널 데이터를 덮어쓰기 형태로 저장
     np.save(os.path.join(save_base_dir, f'shape_{suffix}.npy'),      shape_7ch_sample) 
-    
     np.save(os.path.join(save_base_dir, f'landmark_{suffix}.npy'),   landmark_position_sample)
     np.save(os.path.join(save_base_dir, f'name_{suffix}.npy'),       np.array(name_all))
 

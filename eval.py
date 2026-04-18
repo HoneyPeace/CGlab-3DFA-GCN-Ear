@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher)
 @File: eval.py
-@Description: Unified Evaluation Script (PAConv / Frozen / E2E 완벽 호환 + TXT 추출)
+@Description: Unified Evaluation Script (PAConv / Frozen / E2E 완벽 호환 + TXT/EXCEL 100% 동기화 추출)
 '''
 
 from __future__ import print_function, division
@@ -49,14 +49,14 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
 # -----------------------------------------------------------------------------
 # 1. 경로 및 데이터 로드 
 # -----------------------------------------------------------------------------
-if not args.run_id:
+if not getattr(args, 'run_id', None):
     print("Error: --run_id required (e.g., '1').")
     sys.exit(1)
 
 project_dir = os.path.join(args.output_root, args.exp_name)
-batch_str = f"{args.batch_size}x{args.accumulation_steps}" if args.accumulation_steps > 1 else f"{args.batch_size}"
+batch_str = f"{args.batch_size}x{args.accumulation_steps}" if getattr(args, 'accumulation_steps', 1) > 1 else f"{args.batch_size}"
 base_str = f"FPS{args.num_points}_sigma{args.sigma}_batch{batch_str}_train{args.train_len}"
-setting_str = f"{base_str}_{args.user_tag}" if args.user_tag else base_str
+setting_str = f"{base_str}_{args.user_tag}" if getattr(args, 'user_tag', None) else base_str
 
 target_folder_name = f"{setting_str}_{args.run_id}"
 run_root = os.path.join(project_dir, target_folder_name)
@@ -71,11 +71,12 @@ asc_save_dir_base = os.path.join(run_root, "Pred_Landmarks")
 
 try:
     in_channels = getattr(args, 'in_channels', 3)
-    shape_filename = f"shape_{args.Eval_DataType}.npy"
+    eval_datatype = getattr(args, 'Eval_DataType', 'test')
+    shape_filename = f"shape_{eval_datatype}.npy"
     shape_sample = np.load(os.path.join(data_dir, shape_filename), allow_pickle=True)
-    landmark_all = np.load(os.path.join(data_dir, f"landmark_{args.Eval_DataType}.npy"), allow_pickle=True)
-    heatmap_sample = np.load(os.path.join(data_dir, f"Heat_data_{args.Eval_DataType}.npy"), allow_pickle=True)
-    name_path = os.path.join(data_dir, f"name_{args.Eval_DataType}.npy")
+    landmark_all = np.load(os.path.join(data_dir, f"landmark_{eval_datatype}.npy"), allow_pickle=True)
+    heatmap_sample = np.load(os.path.join(data_dir, f"Heat_data_{eval_datatype}.npy"), allow_pickle=True)
+    name_path = os.path.join(data_dir, f"name_{eval_datatype}.npy")
     name_sample = np.load(name_path, allow_pickle=True) if os.path.exists(name_path) else [f"S{i:03d}" for i in range(len(shape_sample))]
 except FileNotFoundError:
     print(f"Error: Backup data files not found in {data_dir}.")
@@ -89,30 +90,27 @@ test_dataset = TensorDataset(
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # -----------------------------------------------------------------------------
-# 2. 🌟 평가용 통합 Hybrid Pipeline (train.py와 구조 100% 동기화)
+# 2. 🌟 평가용 통합 Hybrid Pipeline (train.py와 아키텍처 100% 동기화)
 # -----------------------------------------------------------------------------
 class HybridPipeline_Eval(nn.Module):
     def __init__(self, args, landmark_num, mode='frozen'):
         super().__init__()
         self.mode = mode.lower()
         self.stage1_paconv = PAConv(args, landmark_num)
-        self.s1_aux_head = nn.Conv1d(128, landmark_num, 1) 
         
-        # Stage 1이 아닐 때만 DeepPA 부착
+        # [수정]: PAConv가 히트맵을 뱉으므로 s1_aux_head 삭제 (train.py와 동일)
+        
         if self.mode in ['frozen', 'e2e']:
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
 
     def forward(self, x):
         if self.mode == 'stage1':
-            s1_latent = self.stage1_paconv(x)
-            s1_hm = self.s1_aux_head(s1_latent)
-            # PAConv 단독 모드는 회귀 좌표가 없으므로 더미(Dummy) 값 반환
-            dummy_coords = torch.zeros((x.shape[0], self.s1_aux_head.out_channels, 3), device=x.device)
-            return dummy_coords, s1_hm
+            s1_latent, s1_hm_anchor = self.stage1_paconv(x)
+            dummy_coords = torch.zeros((x.shape[0], s1_hm_anchor.shape[1], 3), device=x.device)
+            return dummy_coords, s1_hm_anchor
             
         elif self.mode in ['frozen', 'e2e']:
-            s1_latent = self.stage1_paconv(x)
-            s1_hm = self.s1_aux_head(s1_latent)
+            s1_latent, s1_hm = self.stage1_paconv(x)
             out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
             return out[0], s1_hm
 
@@ -140,7 +138,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         real_name = name_sample[idx]
         B, N, C = point.shape
         
-        # [정규화 복원]
+        # [정규화 복원 세팅]
         point_xyz = point[:, :, :3]
         centroid = torch.mean(point_xyz, axis=1, keepdim=True)
         point_centered = point_xyz - centroid
@@ -148,8 +146,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         scale = m.view(-1, 1, 1)
         point_norm_xyz = point_centered / scale 
         
-        if C == 7: point_norm = torch.cat([point_norm_xyz, point[:, :, 3:]], dim=-1)
-        elif C == 6: point_norm = torch.cat([point_norm_xyz, point[:, :, 3:]], dim=-1)
+        if C >= 6: point_norm = torch.cat([point_norm_xyz, point[:, :, 3:]], dim=-1)
         else: point_norm = point_norm_xyz
         
         with torch.no_grad():
@@ -164,11 +161,11 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)  
             
-            # 히트맵 평가 타겟
             eval_target_hm = s1_aux_hm
-
             pred_heatmap = eval_target_hm.permute(0, 2, 1) 
             pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
+            
+            # 유사도 평가
             cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
             cos_sim_list.append(cos_sim_k.mean().item()) 
             per_landmark_cos_sim_list.append(cos_sim_k.cpu().numpy()) 
@@ -211,8 +208,8 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         average_me, std_me, me_95_global = np.mean(lm_means), np.mean(lm_stds), np.percentile(me_list, 95)
         sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
         sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
+        worst_indices = np.argsort(lm_means)[::-1][:10]
     else:
-        # Stage 1 (PAConv 단독)인 경우 더미 값 처리
         average_me, std_me, me_95_global, sr_10, sr_5 = 0.0, 0.0, 0.0, 0.0, 0.0
         lm_means, lm_stds, lm_me_95 = np.zeros(args.landmark_num), np.zeros(args.landmark_num), np.zeros(args.landmark_num)
         worst_indices = np.arange(10)
@@ -220,6 +217,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     filename_excel = f"{eval_name}_Results_ME{average_me:.4f}.xlsx"
     result_excel_path = os.path.join(run_root, filename_excel)
     
+    # [1] Excel 저장
     summary_data = {
         "지표 (Metric)": [
             "[Metadata]", "Experiment", "Run ID", "Model", 
@@ -238,14 +236,13 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 
     lm_me_combined = [f"{lm_means[i]:.3f} ± {lm_stds[i]:.3f}" for i in range(lm_means.shape[0])]
     df_landmarks = pd.DataFrame({
-        "LM": [f"{i+1}" for i in range(lm_means.shape[0])],
-        eval_name: lm_me_combined,
+        "LM": [f"{i+1:02d}" for i in range(lm_means.shape[0])],
+        f"{eval_name} (Mean ± Std)": lm_me_combined,
         f"{eval_name} (95%ile)": np.round(lm_me_95, 3)
     })
 
-    worst_indices = np.argsort(lm_means)[::-1][:10] if pipeline_mode != 'stage1' else np.arange(10)
     df_top10 = pd.DataFrame({
-        "순위": [f"{r+1}" for r in range(10)],
+        "순위": [f"{r+1}위" for r in range(10)],
         eval_name: [f"LM {i+1:02d} ({lm_means[i]:.3f} ± {lm_stds[i]:.3f})" for i in worst_indices],
         f"{eval_name} (95%ile)": [round(lm_me_95[i], 3) for i in worst_indices]
     })
@@ -255,32 +252,38 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         df_landmarks.to_excel(writer, sheet_name='2_Per_Landmark', index=False)
         df_top10.to_excel(writer, sheet_name='3_Top10_Hardest', index=False)
 
-    print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
-    if pipeline_mode != 'stage1':
-        print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
-        
-    # 🌟 [요청 기능 추가] 텍스트(.txt) 파일로 요약본 자동 추출
+    # 🌟 [2] 텍스트 파일(TXT)을 엑셀과 100% 동일하게 저장
     txt_path = result_excel_path.replace(".xlsx", ".txt")
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write("==================================================\n")
         f.write(f" 🚀 Evaluation Summary: {eval_name} (Run ID: {target_folder_name})\n")
         f.write("==================================================\n\n")
-        f.write("[Overall Performance]\n")
-        if pipeline_mode != 'stage1':
-            f.write(f"- Average ME: {average_me:.4f} ± {std_me:.4f} mm\n")
-            f.write(f"- 95%ile ME: {me_95_global:.4f} mm\n")
-            f.write(f"- Success Rate (<10mm): {sr_10:.2f} %\n")
-            f.write(f"- Success Rate (<5mm): {sr_5:.2f} %\n")
-        f.write(f"- Average Inference Time: {avg_time:.2f} ms\n")
-        f.write(f"- Heatmap Cosine Similarity: {avg_cos_sim:.2f} %\n")
-        f.write(f"- Heatmap mIoU (@0.1): {avg_iou:.2f} %\n\n")
+        
+        f.write("[1. Summary Metrics]\n")
+        f.write(f"- Average Inference Time : {avg_time:.2f} ms\n")
+        f.write(f"- Heatmap Cosine Sim     : {avg_cos_sim:.2f} % (95%ile: {cos_sim_5_global:.2f} %)\n")
+        f.write(f"- Heatmap mIoU (@0.1)    : {avg_iou:.2f} % (95%ile: {iou_5_global:.2f} %)\n")
         
         if pipeline_mode != 'stage1':
-            f.write("[Top 10 Hardest Landmarks (Worst Error)]\n")
-            for r, i in enumerate(worst_indices):
-                f.write(f"  {r+1}위: 랜드마크 {i+1:02d} (오차: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm)\n")
+            f.write(f"- Average ME             : {average_me:.4f} ± {std_me:.4f} mm\n")
+            f.write(f"- 95%ile ME              : {me_95_global:.4f} mm\n")
+            f.write(f"- Success Rate (<10mm)   : {sr_10:.2f} %\n")
+            f.write(f"- Success Rate (<5mm)    : {sr_5:.2f} %\n")
+            
+            f.write("\n[2. Per-Landmark Errors (All 36)]\n")
+            for i in range(lm_means.shape[0]):
+                f.write(f"  LM {i+1:02d} : {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm  (95%ile: {lm_me_95[i]:.3f} mm)\n")
                 
-    print(f"  └─ 📄 Text summary saved to: {os.path.basename(txt_path)}")
+            f.write("\n[3. Top 10 Hardest Landmarks (Worst Error)]\n")
+            for r, i in enumerate(worst_indices):
+                f.write(f"  {r+1}위: LM {i+1:02d} (오차: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm)\n")
+        else:
+            f.write("\n[Note] Stage 1 (PAConv) 모드이므로 3D 좌표 회귀 지표(ME)는 평가하지 않습니다.\n")
+                
+    print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
+    print(f"  └─ 📄 Text summary perfectly synchronized & saved to: {os.path.basename(txt_path)}")
+    if pipeline_mode != 'stage1':
+        print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
 
 # -----------------------------------------------------------------------------
 # 4. 모델 로드 및 평가 분기
@@ -294,12 +297,10 @@ else: pipeline_mode = 'single_custom'
 print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()}")
 model = HybridPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)
 
-# 🌟 run_frozen.py가 전달한 args.model_epoch 를 사용하여 단번에 가중치 로드
-target_weight_path = os.path.join(run_root, 'models', args.model_epoch)
+target_weight_path = os.path.join(run_root, 'models', getattr(args, 'model_epoch', 'Frozen_Hybrid_last.t7'))
 
 if os.path.exists(target_weight_path):
-    print(f"📦 모델 가중치 로드 성공: {args.model_epoch}")
-    # strict=False를 통해 PAConv 단독 모드일 때 없는 DeepPA 가중치를 유연하게 무시함
+    print(f"📦 모델 가중치 로드 성공: {os.path.basename(target_weight_path)}")
     model.load_state_dict(torch.load(target_weight_path, map_location=device), strict=False)
 else:
     print(f"🚨 [ERROR] 가중치 파일을 찾을 수 없습니다: {target_weight_path}")

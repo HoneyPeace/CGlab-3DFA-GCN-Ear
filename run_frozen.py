@@ -1,3 +1,15 @@
+'''
+@Author: Yuan Wang (Modified by Researcher)
+@File: run_frozen.py
+@Description: 
+[원클릭 자동화 파이프라인 (One-Click Auto Pipeline)]
+1. Stage 1 (PAConv): 내비게이션 모델 단독 학습 (히트맵 가이드라인 생성)
+2. Stage 1 평가 (eval.py)
+3. Bridge: 생성된 PAConv 가중치를 Pretrained 폴더로 자동 복사
+4. Stage 2 (DeepPA_Frozen): PAConv를 얼린 상태에서 120층 초심층망 학습 (0.47mm 정밀 타격)
+5. Stage 2 평가 (eval.py) -> txt 및 엑셀 결과 자동 추출
+'''
+
 import os
 import sys
 import subprocess
@@ -17,7 +29,7 @@ def get_latest_run_info(output_root, exp_name):
     if not subdirs:
         return None, None, None
         
-    # 🔥 기존 코드의 강력한 안전장치 유지: 하위 폴더/파일까지 싹 다 뒤져서 '가장 마지막 시간' 찾기
+    # 하위 폴더/파일까지 싹 다 뒤져서 '가장 마지막 시간' 찾기 (안전장치)
     def get_actual_mtime(folder):
         latest_time = os.path.getmtime(folder)
         for root, dirs, files in os.walk(folder):
@@ -82,10 +94,10 @@ if __name__ == "__main__":
         print("\n🚨 [ERROR] PAConv 학습 폴더를 찾을 수 없어 평가를 진행할 수 없습니다.")
         sys.exit(1)
 
-    print(f"\n>>> [PHASE 1-B] Executing eval_all.py for PAConv... (Detected Run ID: {p1_run_id} | Train Len: {p1_train_len})")
-    paconv_eval_cmd = [sys.executable, "eval_all.py"] + filtered_args + [
+    # 🌟 [수정포인트] eval_all.py -> eval.py 로 변경 완료
+    print(f"\n>>> [PHASE 1-B] Executing eval.py for PAConv... (Detected Run ID: {p1_run_id} | Train Len: {p1_train_len})")
+    paconv_eval_cmd = [sys.executable, "eval.py"] + filtered_args + [
         "--model", "PAConv", 
-        "--use_direct_regression", "False",
         "--run_id", p1_run_id, 
         "--model_epoch", "Single_PAConv_last.t7"
     ]
@@ -136,10 +148,10 @@ if __name__ == "__main__":
         print("\n🚨 [ERROR] DeepPA 학습 폴더를 찾을 수 없어 평가를 진행할 수 없습니다.")
         sys.exit(1)
 
-    print(f"\n>>> [PHASE 2-B] Executing eval_all.py for DeepPA... (Detected Run ID: {p2_run_id} | Train Len: {p2_train_len})")
-    deeppa_eval_cmd = [sys.executable, "eval_all.py"] + filtered_args + [
+    # 🌟 [수정포인트] eval_all.py -> eval.py 로 변경 완료
+    print(f"\n>>> [PHASE 2-B] Executing eval.py for DeepPA... (Detected Run ID: {p2_run_id} | Train Len: {p2_train_len})")
+    deeppa_eval_cmd = [sys.executable, "eval.py"] + filtered_args + [
         "--model", "deeppa_frozen", 
-        "--use_direct_regression", "True",
         "--run_id", p2_run_id, 
         "--model_epoch", "Frozen_Hybrid_last.t7"
     ]

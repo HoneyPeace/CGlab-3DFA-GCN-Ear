@@ -5,32 +5,19 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from torch.nn.init import trunc_normal_
 import sys
 from pathlib import Path
+
+# 경로 설정
 sys.path.append(str(Path(__file__).absolute().parent.parent))
 from utils.timm.models.layers import DropPath
 from utils.cutils import knn_edge_maxpooling
 
-"""
-[NotebookLM을 위한 모듈 요약]
-이 파일은 DeepPA(Deep Position Adaptive) 네트워크의 중추 신경망(Backbone) 역할을 합니다.
-DeepPA_auto 모드에서 '2단계(Local Refinement)'를 담당하며, 
-1단계(PAConv)에서 추출한 '전역적 라텐트 피처(128차원)'를 힌트로 받아들여 
-U-Net 형태의 깊은 레이어(최대 120층)를 통해 로컬 영역의 곡률과 위상을 정밀하게 분석합니다.
-
-[핵심 아키텍처 변화: Latent-to-Latent 구조 및 병목 제거]
-기존에는 1단계의 '히트맵'을 받아 최종적으로 다시 '히트맵'을 출력하는 구조였으나, 
-수정된 본 아키텍처에서는 1단계의 '128채널 라텐트 피처'를 직접 주입받고, 
-최종 출력 역시 (다이렉트 좌표 회귀를 위해) '256채널 라텐트 피처' 형태로 정제하여 방출합니다.
-이를 통해 차원 축소로 인한 기하학적 정보 손실(Information Bottleneck)을 원천 차단했습니다.
-"""
-
 # =====================================================================
-# 유틸리티 함수 및 기본 블록
+# 유틸리티 함수
 # =====================================================================
-
 def index_points(points, idx):
     """
     [특정 인덱스의 포인트 데이터 추출 (Gathering)]
-    다운샘플링(FPS)이나 K-NN 검색으로 얻은 인덱스(idx) 배열을 이용해, 원본 좌표/특징 텐서에서 실제 값들을 뽑아냅니다.
+    다운샘플링(FPS)이나 K-NN 검색으로 얻은 인덱스(idx) 배열을 이용해, 원본 좌표/특징 텐서를 추출합니다.
     """
     device = points.device
     B = points.shape[0]
@@ -49,12 +36,10 @@ def checkpoint(function, *args, **kwargs):
     except ValueError:
         return torch_checkpoint(function, *args, **kwargs)
 
+# =====================================================================
+# 기본 빌딩 블록 (VFR, FFN, ResLFE)
+# =====================================================================
 class VFR(nn.Module):
-    """
-    [Vector Field Routing (VFR) Block]
-    단순한 점 단위(Point-wise) MLP가 아니라, K-NN 이웃들 사이의 연결(Edge)을 바탕으로 
-    가장 두드러지는 특징을 끌어올리는(Max-pooling) 모듈입니다.
-    """
     def __init__(self, in_dim, out_dim, bn_momentum, init=0.):
         super().__init__()
         self.linear = nn.Linear(in_dim, out_dim, bias=False)
@@ -69,10 +54,6 @@ class VFR(nn.Module):
         return x
 
 class FFN(nn.Module):
-    """
-    [Feed Forward Network (FFN)]
-    Point-wise 채널 확장을 통해 비선형성을 부여하는 일반적인 모듈.
-    """
     def __init__(self, in_dim, mlp_ratio, bn_momentum, act, init=0.):
         super().__init__()
         hid_dim = round(in_dim * mlp_ratio)
@@ -90,11 +71,6 @@ class FFN(nn.Module):
         return x
 
 class ResLFE_Block(nn.Module):
-    """
-    [Residual Local Feature Extraction (ResLFE) Block]
-    위치 인코딩(PE: Position Encoding)을 매 반복마다 지속적으로 더해주어(Residual),
-    네트워크가 깊어져도 모델이 현재 점의 물리적 위치를 잊지 않도록 설계된 핵심 블록.
-    """
     def __init__(self, dim, depth, drop_path, mlp_ratio, bn_momentum, act):
         super().__init__()
         self.depth = depth
@@ -120,12 +96,7 @@ class ResLFE_Block(nn.Module):
 # =====================================================================
 # 계층적(Hierarchical) 스테이지 설계
 # =====================================================================
-
 class Stage_PA(nn.Module):
-    """
-    [U-Net 형태의 계층적 특징 추출 스테이지]
-    다운샘플링을 통해 수용 영역(Receptive Field)을 넓혀가며 서브 스테이지들을 재귀적으로 호출합니다.
-    """
     def __init__(self, args, depth=0):
         super().__init__()
         self.depth = depth
@@ -138,31 +109,25 @@ class Stage_PA(nn.Module):
 
         dim = args.dims[depth]
         
-        # 🌟 [디펜스 포인트 4] Latent Feature Projection
-        # 1단계(PAConv)가 전달하는 '128차원 라텐트 피처'를 현재 깊이의 차원(dim)으로 투영합니다.
+        # 🌟 [디펜스 포인트] Latent Feature 투영기
         self.prior_proj = nn.Sequential(
             nn.Linear(128, dim, bias=False), 
             nn.BatchNorm1d(dim, momentum=args.bn_momentum),
             args.act()
         )
         
-        # 원본 기하학 피처와 라텐트 피처를 하나로 융합(Fusion)
-        self.fusion_mlp = nn.Sequential(
+        # 🌟 [디펜스 핵심] 게이트 잔차 융합 생성기 (논문 수식과 100% 일치)
+        # 2배 차원(DeepPA + PAConv)을 입력받아 0~1 사이의 시그모이드 게이트를 생성합니다.
+        self.gate_mlp = nn.Sequential(
             nn.Linear(dim * 2, dim, bias=False),
             nn.BatchNorm1d(dim, momentum=args.bn_momentum),
-            args.act()
+            nn.Sigmoid() # 수식의 \sigma 부분
         )
 
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
-            
             in_channels = getattr(args, 'in_channels', 3)
-            if in_channels == 7:
-                in_feat_dim = 14 
-            elif in_channels == 6:
-                in_feat_dim = 13
-            else:
-                in_feat_dim = 10 
+            in_feat_dim = 14 if in_channels == 7 else (13 if in_channels == 6 else 10)
             
             self.nbr_embed = nn.Sequential(
                 nn.Linear(in_feat_dim, nbr_hid_dim // 2, bias=False),  
@@ -202,11 +167,11 @@ class Stage_PA(nn.Module):
         self.reslfe = ResLFE_Block(dim, args.depths[depth], args.drop_paths[depth], args.mlp_ratio, cp_bn_momentum, args.act)
         self.drop = DropPath(args.head_drops[depth])
 
-        # 🌟 [디펜스 포인트 6] HDS 중간 모의고사 (Heatmap)
+        # 🌟 [디펜스 포인트] HDS 모의고사용 Semantic(해부학적) 로스 헤드
         self.sem_sup = nn.Sequential(
             nn.Dropout(0.5),
             nn.BatchNorm1d(3, momentum=args.bn_momentum),
-            nn.Linear(3, args.num_classes, bias=False),
+            nn.Linear(3, getattr(args, 'num_classes', 36), bias=False), # 36개 랜드마크 (설정값 연동)
         )
 
         self.postproj = nn.Sequential(
@@ -236,7 +201,7 @@ class Stage_PA(nn.Module):
             x_vfr = index_points(self.vfr(x, prev_knn), ids)
             x = x_skip + x_vfr
             
-            # 1단계에서 넘겨받은 라텐트 피처(prior) 역시 DeepPA의 다운샘플링 지점에 맞춰 동기화
+            # 해상도 동기화
             if prior_heatmap is not None:
                 prior_heatmap = index_points(prior_heatmap, ids)
             
@@ -252,25 +217,30 @@ class Stage_PA(nn.Module):
             dist = torch.norm(nbr_rel, dim=-1, keepdim=True) 
             vector = nbr_rel / (dist + 1e-8)
             
-            if C_in == 7:
-                nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 14)
-            elif C_in == 6:
-                nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 13) 
-            else:
-                nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
+            if C_in == 7: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 14)
+            elif C_in == 6: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 13) 
+            else: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
             
             nbr_embed_func = lambda t: self.nbr_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
             nbr = checkpoint(nbr_embed_func, nbr) if self.training and self.cp else nbr_embed_func(nbr)
             nbr = self.nbr_proj(nbr)
             x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1)
 
-        # 🌟 [디펜스 포인트 4] Latent Feature Fusion (잔차 연결)
-        # Stage 2 이상에서 외부 힌트를 받으면 융합을 수행합니다.
+        # =====================================================================
+        # 🌟 수식 완벽 구현: 게이트 기반 잔차 연결 (Gated Residual Fusion)
+        # =====================================================================
         if not self.first and prior_heatmap is not None:
+            # 1. PAConv 힌트를 백본 차원에 맞게 투영 (F_PAConv)
             p_feat = self.prior_proj(prior_heatmap.view(-1, prior_heatmap.shape[-1])).view(B, N, -1)
-            fused = torch.cat([x, p_feat], dim=-1) 
-            mixed_residual = self.fusion_mlp(fused.view(-1, fused.shape[-1])).view(B, N, -1)
-            x = x + mixed_residual
+            
+            # 2. 콘캣: [F_DeepLA, F_PAConv]
+            fused_for_gate = torch.cat([x, p_feat], dim=-1) 
+            
+            # 3. 게이트 텐서 생성 (0~1): \sigma(W_g * [F_DeepLA, F_PAConv])
+            gate_matrix = self.gate_mlp(fused_for_gate.view(-1, fused_for_gate.shape[-1])).view(B, N, -1)
+            
+            # 4. 정보 융합: x = F_DeepLA + (Gate ⊙ F_PAConv)
+            x = x + (gate_matrix * p_feat)
 
         pe = pe.view(-1, 3)
         pe_embed_func = lambda t: self.pe_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
@@ -279,16 +249,16 @@ class Stage_PA(nn.Module):
         pe = self.pe_bn(pe.view(-1, pe.shape[-1])).view(B, N, -1)
 
         pts = pts_list.pop() if pts_list is not None else None
-
         x = checkpoint(self.reslfe, x, pe, knn, pts) if self.training and self.cp else self.reslfe(x, pe, knn, pts)
 
         if self.training:
-            # 🌟 [디펜스 포인트 5] HDS 중간 모의고사 채점
+            # HDS 모의고사 채점
             spa_info = xyz_knn - xyz.unsqueeze(2)
             spa_info.mul_(self.cor_std)
             feat_info = self.cor_head(x.view(-1, x.shape[-1])).view(B, N, -1)
             feat_info_knn = index_points(feat_info, knn)
             feat_info = feat_info_knn - feat_info.unsqueeze(2)
+            
             closs = F.mse_loss(feat_info, spa_info) 
             sub_spa = sub_spa + closs if sub_spa is not None else closs
 
@@ -315,22 +285,15 @@ class Stage_PA(nn.Module):
         return sub_x, sub_spa, sub_sem
 
 # =====================================================================
-# 최종 통합 모델 (DeepPA_semseg)
+# 최종 통합 모델 (DeepPA_semseg 백본 진입점)
 # =====================================================================
-
 class DeepPA_semseg(nn.Module):
-    """
-    [DeepPA 백본 진입점]
-    계층적 특징 추출(Stage_PA)을 완수하고, Direct Regression Head에 전달할 
-    최종 256채널의 '원본 라텐트 피처(Raw Latent Feature)'를 준비합니다.
-    """
     def __init__(self, args):
         super().__init__()
         args.cp_bn_momentum = 1 - (1 - args.bn_momentum)**0.5
         self.stage = Stage_PA(args) 
         
-        # 🌟 [디펜스 포인트 9 기반] 256 병목 유지
-        # 64로 압축하던 병목을 제거하고 256채널로 확장/유지합니다.
+        # 🌟 [디펜스 포인트] 256채널 병목 제거 유지
         self.latent_head = nn.Sequential(
             nn.BatchNorm1d(args.head_dim, momentum=args.bn_momentum),
             args.act(),
@@ -338,7 +301,7 @@ class DeepPA_semseg(nn.Module):
             nn.BatchNorm1d(256, momentum=args.bn_momentum),
             args.act(),
             nn.Dropout(0.3),
-            nn.Linear(256, 256) # 최종 256채널 라텐트 피처 방출 (Direct Head와 동기화)
+            nn.Linear(256, 256) 
         )
         self.apply(self._init_weights)
 
@@ -350,11 +313,9 @@ class DeepPA_semseg(nn.Module):
 
     def forward(self, xyz, x, indices, prior_heatmap=None, pts_list=None):
         indices = indices[:]
-        # 🌟 [디펜스 포인트 1, 3] Stage_PA 통과 (피처 추출 + 1단계 라텐트 힌트 잔차 결합)
         x, spa, sem = self.stage(x, xyz, None, indices, pts_list, prior_heatmap)
         B, N, C = x.shape
         
-        # 🌟 Latent Head를 통과하여 고밀도 256차원 기하학 특징 방출
         x = self.latent_head(x.view(-1, C)).view(B, N, -1)
         
         if self.training:
