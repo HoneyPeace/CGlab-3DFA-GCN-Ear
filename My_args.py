@@ -10,6 +10,8 @@
 
 import argparse
 import torch
+import torch.nn as nn
+
 
 def str2bool(v):
     if isinstance(v, bool): return v
@@ -119,6 +121,8 @@ parser.add_argument('--use_direct_regression', type=str2bool, default=True, help
 parser.add_argument('--focal_gamma', type=float, default=2.0, help='Gamma for Standard Focal L1 loss')
 parser.add_argument('--use_loss_norm', type=str2bool, default=False, help='Use Initial Loss Normalization')
 parser.add_argument('--target_norm', type=float, default=1.0, help='Target scale for Loss Normalization')
+#3가지 회귀 로스(Coord, Surface, Struct)에 대한 Random Loss Weighting 스위치 (기본값: False)
+parser.add_argument('--use_rlw_for_pred', type=str2bool, default=False, help='Use Random Loss Weighting for 3 prediction losses')
 
 # =============================================================================
 # [9] 🌟 핵심 방어 논리 3: DeepLA-Net CVPR Eq. (5) HDS 스케줄링
@@ -126,3 +130,26 @@ parser.add_argument('--target_norm', type=float, default=1.0, help='Target scale
 # [논문 디펜스 포인트]: 자의적인 감쇄율 튜닝(Heuristic)을 배제하고, SOTA 논문의 지수 감쇠(n=1/epoch) 수식을 완벽히 차용함.
 parser.add_argument('--hds_alpha', type=float, default=0.3, help='Eq(5) L_sem 시작 가중치 (논문 최적값 0.3)')
 parser.add_argument('--hds_beta', type=float, default=0.005, help='Eq(5) L_spa 시작 가중치 (논문 최적값 0.005)')
+
+
+# =============================================================================
+# [5-1] 🌟 DeepPA 초심층망 아키텍처 상세 설정 (120층 표준)
+# =============================================================================
+# [논문 디펜스 포인트]: DeepLA-Net CVPR 논문의 DeepLA-120 구성을 한 치의 오차 없이 재현함.
+# 각 스테이지의 ResLFE 블록 개수: 20 + 20 + 60 + 20 = 총 120 Blocks
+parser.add_argument('--depths', type=list, default=[20, 20, 60, 20], help='Number of blocks in each stage')
+
+# 각 스테이지의 특징 차원(Channels)
+parser.add_argument('--dims', type=list, default=[64, 128, 256, 512], help='Feature dimensions in each stage')
+
+# 각 스테이지의 K-NN 이웃 개수
+parser.add_argument('--ks', type=list, default=[20, 20, 20, 20], help='K neighbors in each stage')
+
+# 각 스테이지의 다운샘플링 포인트 개수 (8192 -> 2048 -> 512 -> 128 -> 32)
+parser.add_argument('--npoints', type=list, default=[2048, 512, 128, 32], help='Number of points in each stage')
+
+# 기타 내부 파라미터 (고정값 권장)
+parser.add_argument('--head_dim', type=int, default=256, help='Latent head dimension')
+parser.add_argument('--mlp_ratio', type=float, default=2.0, help='FFN hidden dimension ratio')
+parser.add_argument('--bn_momentum', type=float, default=0.1, help='Batch Norm momentum')
+parser.add_argument('--act', default=nn.GELU, help='Activation function')

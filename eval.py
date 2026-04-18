@@ -112,7 +112,14 @@ class HybridPipeline_Eval(nn.Module):
         elif self.mode in ['frozen', 'e2e']:
             s1_latent, s1_hm = self.stage1_paconv(x)
             out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
-            return out[0], s1_hm
+            
+            # 🌟 [수정됨] 평가 모드에서 단일 텐서가 나올 때 차원이 깨지는 것을 방지
+            if isinstance(out, tuple):
+                pred_coords = out[0]
+            else:
+                pred_coords = out # eval() 모드에서는 텐서 자체가 반환됨
+                
+            return pred_coords, s1_hm
 
 # -----------------------------------------------------------------------------
 # 3. 평가 수행 코어 함수

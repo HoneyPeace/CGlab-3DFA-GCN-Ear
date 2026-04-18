@@ -32,44 +32,48 @@ class PAConv(nn.Module):
         self.hidden = args.hidden
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices # Weight Banks(가중치 행렬) 개수
         
-        # [채널 동기화 핵심 로직]
+# [채널 동기화 핵심 로직]
         in_channels = getattr(args, 'in_channels', 3)
         if in_channels == 7:
-            self.edge_channels = 14
+            self.edge_channels = 17 # 🌟 14 -> 17
         elif in_channels == 6:
-            self.edge_channels = 13
+            self.edge_channels = 15 # 🌟 13 -> 15
         else:
-            self.edge_channels = 10 
+            self.edge_channels = 9  # 🌟 10 -> 9
         
-        # [1. ScoreNets 정의] 
-        self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden=self.hidden)
-        self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden=self.hidden)
-        self.scorenet4 = ScoreNet(self.edge_channels, self.m4, hidden=self.hidden)
-        self.scorenet5 = ScoreNet(self.edge_channels, self.m5, hidden=self.hidden)
+        # 또한 args.hidden은 [[32], [32], [32], [32]] 형태이므로 각 층에 맞게 인덱싱합니다.
+        self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
+        self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])
+        self.scorenet4 = ScoreNet(self.edge_channels, self.m4, hidden_unit=self.hidden[2])
+        self.scorenet5 = ScoreNet(self.edge_channels, self.m5, hidden_unit=self.hidden[3])
 
         # [2. 초기 특징 추출용 MLP]
         self.bn1 = nn.BatchNorm2d(64)
         if in_channels == 7:
-            self.conv1 = nn.Sequential(nn.Conv2d(14, 64, kernel_size=1, bias=False), self.bn1, nn.LeakyReLU(negative_slope=0.2))
+            self.conv1 = nn.Sequential(nn.Conv2d(17, 64, kernel_size=1, bias=False), self.bn1, nn.LeakyReLU(negative_slope=0.2)) # 🌟 14 -> 17
         elif in_channels == 6:
-            self.conv1 = nn.Sequential(nn.Conv2d(12, 64, kernel_size=1, bias=False), self.bn1, nn.LeakyReLU(negative_slope=0.2))
+            self.conv1 = nn.Sequential(nn.Conv2d(15, 64, kernel_size=1, bias=False), self.bn1, nn.LeakyReLU(negative_slope=0.2)) # 🌟 12 -> 15
         else:
-            self.conv1 = nn.Sequential(nn.Conv2d(6, 64, kernel_size=1, bias=False), self.bn1, nn.LeakyReLU(negative_slope=0.2))
+            self.conv1 = nn.Sequential(nn.Conv2d(9, 64, kernel_size=1, bias=False), self.bn1, nn.LeakyReLU(negative_slope=0.2))  # 🌟 6 -> 9
 
+# ---------------------------------------------------------------------
         # [3. PAConv 기반 특징 추출 레이어]
-        self.matrice2 = nn.Parameter(torch.FloatTensor(64, 64, self.m2))
+        # 🌟 디펜스 포인트: DGCNN 엣지 결합을 위해 입력 채널을 2배(64 * 2 = 128)로 잡고,
+        # 출력 차원은 (64 * m) 형태의 2D 텐서로 평탄화(Flatten)하여 곱셈 오류를 방지합니다.
+        # ---------------------------------------------------------------------
+        self.matrice2 = nn.Parameter(torch.FloatTensor(64 * 2, 64 * self.m2))
         nn.init.kaiming_normal_(self.matrice2, mode='fan_out', nonlinearity='relu')
         self.bn2 = nn.BatchNorm1d(64)
 
-        self.matrice3 = nn.Parameter(torch.FloatTensor(64, 64, self.m3))
+        self.matrice3 = nn.Parameter(torch.FloatTensor(64 * 2, 64 * self.m3))
         nn.init.kaiming_normal_(self.matrice3, mode='fan_out', nonlinearity='relu')
         self.bn3 = nn.BatchNorm1d(64)
 
-        self.matrice4 = nn.Parameter(torch.FloatTensor(64, 64, self.m4))
+        self.matrice4 = nn.Parameter(torch.FloatTensor(64 * 2, 64 * self.m4))
         nn.init.kaiming_normal_(self.matrice4, mode='fan_out', nonlinearity='relu')
         self.bn4 = nn.BatchNorm1d(64)
 
-        self.matrice5 = nn.Parameter(torch.FloatTensor(64, 64, self.m5))
+        self.matrice5 = nn.Parameter(torch.FloatTensor(64 * 2, 64 * self.m5))
         nn.init.kaiming_normal_(self.matrice5, mode='fan_out', nonlinearity='relu')
         self.bn5 = nn.BatchNorm1d(64)
 
@@ -91,29 +95,31 @@ class PAConv(nn.Module):
         self.conv9 = nn.Conv1d(128, self.landmark_num, 1) 
 
     def forward(self, xyz, feature=None):
-        B, N, C = xyz.shape
+        # train.py에서 데이터는 (B, 7, 8192) 규격으로 들어옵니다.
+        B, C, N = xyz.shape
 
-        # 채널 동기화 기반 초기 Feature 세팅
-        if C == 7:
-            x_input = xyz.clone().permute(0, 2, 1)
-        elif C == 6:
-            x_input = xyz.clone().permute(0, 2, 1)
-        else:
-            x_input = xyz.clone().permute(0, 2, 1)
-        
-        xyz = xyz[:, :, :3] # K-NN 검색용 순수 좌표 추출
-        
         # ---------------------------------------------------------------------
-        # [Step 1: 입력 데이터 구성 (Edge Feature 추출)]
+        # [Step 1: K-NN 검색용 순수 좌표 추출]
+        # knn 함수는 (B, 3, N) 형태의 좌표 텐서를 기대합니다.
         # ---------------------------------------------------------------------
-        idx = knn(xyz, self.k) # 각 점 주변의 K개 이웃 인덱스
-        x1 = get_graph_feature(x_input, k=self.k, idx=idx) 
-        scorenet_input = get_scorenet_input(x1) # PAConv 가중치 스코어링용 별도 입력 생성
+        xyz_coords = xyz[:, :3, :].contiguous() 
+        
+        # 🌟 중요: knn은 (인덱스, 거리) 튜플을 반환하므로 반드시 언패킹해야 합니다.
+        idx, _ = knn(xyz_coords, self.k) 
+
+        # ---------------------------------------------------------------------
+        # [Step 2: 특징 추출을 위한 입력 구성]
+        # 입력 데이터가 이미 (B, 7, N)이므로 추가적인 permute 없이 사용합니다.
+        # ---------------------------------------------------------------------
+        x_edge_feat = get_graph_feature(xyz, k=self.k, idx=idx) 
+        
+        # PAConv_util의 get_scorenet_input은 4차원 특징을 받도록 설계되었습니다.
+        scorenet_input = get_scorenet_input(x_edge_feat)
 
         # ---------------------------------------------------------------------
         # [Step 2: 초기 특징 추출]
         # ---------------------------------------------------------------------
-        x1 = self.conv1(x1)
+        x1 = self.conv1(x_edge_feat) 
         x1 = x1.max(dim=-1, keepdim=False)[0] # PointNet 기반 Max Pooling
 
         # ---------------------------------------------------------------------
