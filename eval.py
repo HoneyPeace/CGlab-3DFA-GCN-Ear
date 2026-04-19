@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 @File: eval.py
-@Description: Unified Evaluation Script (Soft-Argmax 적용 + Stage1 좌표 채점 해금 + TXT/EXCEL 동기화)
+@Description: Unified Evaluation Script (Soft-Argmax 적용 + TXT/EXCEL 동기화 + DeepLA/단독 모델 호환성 완벽 패치)
 '''
 
 from __future__ import print_function, division
@@ -22,10 +22,11 @@ from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
 
-# 🌟 새로운 아키텍처 및 보간법 임포트
+# 🌟 아키텍처 및 보간법 임포트
+from DeepLA_model import DeepLA_Wrapper  # 🌟 DeepLA 지원을 위해 추가
 from DeepPA_model import DeepPA_Wrapper  
 from PAConv_model import PAConv          
-from loss import get_differentiable_coords # 🌟 초정밀 좌표 추출 함수 추가
+from loss import get_differentiable_coords 
 
 matplotlib.use('Agg')
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -91,7 +92,7 @@ test_dataset = TensorDataset(
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # -----------------------------------------------------------------------------
-# 2. 🌟 평가용 통합 Hybrid Pipeline (Soft-Argmax 동기화)
+# 2. 평가용 통합 Hybrid Pipeline 
 # -----------------------------------------------------------------------------
 class HybridPipeline_Eval(nn.Module):
     def __init__(self, args, landmark_num, mode='frozen'):
@@ -105,21 +106,15 @@ class HybridPipeline_Eval(nn.Module):
     def forward(self, x):
         if self.mode == 'stage1':
             s1_latent, s1_hm_anchor = self.stage1_paconv(x)
-            
-            # 🌟 [수정됨] 단일 점이 아닌 상위 K개 점의 무게중심(Soft-Argmax) 추출
             s1_hm_prob = F.softmax(s1_hm_anchor, dim=1)
             points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
             pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=getattr(self.stage1_paconv.args, 'k_softargmax', 10))
-            
-            return pred_coords, s1_hm_prob # mIoU 계산을 위해 확률값 전달
+            return pred_coords, s1_hm_prob 
             
         elif self.mode in ['frozen', 'e2e']:
             s1_latent, s1_hm = self.stage1_paconv(x)
             out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
-            
-            if isinstance(out, tuple): pred_coords = out[0]
-            else: pred_coords = out 
-                
+            pred_coords = out[0] if isinstance(out, tuple) else out
             return pred_coords, s1_hm
 
 # -----------------------------------------------------------------------------
@@ -163,42 +158,44 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 
             point_input = point_norm.permute(0, 2, 1).contiguous()
             
-            # 통합 모델 포워딩 (여기서 Soft-Argmax 좌표가 나옵니다)
-            pred_coords_norm, s1_aux_hm = eval_model(point_input)
+            # 🌟 [수정됨] 단일 모델(DeepLA 등)과 하이브리드 모델의 리턴 형식 통합
+            if pipeline_mode in ['stage1', 'frozen', 'e2e']:
+                pred_coords_norm, s1_aux_hm = eval_model(point_input)
+            else:
+                out = eval_model(point_input)
+                pred_coords_norm, s1_aux_hm = (out[0], None) if isinstance(out, tuple) else (out, None)
             
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)  
             
-            # Stage 1은 이미 Softmax가 적용되어 리턴됨
-            if pipeline_mode == 'stage1':
-                eval_target_hm = s1_aux_hm
-            else:
-                eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else s1_aux_hm
+            # 히트맵 평가 로직 (단독 모델로 평가 시 히트맵이 없으면 패스)
+            if pipeline_mode == 'stage1': eval_target_hm = s1_aux_hm
+            else: eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else None
                 
-            pred_heatmap = eval_target_hm.permute(0, 2, 1) 
-            pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
-            
-            # 유사도 평가
-            cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
-            cos_sim_list.append(cos_sim_k.mean().item()) 
-            per_landmark_cos_sim_list.append(cos_sim_k.cpu().numpy()) 
+            if eval_target_hm is not None:
+                pred_heatmap = eval_target_hm.permute(0, 2, 1) 
+                pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
+                
+                cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
+                cos_sim_list.append(cos_sim_k.mean().item()) 
+                per_landmark_cos_sim_list.append(cos_sim_k.cpu().numpy()) 
 
-            threshold = 0.1
-            pred_mask = (pred_heatmap > threshold).float() 
-            gt_mask = (gt_heatmap > threshold).float()  
-            intersection_k = (pred_mask * gt_mask).sum(dim=1) 
-            union_k = (pred_mask + gt_mask).clamp(0, 1).sum(dim=1)
-            iou_k = ((intersection_k + 1e-6) / (union_k + 1e-6)) * 100.0
-            
-            iou_list.append(iou_k.mean().item()) 
-            per_landmark_iou_list.append(iou_k.cpu().numpy()) 
+                threshold = 0.1
+                pred_mask = (pred_heatmap > threshold).float() 
+                gt_mask = (gt_heatmap > threshold).float()  
+                intersection_k = (pred_mask * gt_mask).sum(dim=1) 
+                union_k = (pred_mask + gt_mask).clamp(0, 1).sum(dim=1)
+                iou_k = ((intersection_k + 1e-6) / (union_k + 1e-6)) * 100.0
+                
+                iou_list.append(iou_k.mean().item()) 
+                per_landmark_iou_list.append(iou_k.cpu().numpy()) 
 
-            if idx % 40 == 0:
-                points_np, heatmap_np = point_xyz[0].cpu().numpy(), pred_heatmap[0].cpu().numpy()
-                for lm_idx in range(heatmap_np.shape[1]):
-                     save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], current_hm_dir, real_name, lm_idx, f"pred_{eval_name}")
+                if idx % 40 == 0:
+                    points_np, heatmap_np = point_xyz[0].cpu().numpy(), pred_heatmap[0].cpu().numpy()
+                    for lm_idx in range(heatmap_np.shape[1]):
+                         save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], current_hm_dir, real_name, lm_idx, f"pred_{eval_name}")
 
-            # 🌟 [봉인 해제!] 조건문 삭제: Stage 1이든 2든 무조건 3D 좌표 오차(mm)를 채점합니다.
+            # 3D 좌표 오차 채점
             pred_landmark = (pred_coords_norm * scale) + centroid
             pred_np = pred_landmark.cpu().numpy().squeeze(0)
             gt_np = gt_landmark.cpu().numpy().squeeze(0)
@@ -210,8 +207,10 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             np.savetxt(os.path.join(current_asc_dir, f"{eval_name}_pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
     # ------------------ 최종 집계 및 저장 ------------------
-    avg_cos_sim, cos_sim_5_global = np.mean(cos_sim_list), np.percentile(cos_sim_list, 5)
-    avg_iou, iou_5_global = np.mean(iou_list), np.percentile(iou_list, 5)
+    avg_cos_sim = np.mean(cos_sim_list) if cos_sim_list else 0.0
+    cos_sim_5_global = np.percentile(cos_sim_list, 5) if cos_sim_list else 0.0
+    avg_iou = np.mean(iou_list) if iou_list else 0.0
+    iou_5_global = np.percentile(iou_list, 5) if iou_list else 0.0
     avg_time = np.mean(time_list) * 1000.0
 
     if len(per_landmark_me_list) > 0:
@@ -229,7 +228,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     filename_excel = f"{eval_name}_Results_ME{average_me:.4f}.xlsx"
     result_excel_path = os.path.join(run_root, filename_excel)
     
-    # [1] Excel 저장
+    # Excel 저장
     summary_data = {
         "지표 (Metric)": [
             "[Metadata]", "Experiment", "Run ID", "Model", 
@@ -264,7 +263,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         df_landmarks.to_excel(writer, sheet_name='2_Per_Landmark', index=False)
         df_top10.to_excel(writer, sheet_name='3_Top10_Hardest', index=False)
 
-    # [2] 텍스트 파일(TXT)을 엑셀과 100% 동일하게 저장
+    # 텍스트 파일 저장
     txt_path = result_excel_path.replace(".xlsx", ".txt")
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write("==================================================\n")
@@ -276,7 +275,6 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         f.write(f"- Heatmap Cosine Sim     : {avg_cos_sim:.2f} % (95%ile: {cos_sim_5_global:.2f} %)\n")
         f.write(f"- Heatmap mIoU (@0.1)    : {avg_iou:.2f} % (95%ile: {iou_5_global:.2f} %)\n")
         
-
         f.write(f"- Average ME             : {average_me:.4f} ± {std_me:.4f} mm\n")
         f.write(f"- 95%ile ME              : {me_95_global:.4f} mm\n")
         f.write(f"- Success Rate (<10mm)   : {sr_10:.2f} %\n")
@@ -289,7 +287,6 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         f.write("\n[3. Top 10 Hardest Landmarks (Worst Error)]\n")
         for r, i in enumerate(worst_indices):
             f.write(f"  {r+1}위: LM {i+1:02d} (오차: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm)\n")
-
                 
     print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
     print(f"  └─ 📄 Text summary perfectly synchronized & saved to: {os.path.basename(txt_path)}")
@@ -305,7 +302,15 @@ elif model_name_lower == 'deeppa_e2e': pipeline_mode = 'e2e'
 else: pipeline_mode = 'single_custom' 
 
 print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()}")
-model = HybridPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)
+
+# 🌟 [수정됨] 모델 로드 분기를 명확하게 하여 단독 모델과 하이브리드 모델 모두 지원
+if pipeline_mode in ['stage1', 'frozen', 'e2e']:
+    model = HybridPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)
+else:
+    if 'deepla' in model_name_lower:
+        model = DeepLA_Wrapper(args, args.landmark_num).to(device)
+    else:
+        model = DeepPA_Wrapper(args, args.landmark_num).to(device)
 
 target_weight_path = os.path.join(run_root, 'models', getattr(args, 'model_epoch', f'{args.model}_last.t7'))
 

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-# [주의]: My_args와 PAConv_util 등은 연구자님의 로컬 환경 경로에 맞게 임포트 유지
 from My_args import *
 from PAConv.util.PAConv_util import knn, get_graph_feature, get_scorenet_input, feat_trans_dgcnn, ScoreNet, Attention_Layer
 from PAConv.cuda_lib.functional import assign_score_withk as assemble_dgcnn
@@ -12,14 +11,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ================================================================================
 [NotebookLM을 위한 학술적 의도 및 모듈 요약]
 - 모듈명: PAConv (Position Adaptive Convolution) Feature Extractor
-- 논문 내 역할: DeepPA(2단계) 아키텍처의 전반부(Stage 1)를 담당하며, 
-              점과 점 사이의 기하학적 위치 관계를 동적으로 학습하여 
-              전역적인(Global) 맥락을 파악하는 최전방 탐색기(Vanguard)입니다.
-- 핵심 구조 변화 (Heatmap -> Latent Feature & Anchor):
-  기존에는 최종 레이어에서 랜드마크의 '확률(Heatmap)' 하나만 내뱉었으나, 
-  개선된 본 구조에서는 [분기형(Two-Head) 아키텍처]를 도입했습니다.
-  1) DeepPA 게이트 융합을 위한 128차원의 순수 고차원 특징(Raw Latent Feature) 방출
-  2) 최종 좌표 공간 제어를 위한 36차원 앵커 히트맵(Anchor Heatmap) 동시 방출
+- 논문 내 역할: DeepPA(2단계) 아키텍처의 전반부(Stage 1)를 담당하며, 최전방 탐색기입니다.
+- 핵심 구조 변화 (Two-Head 아키텍처 도입):
+  1) DeepPA 게이트 융합을 위한 128차원의 순수 라텐트 특징 방출
+  2) 최종 좌표 공간 제어를 위한 36차원 앵커 히트맵 방출
 ================================================================================
 '''
 class PAConv(nn.Module):
@@ -32,21 +27,17 @@ class PAConv(nn.Module):
         self.hidden = args.hidden
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices
         
-        # 🌟 [수정 1] 채널 동기화 핵심 로직 (17채널 롤백 -> 14채널로 완벽 고정)
+        # 🌟 채널 동기화 핵심 로직
         in_channels = getattr(args, 'in_channels', 3)
-        if in_channels == 7:
-            self.edge_channels = 14 # 7채널(XYZ+방향+곡률)일 경우 엣지는 14채널
-        elif in_channels == 6:
-            self.edge_channels = 13 
-        else:
-            self.edge_channels = 10 
+        if in_channels == 7: self.edge_channels = 14
+        elif in_channels == 6: self.edge_channels = 13 
+        else: self.edge_channels = 10 
         
         self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
         self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])
         self.scorenet4 = ScoreNet(self.edge_channels, self.m4, hidden_unit=self.hidden[2])
         self.scorenet5 = ScoreNet(self.edge_channels, self.m5, hidden_unit=self.hidden[3])
 
-        # 🌟 [수정 2] 하드코딩 제거: 동적으로 self.edge_channels를 받도록 수정
         self.bn1 = nn.BatchNorm2d(64)
         self.conv1 = nn.Sequential(
             nn.Conv2d(self.edge_channels, 64, kernel_size=1, bias=False), 
@@ -54,9 +45,6 @@ class PAConv(nn.Module):
             nn.LeakyReLU(negative_slope=0.2)
         )
 
-        # ---------------------------------------------------------------------
-        # [3. PAConv 기반 특징 추출 레이어]
-        # ---------------------------------------------------------------------
         self.matrice2 = nn.Parameter(torch.FloatTensor(64 * 2, 64 * self.m2))
         nn.init.kaiming_normal_(self.matrice2, mode='fan_out', nonlinearity='relu')
         self.bn2 = nn.BatchNorm1d(64)
@@ -73,18 +61,31 @@ class PAConv(nn.Module):
         nn.init.kaiming_normal_(self.matrice5, mode='fan_out', nonlinearity='relu')
         self.bn5 = nn.BatchNorm1d(64)
 
-        # [4. 글로벌 맥락 추출 레이어]
-        self.convt = nn.Conv1d(320, 1024, kernel_size=1)
+        # 🌟 글로벌 맥락 추출 레이어 - BN 복원 완료
+        self.convt = nn.Sequential(
+            nn.Conv1d(320, 1024, kernel_size=1, bias=False),
+            nn.BatchNorm1d(1024)
+        )
         
-        # [5. 융합 및 출력]
-        self.conv6 = nn.Conv1d(1344, 512, 1)
+        # 🌟 융합 및 출력 - 신형 채널 크기에 맞춰 BN 복원 완료
+        self.conv6 = nn.Sequential(
+            nn.Conv1d(1344, 512, kernel_size=1, bias=False),
+            nn.BatchNorm1d(512)
+        )
         self.dp1 = nn.Dropout(p=0.5)
-        self.conv7 = nn.Conv1d(512, 256, 1)
+        
+        self.conv7 = nn.Sequential(
+            nn.Conv1d(512, 256, kernel_size=1, bias=False),
+            nn.BatchNorm1d(256)
+        )
         self.dp2 = nn.Dropout(p=0.5)
         
-        # Two-Head
-        self.conv8 = nn.Conv1d(256, 128, 1)
-        self.conv9 = nn.Conv1d(128, self.landmark_num, 1) 
+        self.conv8 = nn.Sequential(
+            nn.Conv1d(256, 128, kernel_size=1, bias=False),
+            nn.BatchNorm1d(128)
+        )
+        
+        self.conv9 = nn.Conv1d(128, self.landmark_num, kernel_size=1, bias=True) 
 
     def forward(self, xyz, feature=None):
         B, C, N = xyz.shape
@@ -92,9 +93,9 @@ class PAConv(nn.Module):
         xyz_coords = xyz[:, :3, :].contiguous() 
         idx, _ = knn(xyz_coords, self.k) 
 
-        # 🌟 [수정 3] get_scorenet_input 파라미터 에러 수정! (원본 xyz, idx, k 모두 전달)
+        # 🌟 [수정 3] get_scorenet_input 파라미터 방어 코드 발동을 위해 x_edge_feat 전달
         x_edge_feat = get_graph_feature(xyz, k=self.k, idx=idx) 
-        scorenet_input = get_scorenet_input(xyz, idx, self.k)
+        scorenet_input = get_scorenet_input(x_edge_feat, idx=idx, k=self.k)
 
         x1 = self.conv1(x_edge_feat) 
         x1 = x1.max(dim=-1, keepdim=False)[0] 
@@ -135,7 +136,5 @@ class PAConv(nn.Module):
         latent_hint = F.relu(self.conv8(x_res)) 
         heatmap_anchor = self.conv9(latent_hint) 
         
-        #latent_hint = latent_hint.permute(0, 2, 1).contiguous()
-        #heatmap_anchor = heatmap_anchor.permute(0, 2, 1).contiguous()
-        
+        # Softmax는 train.py의 HybridPipeline에서 제어하므로 순수 Logit을 반환
         return latent_hint, heatmap_anchor
