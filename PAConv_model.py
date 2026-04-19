@@ -30,36 +30,32 @@ class PAConv(nn.Module):
         self.landmark_num = landmark_num
         self.calc_scores = args.calc_scores
         self.hidden = args.hidden
-        self.m2, self.m3, self.m4, self.m5 = args.num_matrices # Weight Banks(가중치 행렬) 개수
+        self.m2, self.m3, self.m4, self.m5 = args.num_matrices
         
-# [채널 동기화 핵심 로직]
+        # 🌟 [수정 1] 채널 동기화 핵심 로직 (17채널 롤백 -> 14채널로 완벽 고정)
         in_channels = getattr(args, 'in_channels', 3)
         if in_channels == 7:
-            self.edge_channels = 17 # 🌟 14 -> 17
+            self.edge_channels = 14 # 7채널(XYZ+방향+곡률)일 경우 엣지는 14채널
         elif in_channels == 6:
-            self.edge_channels = 15 # 🌟 13 -> 15
+            self.edge_channels = 13 
         else:
-            self.edge_channels = 9  # 🌟 10 -> 9
+            self.edge_channels = 10 
         
-        # 또한 args.hidden은 [[32], [32], [32], [32]] 형태이므로 각 층에 맞게 인덱싱합니다.
         self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
         self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])
         self.scorenet4 = ScoreNet(self.edge_channels, self.m4, hidden_unit=self.hidden[2])
         self.scorenet5 = ScoreNet(self.edge_channels, self.m5, hidden_unit=self.hidden[3])
 
-        # [2. 초기 특징 추출용 MLP]
+        # 🌟 [수정 2] 하드코딩 제거: 동적으로 self.edge_channels를 받도록 수정
         self.bn1 = nn.BatchNorm2d(64)
-        if in_channels == 7:
-            self.conv1 = nn.Sequential(nn.Conv2d(17, 64, kernel_size=1, bias=False), self.bn1, nn.LeakyReLU(negative_slope=0.2)) # 🌟 14 -> 17
-        elif in_channels == 6:
-            self.conv1 = nn.Sequential(nn.Conv2d(15, 64, kernel_size=1, bias=False), self.bn1, nn.LeakyReLU(negative_slope=0.2)) # 🌟 12 -> 15
-        else:
-            self.conv1 = nn.Sequential(nn.Conv2d(9, 64, kernel_size=1, bias=False), self.bn1, nn.LeakyReLU(negative_slope=0.2))  # 🌟 6 -> 9
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(self.edge_channels, 64, kernel_size=1, bias=False), 
+            self.bn1, 
+            nn.LeakyReLU(negative_slope=0.2)
+        )
 
-# ---------------------------------------------------------------------
+        # ---------------------------------------------------------------------
         # [3. PAConv 기반 특징 추출 레이어]
-        # 🌟 디펜스 포인트: DGCNN 엣지 결합을 위해 입력 채널을 2배(64 * 2 = 128)로 잡고,
-        # 출력 차원은 (64 * m) 형태의 2D 텐서로 평탄화(Flatten)하여 곱셈 오류를 방지합니다.
         # ---------------------------------------------------------------------
         self.matrice2 = nn.Parameter(torch.FloatTensor(64 * 2, 64 * self.m2))
         nn.init.kaiming_normal_(self.matrice2, mode='fan_out', nonlinearity='relu')
@@ -77,54 +73,32 @@ class PAConv(nn.Module):
         nn.init.kaiming_normal_(self.matrice5, mode='fan_out', nonlinearity='relu')
         self.bn5 = nn.BatchNorm1d(64)
 
-        # [4. 글로벌 맥락(Global Context) 추출 레이어]
+        # [4. 글로벌 맥락 추출 레이어]
         self.convt = nn.Conv1d(320, 1024, kernel_size=1)
         
-        # [5. 융합 및 출력 (Feature Fusion & Output Heads)]
+        # [5. 융합 및 출력]
         self.conv6 = nn.Conv1d(1344, 512, 1)
         self.dp1 = nn.Dropout(p=0.5)
         self.conv7 = nn.Conv1d(512, 256, 1)
         self.dp2 = nn.Dropout(p=0.5)
         
-        # 🌟 [디펜스 포인트: Two-Head 출력 정의]
-        # 1) DeepPA 게이트 융합을 위한 고밀도 힌트 생성기 (256 -> 128)
+        # Two-Head
         self.conv8 = nn.Conv1d(256, 128, 1)
-        
-        # 2) 최종 회귀 헤드 앵커용 히트맵 로짓 생성기 (128 -> 36)
-        # Softmax를 제거하고 선형 로짓(Logit) 상태로 뱉어냅니다.
         self.conv9 = nn.Conv1d(128, self.landmark_num, 1) 
 
     def forward(self, xyz, feature=None):
-        # train.py에서 데이터는 (B, 7, 8192) 규격으로 들어옵니다.
         B, C, N = xyz.shape
 
-        # ---------------------------------------------------------------------
-        # [Step 1: K-NN 검색용 순수 좌표 추출]
-        # knn 함수는 (B, 3, N) 형태의 좌표 텐서를 기대합니다.
-        # ---------------------------------------------------------------------
         xyz_coords = xyz[:, :3, :].contiguous() 
-        
-        # 🌟 중요: knn은 (인덱스, 거리) 튜플을 반환하므로 반드시 언패킹해야 합니다.
         idx, _ = knn(xyz_coords, self.k) 
 
-        # ---------------------------------------------------------------------
-        # [Step 2: 특징 추출을 위한 입력 구성]
-        # 입력 데이터가 이미 (B, 7, N)이므로 추가적인 permute 없이 사용합니다.
-        # ---------------------------------------------------------------------
+        # 🌟 [수정 3] get_scorenet_input 파라미터 에러 수정! (원본 xyz, idx, k 모두 전달)
         x_edge_feat = get_graph_feature(xyz, k=self.k, idx=idx) 
-        
-        # PAConv_util의 get_scorenet_input은 4차원 특징을 받도록 설계되었습니다.
-        scorenet_input = get_scorenet_input(x_edge_feat)
+        scorenet_input = get_scorenet_input(xyz, idx, self.k)
 
-        # ---------------------------------------------------------------------
-        # [Step 2: 초기 특징 추출]
-        # ---------------------------------------------------------------------
         x1 = self.conv1(x_edge_feat) 
-        x1 = x1.max(dim=-1, keepdim=False)[0] # PointNet 기반 Max Pooling
+        x1 = x1.max(dim=-1, keepdim=False)[0] 
 
-        # ---------------------------------------------------------------------
-        # [Step 3: PAConv 레이어 통과 (위치-적응형 특징 추출)]
-        # ---------------------------------------------------------------------
         x2, center2 = feat_trans_dgcnn(point_input=x1, kernel=self.matrice2, m=self.m2)
         score2 = self.scorenet2(scorenet_input, calc_scores=self.calc_scores, bias=0)
         x_asm = assemble_dgcnn(score=score2, point_input=x2, center_input=center2, knn_idx=idx, aggregate='sum')
@@ -145,33 +119,22 @@ class PAConv(nn.Module):
         x_asm = assemble_dgcnn(score=score5, point_input=x5, center_input=center5, knn_idx=idx, aggregate='sum')
         x5 = F.relu(self.bn5(x_asm))
 
-        # ---------------------------------------------------------------------
-        # [Step 4: 로컬(Local) 및 글로벌(Global) 특징 융합]
-        # ---------------------------------------------------------------------
-        xx = torch.cat((x1, x2, x3, x4, x5), dim=1) # (B, 320, N)
+        xx = torch.cat((x1, x2, x3, x4, x5), dim=1) 
 
         xc = F.relu(self.convt(xx))
         xc = F.adaptive_max_pool1d(xc, 1).view(B, -1)
         
         cls = xc.view(B, 1024, 1).repeat(1, 1, N)
-        x_concat = torch.cat((xx, cls), dim=1) # (B, 1344, N)
+        x_concat = torch.cat((xx, cls), dim=1) 
         
-        # ---------------------------------------------------------------------
-        # [Step 5: 🌟 분기형 Two-Head 출력 (Feature Extraction Point)]
-        # ---------------------------------------------------------------------
-        x_res = F.relu(self.conv6(x_concat)) # 1344 -> 512
+        x_res = F.relu(self.conv6(x_concat)) 
         x_res = self.dp1(x_res)
-        x_res = F.relu(self.conv7(x_res))    # 512 -> 256
+        x_res = F.relu(self.conv7(x_res))    
         x_res = self.dp2(x_res)
         
-        # 1. DeepPA 게이트 잔차 융합을 위한 고밀도 라텐트 힌트 (128채널)
-        latent_hint = F.relu(self.conv8(x_res)) # (B, 128, N)
+        latent_hint = F.relu(self.conv8(x_res)) 
+        heatmap_anchor = self.conv9(latent_hint) 
         
-        # 2. 최종단 앵커(Anchor) 연결을 위한 거시적 히트맵 (36채널)
-        # Softmax 삭제 (정보 병목 방지)
-        heatmap_anchor = self.conv9(latent_hint) # (B, 36, N)
-        
-        # DeepPA_model.py 규격에 맞게 (B, N, C) 형태로 트랜스포즈 후 방출
         latent_hint = latent_hint.permute(0, 2, 1).contiguous()
         heatmap_anchor = heatmap_anchor.permute(0, 2, 1).contiguous()
         
