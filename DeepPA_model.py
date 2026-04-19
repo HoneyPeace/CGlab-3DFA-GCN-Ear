@@ -55,28 +55,21 @@ def farthest_point_sample(xyz, npoint):
         return centroids
 
 # ==============================================================================
-# 👑 최상위 마스터 융합 모델
+# 👑 최상위 마스터 융합 모델 (HybridPipeline 호환 버전)
 # ==============================================================================
 class DeepPA_Wrapper(nn.Module):
     """
-    [0.47mm 달성을 위한 최상위 마스터 융합 모델]
-    Phase 1(PAConv)와 Phase 2(DeepPA)를 결합하고, 점진적 압축 회귀 헤드를 통해 3D 좌표를 출력합니다.
+    [0.47mm 달성을 위한 2단계 정밀 타격 모델]
+    train.py의 HybridPipeline에서 건네주는 라텐트 힌트와 날것의 히트맵을 받아 
+    최종 3D 좌표를 Direct Regression으로 출력합니다.
     """
-    def __init__(self, args):
+    def __init__(self, args, landmark_num): # 🌟 landmark_num 파라미터 연동
         super().__init__()
         self.args = args
+        self.landmark_num = landmark_num
         
-        # ---------------------------------------------------------------------
-        # 🟢 [Phase 1] PAConv (내비게이션 - 거시적 랜드마크 영역 탐지)
-        # ---------------------------------------------------------------------
-        self.paconv = PAConv(args) 
+        # 🌟 VRAM 최적화: PAConv는 train.py에서 관리하므로 내장하지 않음
         
-        # 🌟 [디펜스 포인트 1] 전면 프리징 (Freezing) 철벽 방어
-        # 120층 백본의 수렴 진동을 막기 위해 1단계 가이드라인의 가중치를 영구 고정합니다.
-        for param in self.paconv.parameters():
-            param.requires_grad = False
-        self.paconv.eval() 
-
         # ---------------------------------------------------------------------
         # 🟡 [Phase 2] DeepPA (120층 백본 - 기하학적 스나이퍼)
         # ---------------------------------------------------------------------
@@ -85,49 +78,44 @@ class DeepPA_Wrapper(nn.Module):
         # ---------------------------------------------------------------------
         # 🔴 [Phase 3] 점진적 압축 회귀 헤드 (Direct Regression Head)
         # ---------------------------------------------------------------------
-        # 🌟 [디펜스 포인트 9] 295ch -> 1024ch -> 512ch -> (Global Pool) -> 256ch -> 108ch
+        bn_mom = getattr(args, 'bn_momentum', 0.1)
         
         # 1. 고밀도 기하 피처 추출용 1D Conv (공간적 특징 학습)
         self.head_conv = nn.Sequential(
             nn.Conv1d(295, 1024, 1),
-            nn.BatchNorm1d(1024, momentum=args.bn_momentum),
+            nn.BatchNorm1d(1024, momentum=bn_mom),
             nn.ReLU(inplace=True),
             nn.Conv1d(1024, 512, 1),
-            nn.BatchNorm1d(512, momentum=args.bn_momentum),
+            nn.BatchNorm1d(512, momentum=bn_mom),
             nn.ReLU(inplace=True),
         )
         
         # 2. 전역적 맥락(Global Context) 확보 후 최종 좌표 출력 (MLP)
         self.head_linear = nn.Sequential(
             nn.Linear(512, 256),
-            nn.BatchNorm1d(256, momentum=args.bn_momentum),
+            nn.BatchNorm1d(256, momentum=bn_mom),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(256, 108) # 36개 랜드마크 * 3(XYZ) = 108
+            nn.Linear(256, self.landmark_num * 3) # 🌟 하드코딩(108) 방지, 동적 확장
         )
 
-    def forward(self, xyz, feature):
-        B, N_in, C_in = xyz.shape
-        device = xyz.device
+    # 🌟 통제실(train.py)에서 던져주는 힌트 파라미터를 정확히 수신
+    def forward(self, x, prior_latent=None, prior_heatmap=None):
+        # x: (B, C_in, N) 규격
+        B, C_in, N_in = x.shape
+        device = x.device
         
         # =====================================================================
-        # 1. PAConv 통과 (역전파 완벽 차단)
+        # 1. 계층적 다운샘플링 인덱스 추출 (FPS용 차원 변경)
         # =====================================================================
-        with torch.no_grad():
-            self.paconv.eval()
-            prior_latent, out_paconv = self.paconv(xyz, feature)
-            # prior_latent: (B, N, 128) - DeepPA 잔차 융합용 힌트
-            # out_paconv: (B, N, 36) - 최종단 앵커용 히트맵
-            
-        # =====================================================================
-        # 2. 계층적 다운샘플링 인덱스(FPS & KNN) 추출 로직 (원본 완벽 유지)
-        # =====================================================================
-        cur_xyz = xyz
+        # FPS 커널은 공간 좌표만을 필요로 하며 (B, N, 3) 형태를 요구함
+        xyz_coords = x[:, :3, :].permute(0, 2, 1).contiguous() 
+        
+        cur_xyz = xyz_coords
         down_knn_list = []
         up_idx_list = []
         
         for i in range(len(self.args.depths)):
-            # 깊이에 따라 점 개수를 줄임 (기존 로직 또는 args 설정 기준)
             if hasattr(self.args, 'npoints'):
                 next_points = self.args.npoints[i]
             else:
@@ -135,12 +123,10 @@ class DeepPA_Wrapper(nn.Module):
                 
             down_idx = farthest_point_sample(cur_xyz, next_points)
             
-            # KNN 검색 (현재 원본 코드 로직 복원)
             batch_indices = torch.arange(B, dtype=torch.long, device=device).view(-1, 1).repeat(1, next_points)
             next_xyz = cur_xyz[batch_indices, down_idx, :]
             down_knn_list.append(down_idx)
             
-            # Up-sampling 보간을 위한 거리(cdist) 기반 인덱스 추출
             dist_up = torch.cdist(cur_xyz, next_xyz)
             up_idx = torch.argmin(dist_up, dim=2)
             up_idx_list.append(up_idx)
@@ -151,45 +137,42 @@ class DeepPA_Wrapper(nn.Module):
         indices = up_idx_list + down_knn_list
         
         # =====================================================================
-        # 3. DeepPA 백본 통과 (게이트 융합 및 HDS 채점)
+        # 2. DeepPA 백본 통과 (1단계 라텐트 힌트 병합)
         # =====================================================================
-        out = self.model(xyz, feature, indices, prior_heatmap=prior_latent)
+        out = self.model(x, feature=None, indices=indices, prior_heatmap=prior_latent)
         
         if isinstance(out, tuple):
             dense_features, spa_loss, sem_list = out[0], out[1], out[2]
         else:
             dense_features, spa_loss, sem_list = out, torch.tensor(0.0).to(device), []
             
-        # 백본 출력 형태 맞추기: (B, N_down, 256) -> (B, 256, N_down)
-        dense_features = dense_features.permute(0, 2, 1).contiguous() 
+        if dense_features.shape[-1] == 256:
+            dense_features = dense_features.permute(0, 2, 1).contiguous() 
         
         # =====================================================================
-        # 4. 🌟 최종단 앵커 연결 및 차원 동기화 (Ground Truth Alignment)
+        # 3. 최종 앵커 결합 (Ground Truth Alignment) - Concatenation
         # =====================================================================
-        # DeepPA를 통과하며 가장 작게 줄어든 해상도(N_down) 인덱스
         last_idx = indices[-1] 
+        xyz_down = index_points(xyz_coords, last_idx).permute(0, 2, 1).contiguous() 
         
-        # 원본 좌표(XYZ)를 마지막 해상도에 맞게 솎아냄
-        xyz_down = index_points(xyz, last_idx).permute(0, 2, 1) # (B, 3, N_down)
+        if prior_heatmap is not None:
+            # 1단계의 날것(Raw) 히트맵을 현재 해상도에 맞게 필터링
+            prior_heatmap_trans = prior_heatmap.permute(0, 2, 1).contiguous() 
+            paconv_heatmap = index_points(prior_heatmap_trans, last_idx).permute(0, 2, 1).detach() 
+        else:
+            paconv_heatmap = torch.zeros(B, self.landmark_num, xyz_down.shape[2], device=device)
         
-        # 🌟 [디펜스 포인트 8] 히트맵 앵커 차원 맞추기 및 역전파 차단 (.detach())
-        # (B, N_in, 36) -> (B, 36, N_down)
-        paconv_heatmap = index_points(out_paconv, last_idx).permute(0, 2, 1).detach() 
-        
-        # [백본(256) + 원본좌표(3) + 앵커히트맵(36)] = 총 295채널 결합
-        fused_features = torch.cat([dense_features, xyz_down, paconv_heatmap], dim=1) # (B, 295, N_down)
+        # [백본(256) + 원본좌표(3) + 앵커히트맵(36)] = 총 295채널 결합!
+        fused_features = torch.cat([dense_features, xyz_down, paconv_heatmap], dim=1) 
         
         # =====================================================================
-        # 5. 점진적 압축 회귀 헤드 통과
+        # 4. 점진적 압축 회귀 헤드 통과
         # =====================================================================
-        x = self.head_conv(fused_features) # (B, 295, N_down) -> (B, 512, N_down)
+        x_fused = self.head_conv(fused_features) 
+        x_pool = torch.max(x_fused, dim=2)[0]    
         
-        # 전역적 맥락(Global Context) 병합 (Point-wise Max Pooling)
-        x = torch.max(x, dim=2)[0]         # (B, 512, N_down) -> (B, 512)
-        
-        # 0.1mm 초정밀 좌표로 쥐어짜기
-        coords = self.head_linear(x)       # (B, 512) -> (B, 108)
-        coords = coords.view(B, 36, 3)     # (B, 36, 3) 텐서로 정리
+        coords = self.head_linear(x_pool)        
+        coords = coords.view(B, self.landmark_num, 3) 
         
         if self.training:
             return coords, spa_loss, sem_list

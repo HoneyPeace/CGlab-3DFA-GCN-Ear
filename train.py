@@ -1,6 +1,6 @@
 # @Author: Yuan Wang (Modified by Researcher)
 # @File: train.py
-# @Description: Unified Hybrid Pipeline + CVPR Eq.5 HDS Curriculum + 0.47mm Optimization
+# @Description: Unified Hybrid Pipeline + CVPR Eq.5 HDS Curriculum + Late Activation (Softmax Decoupling)
 # ==============================================================================
 
 import os
@@ -20,10 +20,8 @@ from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
 
-# 🌟 [수정] dynamic_focal_l1_loss -> focal_l1_loss 로 변경 동기화
 from loss import AdaptiveWingLoss, CurvatureSurfaceLoss, compute_structural_loss, focal_l1_loss
 from util import main_sample
-# 🌟 [수정] PointcloudJitter 임포트 추가
 from augmentations import normalize_data, PointcloudScaleAndTranslate, PointcloudJitter
 
 from PAConv_model import PAConv
@@ -67,7 +65,7 @@ def process_data_storage(dataset, prefix, paths):
 
 """
 ================================================================================
-🌟 Unified Hybrid Pipeline
+🌟 Unified Hybrid Pipeline (Late Activation & Decoupling)
 ================================================================================
 """
 class HybridPipeline(nn.Module):
@@ -76,44 +74,40 @@ class HybridPipeline(nn.Module):
         self.mode = mode.lower()
         self.stage1_paconv = PAConv(args, landmark_num)
         
-        # PAConv가 이제 2개를 반환하므로 aux_head는 불필요함. 
-        # (단독 학습 시를 위해 남겨두되, frozen/e2e에서는 사용 안 함)
-        self.s1_aux_head = nn.Conv1d(128, landmark_num, 1) 
-        
         if self.mode == 'frozen':
             for param in self.stage1_paconv.parameters(): param.requires_grad = False
-            for param in self.s1_aux_head.parameters(): param.requires_grad = False
                 
         if self.mode in ['frozen', 'e2e']:
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
 
     def forward(self, x):   
         if self.mode == 'stage1':
-            s1_latent, s1_hm_anchor = self.stage1_paconv(x)
+            s1_latent, s1_hm_anchor = self.stage1_paconv(x) # Raw Logits 반환
             
-            # 🌟 [수정됨] s1_hm_anchor는 (B, 8192, 36)입니다. 
-            # 36개의 랜드마크 각각에 대해, 8192개의 점(dim=1) 중 가장 확률이 높은 점을 찾습니다.
-            max_idx = torch.argmax(s1_hm_anchor, dim=1) # (B, 36)
+            # 🌟 [학습의 마법] 1단계 모델을 예리하게 학습시키기 위해 Softmax 안경 씌우기!
+            s1_hm_prob = F.softmax(s1_hm_anchor, dim=1)
             
-            # 원본 입력에서 순수 XYZ 좌표 추출 (B, 8192, 3)
+            # 확률값 기준으로 가장 핫한 좌표 추출 (평가 및 디버깅용)
+            max_idx = torch.argmax(s1_hm_prob, dim=2) # (B, 36)
             xyz_permuted = x[:, :3, :].permute(0, 2, 1).contiguous()
+            gather_idx = max_idx.unsqueeze(-1).expand(-1, -1, 3) 
+            pred_coords = torch.gather(xyz_permuted, 1, gather_idx) 
             
-            # 찾아낸 인덱스 번호로 실제 3D 좌표(XYZ)를 뜯어옵니다.
-            gather_idx = max_idx.unsqueeze(-1).expand(-1, -1, 3) # (B, 36, 3)
-            pred_coords = torch.gather(xyz_permuted, 1, gather_idx) # (B, 36, 3)
-            
-            return pred_coords, torch.tensor(0.0).to(x.device), [s1_hm_anchor], s1_hm_anchor
+            # 🌟 로스 계산(hm_criterion)을 위해 Raw 대신 확률(prob) 자체를 반환합니다.
+            return pred_coords, torch.tensor(0.0).to(x.device), [s1_hm_prob], s1_hm_prob
             
         elif self.mode == 'frozen':
             self.stage1_paconv.eval()
             with torch.no_grad():
                 s1_latent, s1_hm = self.stage1_paconv(x)
+            # 🌟 DeepPA에는 Softmax 안경을 벗고 날것(Raw) 그대로 던져줍니다!
             out = self.stage2_deeppa(x, prior_latent=s1_latent.detach(), prior_heatmap=s1_hm.detach())
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
             return pred_coords, spa_loss, sem_list, s1_hm
             
         elif self.mode == 'e2e':
             s1_latent, s1_hm = self.stage1_paconv(x)
+            # 🌟 DeepPA에는 Softmax 안경을 벗고 날것(Raw) 그대로 던져줍니다!
             out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
             return pred_coords, spa_loss, sem_list, s1_hm
@@ -143,7 +137,6 @@ def train(args):
     train_loader = DataLoader(train_dataset, num_workers=0, batch_size=args.batch_size, shuffle=True, drop_last=True)
     test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.test_batch_size, shuffle=True, drop_last=False)
     
-    # 🌟 [수정] 증강 기법 로드 (Jitter 추가)
     ScaleAndTranslate = PointcloudScaleAndTranslate()
     ApplyJitter = PointcloudJitter(std=0.001)
 
@@ -171,7 +164,6 @@ def train(args):
         model.apply(weight_init)
         
         surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
-        # 🌟 [수정] 논문 Eq.5에 맞춰 BCE -> AdaptiveWingLoss(L_sem) 적용
         hm_criterion = AdaptiveWingLoss().to(device) 
         
         opt = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
@@ -188,23 +180,18 @@ def train(args):
             train_loss_norm = 0.0; t_hm_aux, t_crd, t_srf, t_str = 0.0, 0.0, 0.0, 0.0; train_mm = 0.0
             opt.zero_grad() 
             
-            # 🌟 [수정] CVPR 논문 Eq. 5 (지수 감소 스케줄링) 완벽 구현
             if not getattr(args, 'use_direct_regression', True):
                 w_sem, w_spa, w_pred = 1.0, 0.0, 0.0
                 current_phase_str = f"STAGE1 Heatmap Only"
             else:
-                # 초기 가중치 설정 (alpha=0.3, beta=0.005)
                 alpha_init = 0.3
                 beta_init = 0.005
-                
-                # 역수 기반 감쇄 (n = 1 / (epoch + 1))
                 decay_n = 1.0 / (epoch + 1)
                 
                 w_sem = alpha_init ** decay_n
                 w_spa = beta_init ** decay_n
                 w_pred = 1.0 - (w_sem + w_spa)
                 
-                # 모델이 충분히 안정화된 후(예: 30에폭)에는 강제로 정밀 타격에 100% 비중
                 if epoch > 30:
                     w_sem, w_spa, w_pred = 0.0, 0.0, 1.0
                     
@@ -220,8 +207,6 @@ def train(args):
 
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
-                    
-                    # 🌟 [수정] 강건성 확보를 위한 가우시안 지터링 (정답지는 고정)
                     point_normal = ApplyJitter(point_normal)
                     
                     point_input = point_normal.permute(0, 2, 1).contiguous()
@@ -229,7 +214,7 @@ def train(args):
                     target_hm = seg.permute(0, 2, 1).contiguous()
                     
                     # ---------------------------------------------------------
-                    # 1. Forward Pass & PAConv 히트맵 안전 확보
+                    # 1. Forward Pass
                     # ---------------------------------------------------------
                     if pipeline_mode in ['stage1', 'frozen', 'e2e']:
                         pred_coords, spa_loss, sem_list, s1_hm = model(point_input)
@@ -241,12 +226,9 @@ def train(args):
                         out = model(point_input)
                         pred_coords, spa_loss, sem_list = out[0], torch.tensor(0.0).to(device), []
                         
-                    # 2. 로스 계산 (HDS 모의고사)
+                    # 2. 로스 계산
                     L_spa = spa_loss if isinstance(spa_loss, torch.Tensor) else torch.tensor(0.0).to(device)
                     
-                    # ---------------------------------------------------------
-                    # 기하학적 1:1 매칭 HDS (Gather 방식)
-                    # ---------------------------------------------------------
                     safe_sem_list = []
                     target_list = []
 
@@ -256,12 +238,10 @@ def train(args):
                             sp = sp.permute(0, 2, 1).contiguous()
                         
                         curr_N = sp.shape[2]
-                        if curr_N == 8192 or curr_N == 2048: # 모델 입력 크기에 따라 분기
+                        if curr_N == 8192 or curr_N == 2048: 
                             safe_sem_list.append(sp)
                             target_list.append(target_hm)
                         else:
-                            # [TODO]: Gather 방식 활성화 시, 모델에서 indices 리스트를 리턴받아야 함.
-                            # 현재 구조에서는 shape 불일치 시 스킵하여 에러 방지
                             continue 
 
                     if len(safe_sem_list) > 0:
@@ -269,7 +249,6 @@ def train(args):
                     else:
                         L_sem = torch.tensor(0.0).to(device)
                         
-                    # 🌟 [수정] 최종 회귀 로스 계산 (Standard Focal L1)
                     loss_coord = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                     loss_surface, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
                     loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
@@ -279,20 +258,16 @@ def train(args):
                         auto_scales['surface'] = target_norm / loss_surface.item() if loss_surface.item() > 0 else 1.0
                         auto_scales['struct'] = target_norm / loss_struct.item() if loss_struct.item() > 0 else 1.0
 
-                    # 🌟 [수정됨] RLW (Random Loss Weighting) 적용 로직
                     if getattr(args, 'use_rlw_for_pred', False):
-                        # 매 스텝마다 3개 로스에 대해 합이 1이 되는 랜덤 가중치(Dirichlet 효과) 생성
                         rand_w = F.softmax(torch.randn(3, device=device), dim=0)
                         w_crd, w_srf, w_str = rand_w[0], rand_w[1], rand_w[2]
                     else:
-                        # RLW가 꺼져있으면 원래대로 모두 1.0 비율 고정
                         w_crd, w_srf, w_str = 1.0, 1.0, 1.0
 
                     L_pred = (w_crd * loss_coord * auto_scales['coord']) + \
                              (w_srf * loss_surface * auto_scales['surface']) + \
                              (w_str * loss_struct * auto_scales['struct'])
 
-                    # 3. 로스 융합 및 역전파
                     total_loss = (w_sem * L_sem) + (w_spa * L_spa) + (w_pred * L_pred)
                                         
                     loss = total_loss / accum_steps
@@ -303,7 +278,6 @@ def train(args):
                         opt.zero_grad() 
 
                     with torch.no_grad():
-                        # 🌟 w_pred > 0 조건을 지워서, 1단계에서도 무조건 Train 오차를 계산합니다!
                         mm_error = F.l1_loss(pred_coords, augmented_landmark).item() * avg_m
 
                     train_loss_norm += total_loss.item()
@@ -317,7 +291,7 @@ def train(args):
             t_loss_n = train_loss_norm / num_b
             t_mm = train_mm / num_b
 
-# --- Validation ---
+            # --- Validation ---
             model.eval()
             val_mm_total = 0.0
             val_samples = 0
@@ -330,7 +304,6 @@ def train(args):
                     point_xyz = point[:, :, :3]
                     avg_m = torch.mean(torch.max(torch.sqrt(torch.sum((point_xyz - torch.mean(point_xyz, axis=1, keepdim=True)) ** 2, axis=2)), axis=1)[0]).item()
                     
-                    # 테스트 시에는 Jitter 등 증강을 주지 않고 순수 Normalize만!
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1).contiguous() 
                     
@@ -339,18 +312,13 @@ def train(args):
                     else:
                         pred_coords = model(point_input)[0]
 
-                    # 🌟 조건문(if w_pred > 0)을 완전히 삭제했습니다. 이제 1단계에서도 무조건 오차를 누적합니다!
                     val_mm_total += F.l1_loss(pred_coords, landmark_normal).item() * avg_m * B_val
-                    
                     val_samples += B_val
             
-            # 전체 샘플에 대한 정확한 가중 평균 오차 계산
             v_mm = val_mm_total / val_samples if val_samples > 0 else 0.0                     
 
-            
-# --- 성적표 출력 ---
+            # --- 성적표 출력 ---
             if pipeline_mode == 'stage1':
-                # 🌟 [수정됨] Stage 1에서도 Train_mm과 Val_mm(Argmax 좌표 오차)을 당당하게 출력합니다!
                 print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | L_sem(HM): {t_hm_aux/num_b:.4f} || Train_mm: {t_mm:.2f} | Val_mm: {v_mm:.2f}")
             else:
                 print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f}")

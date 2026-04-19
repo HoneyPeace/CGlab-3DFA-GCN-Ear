@@ -98,8 +98,6 @@ class HybridPipeline_Eval(nn.Module):
         self.mode = mode.lower()
         self.stage1_paconv = PAConv(args, landmark_num)
         
-        # [수정]: PAConv가 히트맵을 뱉으므로 s1_aux_head 삭제 (train.py와 동일)
-        
         if self.mode in ['frozen', 'e2e']:
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
 
@@ -107,7 +105,7 @@ class HybridPipeline_Eval(nn.Module):
         if self.mode == 'stage1':
             s1_latent, s1_hm_anchor = self.stage1_paconv(x)
             
-            # 🌟 [봉인 해제 1] 더미 좌표(zeros) 대신, 히트맵에서 가장 높은 점의 좌표를 직접 뜯어옵니다.
+            # 🌟 더미 좌표 대신 히트맵 최고점 좌표 추출
             max_idx = torch.argmax(s1_hm_anchor, dim=1) 
             xyz_permuted = x[:, :3, :].permute(0, 2, 1).contiguous()
             gather_idx = max_idx.unsqueeze(-1).expand(-1, -1, 3) 
@@ -119,11 +117,11 @@ class HybridPipeline_Eval(nn.Module):
             s1_latent, s1_hm = self.stage1_paconv(x)
             out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
             
-            # 🌟 [수정됨] 평가 모드에서 단일 텐서가 나올 때 차원이 깨지는 것을 방지
+            # 평가 모드 단일 텐서 반환 처리
             if isinstance(out, tuple):
                 pred_coords = out[0]
             else:
-                pred_coords = out # eval() 모드에서는 텐서 자체가 반환됨
+                pred_coords = out 
                 
             return pred_coords, s1_hm
 
@@ -174,7 +172,8 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)  
             
-            eval_target_hm = s1_aux_hm
+            # 🌟 [수정됨] mIoU와 Cosine Sim의 정상적인 채점을 위해 Raw 로짓에 Softmax 안경 씌우기!
+            eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else s1_aux_hm
             pred_heatmap = eval_target_hm.permute(0, 2, 1) 
             pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
             
@@ -265,7 +264,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         df_landmarks.to_excel(writer, sheet_name='2_Per_Landmark', index=False)
         df_top10.to_excel(writer, sheet_name='3_Top10_Hardest', index=False)
 
-    # 🌟 [2] 텍스트 파일(TXT)을 엑셀과 100% 동일하게 저장
+    # [2] 텍스트 파일(TXT)을 엑셀과 100% 동일하게 저장
     txt_path = result_excel_path.replace(".xlsx", ".txt")
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write("==================================================\n")

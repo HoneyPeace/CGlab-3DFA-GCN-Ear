@@ -135,7 +135,7 @@ class PAConv(nn.Module):
         latent_hint = F.relu(self.conv8(x_res)) 
         heatmap_anchor = self.conv9(latent_hint) 
         
-        latent_hint = latent_hint.permute(0, 2, 1).contiguous()
-        heatmap_anchor = heatmap_anchor.permute(0, 2, 1).contiguous()
+        #latent_hint = latent_hint.permute(0, 2, 1).contiguous()
+        #heatmap_anchor = heatmap_anchor.permute(0, 2, 1).contiguous()
         
         return latent_hint, heatmap_anchor
