@@ -1,7 +1,7 @@
 '''
-@Author: Yuan Wang (Modified by Researcher)
+@Author: Yuan Wang (Modified by Researcher & AI Assistant)
 @File: eval.py
-@Description: Unified Evaluation Script (PAConv / Frozen / E2E 완벽 호환 + TXT/EXCEL 100% 동기화 추출)
+@Description: Unified Evaluation Script (Soft-Argmax 적용 + Stage1 좌표 채점 해금 + TXT/EXCEL 동기화)
 '''
 
 from __future__ import print_function, division
@@ -22,9 +22,10 @@ from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
 
-# 🌟 새로운 아키텍처 임포트
+# 🌟 새로운 아키텍처 및 보간법 임포트
 from DeepPA_model import DeepPA_Wrapper  
 from PAConv_model import PAConv          
+from loss import get_differentiable_coords # 🌟 초정밀 좌표 추출 함수 추가
 
 matplotlib.use('Agg')
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -90,7 +91,7 @@ test_dataset = TensorDataset(
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # -----------------------------------------------------------------------------
-# 2. 🌟 평가용 통합 Hybrid Pipeline (train.py와 아키텍처 100% 동기화)
+# 2. 🌟 평가용 통합 Hybrid Pipeline (Soft-Argmax 동기화)
 # -----------------------------------------------------------------------------
 class HybridPipeline_Eval(nn.Module):
     def __init__(self, args, landmark_num, mode='frozen'):
@@ -105,23 +106,19 @@ class HybridPipeline_Eval(nn.Module):
         if self.mode == 'stage1':
             s1_latent, s1_hm_anchor = self.stage1_paconv(x)
             
-            # 🌟 더미 좌표 대신 히트맵 최고점 좌표 추출
-            max_idx = torch.argmax(s1_hm_anchor, dim=1) 
-            xyz_permuted = x[:, :3, :].permute(0, 2, 1).contiguous()
-            gather_idx = max_idx.unsqueeze(-1).expand(-1, -1, 3) 
-            pred_coords = torch.gather(xyz_permuted, 1, gather_idx) 
+            # 🌟 [수정됨] 단일 점이 아닌 상위 K개 점의 무게중심(Soft-Argmax) 추출
+            s1_hm_prob = F.softmax(s1_hm_anchor, dim=1)
+            points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
+            pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=getattr(self.stage1_paconv.args, 'k_softargmax', 10))
             
-            return pred_coords, s1_hm_anchor
+            return pred_coords, s1_hm_prob # mIoU 계산을 위해 확률값 전달
             
         elif self.mode in ['frozen', 'e2e']:
             s1_latent, s1_hm = self.stage1_paconv(x)
             out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
             
-            # 평가 모드 단일 텐서 반환 처리
-            if isinstance(out, tuple):
-                pred_coords = out[0]
-            else:
-                pred_coords = out 
+            if isinstance(out, tuple): pred_coords = out[0]
+            else: pred_coords = out 
                 
             return pred_coords, s1_hm
 
@@ -166,14 +163,18 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 
             point_input = point_norm.permute(0, 2, 1).contiguous()
             
-            # 통합 모델 포워딩
+            # 통합 모델 포워딩 (여기서 Soft-Argmax 좌표가 나옵니다)
             pred_coords_norm, s1_aux_hm = eval_model(point_input)
             
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)  
             
-            # 🌟 [수정됨] mIoU와 Cosine Sim의 정상적인 채점을 위해 Raw 로짓에 Softmax 안경 씌우기!
-            eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else s1_aux_hm
+            # Stage 1은 이미 Softmax가 적용되어 리턴됨
+            if pipeline_mode == 'stage1':
+                eval_target_hm = s1_aux_hm
+            else:
+                eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else s1_aux_hm
+                
             pred_heatmap = eval_target_hm.permute(0, 2, 1) 
             pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
             
@@ -197,17 +198,16 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 for lm_idx in range(heatmap_np.shape[1]):
                      save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], current_hm_dir, real_name, lm_idx, f"pred_{eval_name}")
 
-            # 좌표 회귀 로직 (Stage 1일 때는 제외)
-            if pipeline_mode != 'stage1':
-                pred_landmark = (pred_coords_norm * scale) + centroid
-                pred_np = pred_landmark.cpu().numpy().squeeze(0)
-                gt_np = gt_landmark.cpu().numpy().squeeze(0)
-                    
-                dists = np.linalg.norm(pred_np - gt_np, axis=1)
-                me = np.mean(dists)
-                me_list.append(me)
-                per_landmark_me_list.append(dists)
-                np.savetxt(os.path.join(current_asc_dir, f"{eval_name}_pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
+            # 🌟 [봉인 해제!] 조건문 삭제: Stage 1이든 2든 무조건 3D 좌표 오차(mm)를 채점합니다.
+            pred_landmark = (pred_coords_norm * scale) + centroid
+            pred_np = pred_landmark.cpu().numpy().squeeze(0)
+            gt_np = gt_landmark.cpu().numpy().squeeze(0)
+                
+            dists = np.linalg.norm(pred_np - gt_np, axis=1)
+            me = np.mean(dists)
+            me_list.append(me)
+            per_landmark_me_list.append(dists)
+            np.savetxt(os.path.join(current_asc_dir, f"{eval_name}_pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
     # ------------------ 최종 집계 및 저장 ------------------
     avg_cos_sim, cos_sim_5_global = np.mean(cos_sim_list), np.percentile(cos_sim_list, 5)
@@ -293,8 +293,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 
     print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
     print(f"  └─ 📄 Text summary perfectly synchronized & saved to: {os.path.basename(txt_path)}")
-    if pipeline_mode != 'stage1':
-        print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
+    print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
 
 # -----------------------------------------------------------------------------
 # 4. 모델 로드 및 평가 분기
@@ -308,7 +307,7 @@ else: pipeline_mode = 'single_custom'
 print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()}")
 model = HybridPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)
 
-target_weight_path = os.path.join(run_root, 'models', getattr(args, 'model_epoch', 'Frozen_Hybrid_last.t7'))
+target_weight_path = os.path.join(run_root, 'models', getattr(args, 'model_epoch', f'{args.model}_last.t7'))
 
 if os.path.exists(target_weight_path):
     print(f"📦 모델 가중치 로드 성공: {os.path.basename(target_weight_path)}")

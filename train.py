@@ -19,8 +19,7 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-
-from loss import AdaptiveWingLoss, CurvatureSurfaceLoss, compute_structural_loss, focal_l1_loss
+from loss import AdaptiveWingLoss, CurvatureSurfaceLoss, compute_structural_loss, focal_l1_loss, get_differentiable_coords
 from util import main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate, PointcloudJitter
 
@@ -65,7 +64,7 @@ def process_data_storage(dataset, prefix, paths):
 
 """
 ================================================================================
-🌟 Unified Hybrid Pipeline (Late Activation & Decoupling)
+🌟 Unified Hybrid Pipeline (Late Activation & Decoupling & Soft-Argmax)
 ================================================================================
 """
 class HybridPipeline(nn.Module):
@@ -82,36 +81,34 @@ class HybridPipeline(nn.Module):
 
     def forward(self, x):   
         if self.mode == 'stage1':
-            s1_latent, s1_hm_anchor = self.stage1_paconv(x) # Raw Logits 반환
+            s1_latent, s1_hm_raw = self.stage1_paconv(x) # Raw Logits 반환
             
-            # 🌟 [학습의 마법] 1단계 모델을 예리하게 학습시키기 위해 Softmax 안경 씌우기!
-            s1_hm_prob = F.softmax(s1_hm_anchor, dim=1)
+            # 1. 학습 로스(AWL)를 예리하게 깎기 위해 Landmark 차원(dim=1)으로 Softmax
+            s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
             
-            # 확률값 기준으로 가장 핫한 좌표 추출 (평가 및 디버깅용)
-            max_idx = torch.argmax(s1_hm_prob, dim=2) # (B, 36)
-            xyz_permuted = x[:, :3, :].permute(0, 2, 1).contiguous()
-            gather_idx = max_idx.unsqueeze(-1).expand(-1, -1, 3) 
-            pred_coords = torch.gather(xyz_permuted, 1, gather_idx) 
+            # 2. 🌟 [복구됨] Soft-Argmax를 이용한 초정밀 3D 좌표 보간! (2.5mm 벽 돌파)
+            points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous() # (B, N, 3)
+            pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=getattr(self.stage1_paconv.args, 'k_softargmax', 10))
             
-            # 🌟 로스 계산(hm_criterion)을 위해 Raw 대신 확률(prob) 자체를 반환합니다.
+            # 로스 계산(hm_criterion)을 위해 Raw 대신 확률(prob) 자체를 반환합니다.
             return pred_coords, torch.tensor(0.0).to(x.device), [s1_hm_prob], s1_hm_prob
             
         elif self.mode == 'frozen':
             self.stage1_paconv.eval()
             with torch.no_grad():
                 s1_latent, s1_hm = self.stage1_paconv(x)
-            # 🌟 DeepPA에는 Softmax 안경을 벗고 날것(Raw) 그대로 던져줍니다!
+            # DeepPA에는 Softmax 안경을 벗고 날것(Raw) 그대로 던져줍니다!
             out = self.stage2_deeppa(x, prior_latent=s1_latent.detach(), prior_heatmap=s1_hm.detach())
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
             return pred_coords, spa_loss, sem_list, s1_hm
             
         elif self.mode == 'e2e':
             s1_latent, s1_hm = self.stage1_paconv(x)
-            # 🌟 DeepPA에는 Softmax 안경을 벗고 날것(Raw) 그대로 던져줍니다!
+            # DeepPA에는 Softmax 안경을 벗고 날것(Raw) 그대로 던져줍니다!
             out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
             return pred_coords, spa_loss, sem_list, s1_hm
-
+        
 def train(args):
     accum_steps = args.accumulation_steps
     MODE = "SPLIT" if not args.test_dataset_name or (args.train_dataset_name == args.test_dataset_name) else "SEPARATE"

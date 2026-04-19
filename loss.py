@@ -112,3 +112,34 @@ class CurvatureSurfaceLoss(nn.Module):
         loss_unified = (p2p_distance * weight_multiplier).mean()
 
         return loss_unified, p2p_distance.mean(), diff_curvature.mean(), diff_direction.mean()
+    
+# =====================================================================
+# 🌟 [초정밀 보간법] Soft-Argmax 좌표 추출기 (1.70mm 돌파의 핵심)
+# =====================================================================
+def get_differentiable_coords(points, heatmaps, k=10):
+    """
+    [Soft-Argmax 기반 초정밀 3D 좌표 추출]
+    가장 핫한 1개의 점만 고르는 것(2.5mm의 한계)이 아니라,
+    주변 상위 k개의 점을 모두 찾아 에너지를 가중치로 삼아 허공의 '무게중심'을 찍습니다.
+    
+    - points: (B, N, 3) 포인트 클라우드 좌표
+    - heatmaps: (B, K_lm, N) 랜드마크 히트맵 확률 또는 로짓
+    - k: 보간에 사용할 주변 점의 개수 (보통 10~20)
+    """
+    B, K_lm, N = heatmaps.shape
+    
+    # 1. 각 랜드마크별로 가장 에너지가 높은 상위 k개의 값과 인덱스 추출
+    topk_vals, topk_idx = torch.topk(heatmaps, k, dim=2) # (B, K_lm, k)
+    
+    # 2. 상위 k개 점의 3D XYZ 좌표를 추출
+    topk_idx_expanded = topk_idx.unsqueeze(-1).expand(-1, -1, -1, 3) # (B, K_lm, k, 3)
+    points_expanded = points.unsqueeze(1).expand(-1, K_lm, -1, -1)     # (B, K_lm, N, 3)
+    topk_coords = torch.gather(points_expanded, 2, topk_idx_expanded)  # (B, K_lm, k, 3)
+    
+    # 3. 추출된 k개의 에너지를 가중치(Weight)로 변환 (Softmax를 통해 총합 1로 맞춤)
+    weights = F.softmax(topk_vals, dim=2) # (B, K_lm, k)
+    
+    # 4. 가중치를 반영하여 k개 점들의 '무게중심(Center of Mass)' 3D 좌표 계산
+    pred_coords = torch.sum(topk_coords * weights.unsqueeze(-1), dim=2) # (B, K_lm, 3)
+    
+    return pred_coords
