@@ -1,6 +1,6 @@
-# @Author: Yuan Wang (Modified by Researcher)
+# @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 # @File: train.py
-# @Description: Unified Hybrid Pipeline + CVPR Eq.5 HDS Curriculum + Late Activation (Softmax Decoupling)
+# @Description: Unified Hybrid Pipeline + CVPR Eq.5 HDS Curriculum + Ablation Safe Dimension Guard
 # ==============================================================================
 
 import os
@@ -64,7 +64,7 @@ def process_data_storage(dataset, prefix, paths):
 
 """
 ================================================================================
-🌟 Unified Hybrid Pipeline (Late Activation & Decoupling & Soft-Argmax)
+🌟 Unified Hybrid Pipeline (Ablation Safe Dimension Guard 적용)
 ================================================================================
 """
 class HybridPipeline(nn.Module):
@@ -87,21 +87,36 @@ class HybridPipeline(nn.Module):
             points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
             pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=getattr(self.stage1_paconv.args, 'k_softargmax', 10))
             
-            return pred_coords, torch.tensor(0.0).to(x.device), [s1_hm_prob], s1_hm_prob
+            return pred_coords, torch.tensor(0.0).to(x.device), [s1_hm_raw], s1_hm_prob
             
         elif self.mode == 'frozen':
             self.stage1_paconv.eval()
             with torch.no_grad():
-                s1_latent, s1_hm = self.stage1_paconv(x)
-            out = self.stage2_deeppa(x, prior_latent=s1_latent.detach(), prior_heatmap=s1_hm.detach())
+                s1_latent, s1_hm_raw = self.stage1_paconv(x)
+                
+            # 🌟 [차원 에러 완벽 방어 1] 히트맵은 Softmax 확률값으로 변환하여 (B, 36, N) 유지
+            s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
+            
+            # 🌟 [차원 에러 완벽 방어 2] 백본 게이트가 요구하는 (B, N, 128) 차원으로 맞춰줌
+            s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
+            
+            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted.detach(), prior_heatmap=s1_hm_prob.detach())
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
-            return pred_coords, spa_loss, sem_list, s1_hm
+            
+            # Loss 계산을 위해 순수 Logit(s1_hm_raw) 리턴
+            return pred_coords, spa_loss, sem_list, s1_hm_raw
             
         elif self.mode == 'e2e':
-            s1_latent, s1_hm = self.stage1_paconv(x)
-            out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
+            s1_latent, s1_hm_raw = self.stage1_paconv(x)
+            
+            # E2E 모드에서도 동일한 차원 방어 논리 적용
+            s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
+            s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
+            
+            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted, prior_heatmap=s1_hm_prob)
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
-            return pred_coords, spa_loss, sem_list, s1_hm
+            
+            return pred_coords, spa_loss, sem_list, s1_hm_raw
         
 def train(args):
     accum_steps = args.accumulation_steps
@@ -171,15 +186,20 @@ def train(args):
             train_loss_norm = 0.0; t_hm_aux, t_crd, t_srf, t_str = 0.0, 0.0, 0.0, 0.0; train_mm = 0.0
             opt.zero_grad() 
             
-            # 🌟 [수정 완료] Jitter 해제, 완벽한 가중치 분리
+            # 🌟 Jitter 해제 및 가중치 분리
             if pipeline_mode == 'stage1':
                 w_sem, w_spa, w_pred = 1.0, 0.0, 0.0
                 current_phase_str = f"STAGE1 Heatmap Only"
             else:
-                alpha_init = 0.3; beta_init = 0.005; decay_n = 1.0 / (epoch + 1)
-                w_sem = alpha_init ** decay_n
-                w_spa = beta_init ** decay_n
+                alpha_init = 0.3; beta_init = 0.005
+                
+                # 🌟 [수정됨] 수학적으로 안전한 역수 감쇠(Inverse Decay) 적용
+                # 에폭이 지날수록 분모가 커져서 서서히 0에 수렴합니다.
+                decay_factor = 1.0 / (epoch + 1)
+                w_sem = alpha_init * decay_factor
+                w_spa = beta_init * decay_factor
                 w_pred = 1.0 - (w_sem + w_spa)
+                
                 if epoch > 30: w_sem, w_spa, w_pred = 0.0, 0.0, 1.0
                 current_phase_str = f"{pipeline_mode.upper()} CVPR Eq.5 (Pred: {w_pred:.2f})"
             
@@ -194,7 +214,6 @@ def train(args):
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                     
-                    # 🌟 [수정 완료] 히트맵 정답지와 좌표 충돌 방지를 위해 Stage 1에서 Jitter 해제
                     if pipeline_mode != 'stage1':
                         point_normal = ApplyJitter(point_normal)
                     
@@ -215,10 +234,10 @@ def train(args):
 
                     for idx, sp in enumerate(sem_list):
                         if sp is None: continue
+                        # 차원 안전 장치: (B, N, 36)인 경우 (B, 36, N)으로 변환
                         if sp.shape[1] != target_hm.shape[1]: sp = sp.permute(0, 2, 1).contiguous()
                         
                         curr_N = sp.shape[2]
-                        # 🌟 [수정 완료] 포인트 수 하드코딩 제거
                         if curr_N == target_hm.shape[2]: 
                             safe_sem_list.append(sp)
                             target_list.append(target_hm)

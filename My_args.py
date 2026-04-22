@@ -153,3 +153,12 @@ parser.add_argument('--head_dim', type=int, default=256, help='Latent head dimen
 parser.add_argument('--mlp_ratio', type=float, default=2.0, help='FFN hidden dimension ratio')
 parser.add_argument('--bn_momentum', type=float, default=0.1, help='Batch Norm momentum')
 parser.add_argument('--act', default=nn.GELU, help='Activation function')
+parser.add_argument('--use_cp', type=bool, default=False, help='VRAM 절약을 위한 Gradient Checkpointing 사용 여부')
+parser.add_argument('--nbr_dims', type=list, default=[64, 128, 256, 512], help='각 스테이지별 이웃 특징(Neighborhood) 차원')
+parser.add_argument('--up_dims', type=list, default=[128, 128, 256, 256], help='업샘플링(디코더) 과정의 특징 차원 (에러 방지용)')
+
+# 게이트 기반 잔차 연결 스위치 (False로 설정 시 단순 채널 투영 후 덧셈으로 동작)
+parser.add_argument('--use_gate', type=str2bool, default=True, help='Enable Gated Residual Fusion (False for Simple Add)')
+
+# 최종 병합 직전 스파셜 어텐션(히트맵 곱셈) 스위치 (False로 설정 시 곱셈만 생략하고 Concat은 유지)
+parser.add_argument('--use_spatial_attention', type=str2bool, default=True, help='Enable Spatial Attention before final concat')

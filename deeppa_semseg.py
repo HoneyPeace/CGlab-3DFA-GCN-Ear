@@ -109,20 +109,23 @@ class Stage_PA(nn.Module):
 
         dim = args.dims[depth]
         
-        # 🌟 [디펜스 포인트] Latent Feature 투영기
+        # 🌟 [디펜스 포인트] Latent Feature 투영기 (게이트 OFF 시에도 채널 일치를 위해 무조건 실행됨)
         self.prior_proj = nn.Sequential(
             nn.Linear(128, dim, bias=False), 
             nn.BatchNorm1d(dim, momentum=args.bn_momentum),
             args.act()
         )
         
-        # 🌟 [디펜스 핵심] 게이트 잔차 융합 생성기 (논문 수식과 100% 일치)
-        # 2배 차원(DeepPA + PAConv)을 입력받아 0~1 사이의 시그모이드 게이트를 생성합니다.
-        self.gate_mlp = nn.Sequential(
-            nn.Linear(dim * 2, dim, bias=False),
-            nn.BatchNorm1d(dim, momentum=args.bn_momentum),
-            nn.Sigmoid() # 수식의 \sigma 부분
-        )
+        # 🌟 [Ablation] 게이트 사용 스위치 로드 및 조건부 파라미터 생성
+        self.use_gate = getattr(args, 'use_gate', True)
+        
+        if self.use_gate:
+            # 수식의 \sigma 부분: 2배 차원(DeepPA+PAConv)을 받아 0~1 게이트 점수 생성
+            self.gate_mlp = nn.Sequential(
+                nn.Linear(dim * 2, dim, bias=False),
+                nn.BatchNorm1d(dim, momentum=args.bn_momentum),
+                nn.Sigmoid() 
+            )
 
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
@@ -167,11 +170,14 @@ class Stage_PA(nn.Module):
         self.reslfe = ResLFE_Block(dim, args.depths[depth], args.drop_paths[depth], args.mlp_ratio, cp_bn_momentum, args.act)
         self.drop = DropPath(args.head_drops[depth])
 
-        # 🌟 [디펜스 포인트] HDS 모의고사용 Semantic(해부학적) 로스 헤드
+        # =====================================================================
+        # 🚨 [버그 픽스 완료!] HDS 모의고사용 Semantic 로스 헤드
+        # 기존: 3채널(단순 거리)만 받던 것을 -> dim 채널(딥러닝 특징 전체)을 받도록 수정
+        # =====================================================================
         self.sem_sup = nn.Sequential(
             nn.Dropout(0.5),
-            nn.BatchNorm1d(3, momentum=args.bn_momentum),
-            nn.Linear(3, getattr(args, 'num_classes', 36), bias=False), # 36개 랜드마크 (설정값 연동)
+            nn.BatchNorm1d(dim, momentum=args.bn_momentum), # 3 -> dim 으로 수정됨
+            nn.Linear(dim, getattr(args, 'num_classes', 36), bias=False), # 3 -> dim 으로 수정됨
         )
 
         self.postproj = nn.Sequential(
@@ -227,20 +233,20 @@ class Stage_PA(nn.Module):
             x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1)
 
         # =====================================================================
-        # 🌟 수식 완벽 구현: 게이트 기반 잔차 연결 (Gated Residual Fusion)
+        # 🌟 수식 완벽 구현: 게이트 기반 잔차 연결 vs 단순 덧셈 (Ablation)
         # =====================================================================
         if not self.first and prior_heatmap is not None:
-            # 1. PAConv 힌트를 백본 차원에 맞게 투영 (F_PAConv)
+            # 1. PAConv 힌트(128ch)를 백본 차원(dim)에 맞게 투영 (차원 에러 방어!)
             p_feat = self.prior_proj(prior_heatmap.view(-1, prior_heatmap.shape[-1])).view(B, N, -1)
             
-            # 2. 콘캣: [F_DeepLA, F_PAConv]
-            fused_for_gate = torch.cat([x, p_feat], dim=-1) 
-            
-            # 3. 게이트 텐서 생성 (0~1): \sigma(W_g * [F_DeepLA, F_PAConv])
-            gate_matrix = self.gate_mlp(fused_for_gate.view(-1, fused_for_gate.shape[-1])).view(B, N, -1)
-            
-            # 4. 정보 융합: x = F_DeepLA + (Gate ⊙ F_PAConv)
-            x = x + (gate_matrix * p_feat)
+            if getattr(self, 'use_gate', True):
+                # 🌟 [게이트 ON]: 콘캣 -> 시그모이드 게이트 생성 -> 곱해서 더하기
+                fused_for_gate = torch.cat([x, p_feat], dim=-1) 
+                gate_matrix = self.gate_mlp(fused_for_gate.view(-1, fused_for_gate.shape[-1])).view(B, N, -1)
+                x = x + (gate_matrix * p_feat)
+            else:
+                # 🌟 [게이트 OFF]: 게이트 행렬 곱셈 없이 투영된 힌트를 그대로 덧셈 (Simple Residual Add)
+                x = x + p_feat
 
         pe = pe.view(-1, 3)
         pe_embed_func = lambda t: self.pe_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
@@ -262,7 +268,11 @@ class Stage_PA(nn.Module):
             closs = F.mse_loss(feat_info, spa_info) 
             sub_spa = sub_spa + closs if sub_spa is not None else closs
 
-            sem = self.sem_sup(torch.max(spa_info, dim=2)[0].view(-1, 3)).view(B, N, -1) 
+            # =====================================================================
+            # 🚨 [버그 픽스 완료!] spa_info가 아닌 모델 특징 'x'를 투입!
+            # =====================================================================
+            sem = self.sem_sup(x.view(-1, x.shape[-1])).view(B, N, -1) 
+            
             if sub_sem is not None:
                 sub_sem.append(sem)
             else:

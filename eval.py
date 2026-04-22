@@ -1,7 +1,7 @@
 '''
 @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 @File: eval.py
-@Description: Unified Evaluation Script (Soft-Argmax 적용 + TXT/EXCEL 동기화 + DeepLA/단독 모델 호환성 완벽 패치)
+@Description: Unified Evaluation Script (Ablation Safe Dimension Guard 적용 완벽 패치)
 '''
 
 from __future__ import print_function, division
@@ -23,7 +23,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
 
 # 🌟 아키텍처 및 보간법 임포트
-from DeepLA_model import DeepLA_Wrapper  # 🌟 DeepLA 지원을 위해 추가
+from DeepLA_model import DeepLA_Wrapper  
 from DeepPA_model import DeepPA_Wrapper  
 from PAConv_model import PAConv          
 from loss import get_differentiable_coords 
@@ -105,17 +105,27 @@ class HybridPipeline_Eval(nn.Module):
 
     def forward(self, x):
         if self.mode == 'stage1':
-            s1_latent, s1_hm_anchor = self.stage1_paconv(x)
-            s1_hm_prob = F.softmax(s1_hm_anchor, dim=1)
+            s1_latent, s1_hm_raw = self.stage1_paconv(x)
+            s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
             points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
             pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=getattr(self.stage1_paconv.args, 'k_softargmax', 10))
             return pred_coords, s1_hm_prob 
             
         elif self.mode in ['frozen', 'e2e']:
-            s1_latent, s1_hm = self.stage1_paconv(x)
-            out = self.stage2_deeppa(x, prior_latent=s1_latent, prior_heatmap=s1_hm)
+            s1_latent, s1_hm_raw = self.stage1_paconv(x)
+            
+            # 🌟 [차원 에러 완벽 방어 1] 히트맵은 Softmax 확률값으로 변환
+            s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
+            
+            # 🌟 [차원 에러 완벽 방어 2] 라텐트 피처는 백본 투영기에 맞춰 (B, N, 128)로 변환
+            s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
+            
+            # 백본 투입
+            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted, prior_heatmap=s1_hm_prob)
             pred_coords = out[0] if isinstance(out, tuple) else out
-            return pred_coords, s1_hm
+            
+            # 아래의 evaluate_target_model 함수가 Softmax를 자체적으로 수행하므로 여기선 Raw 반환
+            return pred_coords, s1_hm_raw
 
 # -----------------------------------------------------------------------------
 # 3. 평가 수행 코어 함수
@@ -131,7 +141,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     os.makedirs(current_asc_dir, exist_ok=True)
 
     me_list, per_landmark_me_list = [], []
-    cos_sim_list, iou_list, time_list = [], []
+    cos_sim_list, iou_list, time_list = [], [], []
     per_landmark_cos_sim_list, per_landmark_iou_list = [], []
 
     eval_model.eval()
@@ -158,7 +168,6 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 
             point_input = point_norm.permute(0, 2, 1).contiguous()
             
-            # 🌟 [수정됨] 단일 모델(DeepLA 등)과 하이브리드 모델의 리턴 형식 통합
             if pipeline_mode in ['stage1', 'frozen', 'e2e']:
                 pred_coords_norm, s1_aux_hm = eval_model(point_input)
             else:
@@ -168,7 +177,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)  
             
-            # 히트맵 평가 로직 (단독 모델로 평가 시 히트맵이 없으면 패스)
+            # 히트맵 평가 로직
             if pipeline_mode == 'stage1': eval_target_hm = s1_aux_hm
             else: eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else None
                 
@@ -303,7 +312,6 @@ else: pipeline_mode = 'single_custom'
 
 print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()}")
 
-# 🌟 [수정됨] 모델 로드 분기를 명확하게 하여 단독 모델과 하이브리드 모델 모두 지원
 if pipeline_mode in ['stage1', 'frozen', 'e2e']:
     model = HybridPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)
 else:
