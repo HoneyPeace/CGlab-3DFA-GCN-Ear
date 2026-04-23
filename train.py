@@ -1,6 +1,6 @@
 # @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 # @File: train.py
-# @Description: Unified Hybrid Pipeline + CVPR Eq.5 HDS Curriculum + Ablation Safe Dimension Guard
+# @Description: Unified Hybrid Pipeline + Constant Weight Transition + Safe Epoch Guard + BroadCasting Fix
 # ==============================================================================
 
 import os
@@ -94,26 +94,20 @@ class HybridPipeline(nn.Module):
             with torch.no_grad():
                 s1_latent, s1_hm_raw = self.stage1_paconv(x)
                 
-            # 🌟 [차원 에러 완벽 방어 1] 히트맵은 Softmax 확률값으로 변환하여 (B, 36, N) 유지
             s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
-            
-            # 🌟 [차원 에러 완벽 방어 2] 백본 게이트가 요구하는 (B, N, 128) 차원으로 맞춰줌
             s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
             
-            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted.detach(), prior_heatmap=s1_hm_prob.detach())
+            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted.detach(), prior_heatmap=s1_hm_raw.detach())
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
             
-            # Loss 계산을 위해 순수 Logit(s1_hm_raw) 리턴
             return pred_coords, spa_loss, sem_list, s1_hm_raw
             
         elif self.mode == 'e2e':
             s1_latent, s1_hm_raw = self.stage1_paconv(x)
-            
-            # E2E 모드에서도 동일한 차원 방어 논리 적용
             s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
             s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
             
-            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted, prior_heatmap=s1_hm_prob)
+            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted, prior_heatmap=s1_hm_raw)
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
             
             return pred_coords, spa_loss, sem_list, s1_hm_raw
@@ -180,28 +174,33 @@ def train(args):
         auto_scales = {'coord': 1.0, 'surface': 1.0, 'struct': 1.0}; target_norm = 1.0
         use_loss_norm = getattr(args, 'use_loss_norm', False)
 
+        # 🌟 [수정됨] 상수 전환 제어 변수 및 강력한 안전장치
+        phase = 1
+        best_hds_loss = float('inf')
+        patience_counter = 0
+        patience_limit = 10      # 인내심 10에폭으로 넉넉하게
+        min_phase1_epochs = 30   # 최소 30에폭 동안은 무조건 1단계(상수 가중치) 유지
+
         for epoch in range(current_epochs):
             model.train() 
                 
             train_loss_norm = 0.0; t_hm_aux, t_crd, t_srf, t_str = 0.0, 0.0, 0.0, 0.0; train_mm = 0.0
             opt.zero_grad() 
             
-            # 🌟 Jitter 해제 및 가중치 분리
+            # 🌟 [수정됨] 감쇠(Decay) 수식 완전 제거, 상수(Constant) 적용
             if pipeline_mode == 'stage1':
                 w_sem, w_spa, w_pred = 1.0, 0.0, 0.0
                 current_phase_str = f"STAGE1 Heatmap Only"
             else:
-                alpha_init = 0.3; beta_init = 0.005
-                
-                # 🌟 [수정됨] 수학적으로 안전한 역수 감쇠(Inverse Decay) 적용
-                # 에폭이 지날수록 분모가 커져서 서서히 0에 수렴합니다.
-                decay_factor = 1.0 / (epoch + 1)
-                w_sem = alpha_init * decay_factor
-                w_spa = beta_init * decay_factor
-                w_pred = 1.0 - (w_sem + w_spa)
-                
-                if epoch > 30: w_sem, w_spa, w_pred = 0.0, 0.0, 1.0
-                current_phase_str = f"{pipeline_mode.upper()} CVPR Eq.5 (Pred: {w_pred:.2f})"
+                if phase == 1:
+                    # 1단계: 최대 가중치 유지로 강력한 구조 파악 유도
+                    w_sem, w_spa = 0.3, 0.005
+                    w_pred = 0.695
+                    current_phase_str = f"Phase 1: High-Power Structure Learning"
+                else:
+                    # 2단계: 보조 로스 완전 차단
+                    w_sem, w_spa, w_pred = 0.0, 0.0, 1.0
+                    current_phase_str = f"Phase 2: Sub-millimeter Refinement"
             
             with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"{stage_name} Ep {epoch+1:03d}", unit="batch", leave=False) as tepoch:
                 for i, (point, landmark, seg) in tepoch:
@@ -234,7 +233,6 @@ def train(args):
 
                     for idx, sp in enumerate(sem_list):
                         if sp is None: continue
-                        # 차원 안전 장치: (B, N, 36)인 경우 (B, 36, N)으로 변환
                         if sp.shape[1] != target_hm.shape[1]: sp = sp.permute(0, 2, 1).contiguous()
                         
                         curr_N = sp.shape[2]
@@ -298,7 +296,8 @@ def train(args):
                     if pipeline_mode in ['stage1', 'frozen', 'e2e']: pred_coords, _, _, _ = model(point_input)
                     else: pred_coords = model(point_input)[0]
 
-                    val_mm_total += F.l1_loss(pred_coords, landmark_normal).item() * avg_m * B_val
+                    # 🌟 [수정됨] Broadcasting Error 해결을 위한 view_as 처리
+                    val_mm_total += F.l1_loss(pred_coords, landmark_normal.view_as(pred_coords)).item() * avg_m * B_val
                     val_samples += B_val
             
             v_mm = val_mm_total / val_samples if val_samples > 0 else 0.0                     
@@ -306,7 +305,7 @@ def train(args):
             if pipeline_mode == 'stage1':
                 print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | L_sem(HM): {t_hm_aux/num_b:.4f} || Train_mm: {t_mm:.2f} | Val_mm: {v_mm:.2f}")
             else:
-                print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f}")
+                print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f} | Phase: {phase}")
                 print(f"  ├─ [Weights] w_sem: {w_sem:.4f} | w_spa: {w_spa:.4f} | w_pred: {w_pred:.4f}")
                 print(f"  ├─ [S2_Pred_Loss] Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}")
                 print(f"  └─ [HDS_Aux_Loss] L_sem(Heatmap): {t_hm_aux/num_b:.4f}")
@@ -321,6 +320,22 @@ def train(args):
             with pd.ExcelWriter(excel_log_path, engine='openpyxl') as writer:
                 df_log = pd.DataFrame(log_records)
                 df_log.to_excel(writer, sheet_name='Training_Log', index=False)
+
+            # 🌟 [수정됨] 진정한 Plateau 감지 및 안전장치가 적용된 전환 로직
+            if pipeline_mode != 'stage1' and phase == 1:
+                current_hds_loss = t_hm_aux / num_b
+                
+                # 유의미한 감소(-0.01) 확인
+                if current_hds_loss < best_hds_loss - 0.01:
+                    best_hds_loss = current_hds_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                
+                # 최소 에폭을 채우고, 인내심도 바닥났을 때만 전환!
+                if (epoch + 1 >= min_phase1_epochs) and (patience_counter >= patience_limit):
+                    print(f"\n🚨 [알림] Epoch {epoch+1}: 진정한 HDS 로스 수렴 확인 (Patience: {patience_limit}). 다음 에폭부터 2단계 정밀 타격(Hard Cut-off)으로 전환합니다!")
+                    phase = 2
 
             scheduler.step()
 

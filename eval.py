@@ -113,18 +113,13 @@ class HybridPipeline_Eval(nn.Module):
             
         elif self.mode in ['frozen', 'e2e']:
             s1_latent, s1_hm_raw = self.stage1_paconv(x)
-            
-            # 🌟 [차원 에러 완벽 방어 1] 히트맵은 Softmax 확률값으로 변환
             s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
-            
-            # 🌟 [차원 에러 완벽 방어 2] 라텐트 피처는 백본 투영기에 맞춰 (B, N, 128)로 변환
             s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
             
-            # 백본 투입
-            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted, prior_heatmap=s1_hm_prob)
+            # 🚨 [신호 희석 방지] 평가 시에도 s1_hm_raw 전달!
+            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted, prior_heatmap=s1_hm_raw)
             pred_coords = out[0] if isinstance(out, tuple) else out
             
-            # 아래의 evaluate_target_model 함수가 Softmax를 자체적으로 수행하므로 여기선 Raw 반환
             return pred_coords, s1_hm_raw
 
 # -----------------------------------------------------------------------------
