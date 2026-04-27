@@ -1,7 +1,11 @@
 '''
 @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 @File: eval.py
-@Description: Unified Evaluation Script (Ablation Safe Dimension Guard 적용 완벽 패치)
+@Description: 
+[S2G 전용 평가 스크립트 - 최적화 완결본]
+- DeepPA 259채널 아키텍처 호환 (prior_heatmap 제거)
+- in_channels에 따른 6ch/7ch 데이터 동적 로드 (dataset.py 동기화)
+- My_args.py의 regression_point_num(k=10) 보간법 완벽 적용
 '''
 
 from __future__ import print_function, division
@@ -49,7 +53,7 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
     plt.close()
 
 # -----------------------------------------------------------------------------
-# 1. 경로 및 데이터 로드 
+# 1. 경로 및 데이터 로드 (🌟 채널 수에 따른 Ablation 분기 처리)
 # -----------------------------------------------------------------------------
 if not getattr(args, 'run_id', None):
     print("Error: --run_id required (e.g., '1').")
@@ -72,9 +76,20 @@ heatmap_save_dir_base = os.path.join(run_root, "Pred_Heatmaps")
 asc_save_dir_base = os.path.join(run_root, "Pred_Landmarks")
 
 try:
-    in_channels = getattr(args, 'in_channels', 3)
+    in_channels = getattr(args, 'in_channels', 7)
     eval_datatype = getattr(args, 'Eval_DataType', 'test')
-    shape_filename = f"shape_{eval_datatype}.npy"
+    
+    # 🌟 [수정 1]: dataset.py와 완벽히 동일한 다중 채널 로드 방식 적용
+    if in_channels == 7:
+        shape_filename = f"shape_{eval_datatype}.npy"
+        print(f"   [INFO] 🎯 7-Channel Mode: Loading {shape_filename}")
+    elif in_channels == 6:
+        shape_filename = f"shape_6ch_{eval_datatype}.npy"
+        print(f"   [INFO] 🎯 6-Channel Mode: Loading {shape_filename}")
+    else:
+        shape_filename = f"shape_{eval_datatype}.npy"
+        print(f"   [INFO] 🧊 3-Channel Mode: Loading {shape_filename}")
+
     shape_sample = np.load(os.path.join(data_dir, shape_filename), allow_pickle=True)
     landmark_all = np.load(os.path.join(data_dir, f"landmark_{eval_datatype}.npy"), allow_pickle=True)
     heatmap_sample = np.load(os.path.join(data_dir, f"Heat_data_{eval_datatype}.npy"), allow_pickle=True)
@@ -92,11 +107,12 @@ test_dataset = TensorDataset(
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # -----------------------------------------------------------------------------
-# 2. 평가용 통합 Hybrid Pipeline 
+# 2. 평가용 통합 Hybrid Pipeline (🌟 259채널 통신 최적화)
 # -----------------------------------------------------------------------------
 class HybridPipeline_Eval(nn.Module):
     def __init__(self, args, landmark_num, mode='frozen'):
         super().__init__()
+        self.args = args
         self.mode = mode.lower()
         self.stage1_paconv = PAConv(args, landmark_num)
         
@@ -108,18 +124,21 @@ class HybridPipeline_Eval(nn.Module):
             s1_latent, s1_hm_raw = self.stage1_paconv(x)
             s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
             points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
-            pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=getattr(self.stage1_paconv.args, 'k_softargmax', 10))
-            return pred_coords, s1_hm_prob 
+            
+            # My_args.py의 regression_point_num 동기화
+            k_val = getattr(self.args, 'regression_point_num', 10)
+            pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=k_val)
+            return pred_coords, s1_hm_raw 
             
         elif self.mode in ['frozen', 'e2e']:
             s1_latent, s1_hm_raw = self.stage1_paconv(x)
-            s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
             s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
             
-            # 🚨 [신호 희석 방지] 평가 시에도 s1_hm_raw 전달!
-            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted, prior_heatmap=s1_hm_raw)
-            pred_coords = out[0] if isinstance(out, tuple) else out
+            # 🌟 [수정 2]: DeepPA_Wrapper(259ch)는 prior_heatmap을 받지 않음! 에러 방지
+            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted)
+            pred_coords = out[0] if isinstance(out, (list, tuple)) else out
             
+            # 출력 시 평가지표를 위해 s1_hm_raw는 따로 반환
             return pred_coords, s1_hm_raw
 
 # -----------------------------------------------------------------------------
@@ -136,7 +155,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     os.makedirs(current_asc_dir, exist_ok=True)
 
     me_list, per_landmark_me_list = [], []
-    cos_sim_list, iou_list, time_list = [], [], []
+    cos_sim_list, iou_list, time_list = [], []
     per_landmark_cos_sim_list, per_landmark_iou_list = [], []
 
     eval_model.eval()
@@ -173,7 +192,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             time_list.append(time.time() - start_time)  
             
             # 히트맵 평가 로직
-            if pipeline_mode == 'stage1': eval_target_hm = s1_aux_hm
+            if pipeline_mode == 'stage1': eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else None
             else: eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else None
                 
             if eval_target_hm is not None:
@@ -182,7 +201,6 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 
                 cos_sim_k = F.cosine_similarity(pred_vec, gt_vec, dim=2) * 100.0
                 cos_sim_list.append(cos_sim_k.mean().item()) 
-                per_landmark_cos_sim_list.append(cos_sim_k.cpu().numpy()) 
 
                 threshold = 0.1
                 pred_mask = (pred_heatmap > threshold).float() 
@@ -192,7 +210,6 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 iou_k = ((intersection_k + 1e-6) / (union_k + 1e-6)) * 100.0
                 
                 iou_list.append(iou_k.mean().item()) 
-                per_landmark_iou_list.append(iou_k.cpu().numpy()) 
 
                 if idx % 40 == 0:
                     points_np, heatmap_np = point_xyz[0].cpu().numpy(), pred_heatmap[0].cpu().numpy()
@@ -232,7 +249,6 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     filename_excel = f"{eval_name}_Results_ME{average_me:.4f}.xlsx"
     result_excel_path = os.path.join(run_root, filename_excel)
     
-    # Excel 저장
     summary_data = {
         "지표 (Metric)": [
             "[Metadata]", "Experiment", "Run ID", "Model", 
@@ -267,7 +283,6 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         df_landmarks.to_excel(writer, sheet_name='2_Per_Landmark', index=False)
         df_top10.to_excel(writer, sheet_name='3_Top10_Hardest', index=False)
 
-    # 텍스트 파일 저장
     txt_path = result_excel_path.replace(".xlsx", ".txt")
     with open(txt_path, 'w', encoding='utf-8') as f:
         f.write("==================================================\n")
@@ -305,7 +320,7 @@ elif model_name_lower in ['deeppa_frozen', 'deeppa_auto']: pipeline_mode = 'froz
 elif model_name_lower == 'deeppa_e2e': pipeline_mode = 'e2e'
 else: pipeline_mode = 'single_custom' 
 
-print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()}")
+print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()} (Architecture: 259ch)")
 
 if pipeline_mode in ['stage1', 'frozen', 'e2e']:
     model = HybridPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)

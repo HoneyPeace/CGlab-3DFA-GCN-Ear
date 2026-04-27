@@ -14,7 +14,6 @@ sys.path.append(str(current_dir / "utils" / "pointnet2_ops_lib"))
 from deeppa_semseg import DeepPA_semseg, index_points
 
 # [주의]: PAConv 원본 모델의 임포트 경로는 연구자님의 환경에 맞게 수정해주세요.
-# 예시: from paconv import PAConv
 try:
     from paconv import PAConv
 except ImportError:
@@ -55,7 +54,7 @@ def farthest_point_sample(xyz, npoint):
         return centroids
 
 # ==============================================================================
-# 👑 최상위 마스터 융합 모델 (HybridPipeline 호환 버전)
+# 👑 최상위 마스터 융합 모델 (Latent Gating Only 버전)
 # ==============================================================================
 class DeepPA_Wrapper(nn.Module):
     def __init__(self, args, landmark_num): 
@@ -80,8 +79,7 @@ class DeepPA_Wrapper(nn.Module):
                 args.drop_paths.append(dpr[cur:cur + d])
                 cur += d
                 
-            # 🔥 [에러 방어 3: 연구자님이 찾아낸 시한폭탄 영구 제거!]
-            # DeepLA 백본이 은근슬쩍 요구하는 파라미터들을 강제로 쥐어줍니다.
+            # 🔥 [에러 방어 3: 시한폭탄 영구 제거!]
             if not hasattr(args, 'head_drops'):
                 args.head_drops = [0.1, 0.1, 0.1, 0.1]
             if not hasattr(args, 'cor_std'):
@@ -93,8 +91,9 @@ class DeepPA_Wrapper(nn.Module):
         # 🔴 [Phase 3] 점진적 압축 회귀 헤드 (Direct Regression Head)
         bn_mom = getattr(args, 'bn_momentum', 0.1)
         
+        # 🌟 [핵심 수정 1] 295 -> 259 채널로 다이어트 (가이드 히트맵 36ch 제거)
         self.head_conv = nn.Sequential(
-            nn.Conv1d(295, 1024, 1),
+            nn.Conv1d(259, 1024, 1),
             nn.BatchNorm1d(1024, momentum=bn_mom),
             nn.ReLU(inplace=True),
             nn.Conv1d(1024, 512, 1),
@@ -110,8 +109,8 @@ class DeepPA_Wrapper(nn.Module):
             nn.Linear(256, self.landmark_num * 3) 
         )
 
-    # 🌟 통제실(train.py)에서 던져주는 힌트 파라미터를 정확히 수신
-    def forward(self, x, prior_latent=None, prior_heatmap=None):
+    # 🌟 [핵심 수정 2] prior_heatmap 인자 제거, 오직 prior_latent(128ch 힌트)만 받음
+    def forward(self, x, prior_latent=None):
         B, C_in, N_in = x.shape
         device = x.device
         
@@ -145,17 +144,16 @@ class DeepPA_Wrapper(nn.Module):
         
         # 2. 백본 통과 (출력: 2,048점의 특징맵)
         in_features = x.permute(0, 2, 1).contiguous()
+        # 🌟 라텐트 힌트 주입 (백본 내부에서 Gate 융합 처리됨)
         out = self.model(xyz=xyz_coords, x=in_features, indices=indices, prior_heatmap=prior_latent)
         
         dense_features = out[0] if isinstance(out, tuple) else out
         if dense_features.shape[-1] == 256: dense_features = dense_features.permute(0, 2, 1).contiguous() 
 
         # =====================================================================
-        # 🌟 [핵심 해결] 2,048점을 8,192점으로 복원 (Upsampling)
+        # 🌟 2,048점을 8,192점으로 복원 (Upsampling)
         # =====================================================================
-        # 백본은 2,048점을 뱉지만, 우리는 8,192점의 랜드마크 힌트와 합쳐야 합니다.
         if dense_features.shape[2] != N_in:
-            # 아까 저장해둔 Up_0_to_1 인덱스를 사용하여 특징을 8,192개로 복사/확장합니다.
             dense_features = index_points(dense_features.permute(0, 2, 1), up_idx_list[0]).permute(0, 2, 1)
 
         # =====================================================================
@@ -163,20 +161,9 @@ class DeepPA_Wrapper(nn.Module):
         # =====================================================================
         xyz_full = xyz_coords.permute(0, 2, 1).contiguous() 
         
-        if prior_heatmap is not None:
-            paconv_heatmap = prior_heatmap.detach()
-            
-            # 🌟 [Ablation] 스파셜 어텐션 스위치 적용
-            # 스위치가 꺼져 있으면 특징 증폭(곱셈)만 생략하고, paconv_heatmap 자체는 살려둡니다.
-            if getattr(self.args, 'use_spatial_attention', True):
-                spatial_mask = torch.max(paconv_heatmap, dim=1, keepdim=True)[0]
-                dense_features = dense_features * (1.0 + spatial_mask)
-        else:
-            paconv_heatmap = torch.zeros(B, self.landmark_num, N_in, device=device)
-        
-        # 🌟 대통합 콘캣: [백본(256) + 좌표(3) + 히트맵(36)] = 총 295채널 (B, 295, 8192) 정렬 완료!
-        # 어텐션이 꺼져있어도 paconv_heatmap이 결합되므로 295채널이 완벽하게 유지됩니다.
-        fused_features = torch.cat([dense_features, xyz_full, paconv_heatmap], dim=1) 
+        # 🌟 [핵심 수정 3] 불필요한 히트맵/어텐션 로직 싹 제거
+        # 대통합 콘캣: [백본(256) + 좌표(3)] = 총 259채널 (B, 259, 8192)
+        fused_features = torch.cat([dense_features, xyz_full], dim=1) 
         
         # 4. 회귀 헤드 통과
         x_fused = self.head_conv(fused_features) 
@@ -184,7 +171,7 @@ class DeepPA_Wrapper(nn.Module):
         coords = self.head_linear(x_pool).view(B, self.landmark_num, 3) 
         
         if self.training:
-            # 백본에서 나온 spa_loss, sem_list가 있다면 함께 리턴 (HDS용)
+            # 백본에서 나온 spa_loss, sem_list가 있다면 함께 리턴
             spa_loss = out[1] if isinstance(out, tuple) else torch.tensor(0.0).to(device)
             sem_list = out[2] if isinstance(out, tuple) else []
             return coords, spa_loss, sem_list
@@ -196,8 +183,8 @@ if __name__ == '__main__':
         bn_momentum = 0.1
         depths = [2, 2, 2] # 예시
         npoints = [2048, 512, 128] # 예시
-        use_spatial_attention = False # Ablation 테스트
+        # use_spatial_attention 인자는 더 이상 필요 없음
     
     # args = Args()
     # model = DeepPA_Wrapper(args, 36).cuda()
-    # print("DeepPA_Wrapper 모델 초기화 완료. 295ch -> 108 좌표 압축 준비됨.")
+    # print("DeepPA_Wrapper 모델 초기화 완료. 259ch -> 108 좌표 압축 준비됨 (가이드 히트맵 완전 제거).")

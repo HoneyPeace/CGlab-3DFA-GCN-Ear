@@ -2,12 +2,10 @@
 @Author: Yuan Wang (Modified by Researcher)
 @File: util.py
 @Description: 
-[NotebookLM을 위한 모듈 요약]
-이 파일은 3D 랜드마크 검출 모델의 '오프라인 데이터 전처리 파이프라인'을 담당합니다.
-핵심 역할은 3가지입니다:
+[S2G 3D 랜드마크 검출 모델 - 오프라인 데이터 전처리 파이프라인]
 1) 원본 3D Point Cloud(ply/obj)와 정답 랜드마크(asc/mat) 매칭 및 로드
-2) 공간적 균일성을 유지하는 FPS(Farthest Point Sampling) 다운샘플링 및 가우시안 히트맵 생성
-3) 🌟 7-Channel Geometric Feature (Eigenvector + Eigenvalue) 사전 연산(Baking) 및 NPY 저장
+2) 공간적 균일성을 유지하는 FPS 다운샘플링 및 가우시안 히트맵 생성
+3) 🌟 7-Channel Geometric Feature (Eigenvector + Eigenvalue) 사전 연산(Baking) 및 멀티 NPY 저장
 '''
 
 import os 
@@ -44,7 +42,7 @@ except ImportError:
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # -----------------------------------------------------------------------------
-# [Helper] 파일 읽기 함수들 (Name 반환 유지)
+# [Helper] 파일 읽기 함수들
 # -----------------------------------------------------------------------------
 def read_ply_files_from_folder(folder_path):
     files = sorted(glob.glob(os.path.join(folder_path, "*.ply")))
@@ -333,13 +331,14 @@ def get_3D_FAN_NME(pred_landmark, gt_landmark):
     return NME, NME_single
 
 # =============================================================================
-# 🌟 [신규 업데이트] Offline 7-Channel 피처 생성기 (Eigenvector 3 + Eigenvalue 1)
+# 🌟 [신규 업데이트] Offline 7-Channel 피처 생성기 (VRAM 최적화 및 구조화)
 # =============================================================================
 def compute_geometric_features_7ch(shapes, k=15):
     geom_list = []
-    batch_size = 32 
+    # 🌟 [수정 포인트]: 8192점 cdist 연산 시 VRAM OOM 방지를 위해 32 -> 8로 하향
+    batch_size = 8  
     
-    for i in tqdm(range(0, len(shapes), batch_size), desc="   Calc 7-Ch Geometrics"):
+    for i in tqdm(range(0, len(shapes), batch_size), desc="   Calc Geometrics"):
         batch_shapes = shapes[i:i+batch_size]
         shapes_tensor = torch.tensor(np.array(batch_shapes), dtype=torch.float32).to(device)
         B, N, _ = shapes_tensor.shape
@@ -354,7 +353,7 @@ def compute_geometric_features_7ch(shapes, k=15):
         center = knn_points.mean(dim=2, keepdim=True)
         centered = knn_points - center
         
-        # 🌟 수학적 무결성 확보: 공분산 계산 시 이웃의 개수(k-1)로 나누어 편향 제거
+        # 공분산 편향 제거
         cov = torch.matmul(centered.transpose(2, 3), centered) / (k - 1)
         eigval, eigvec = torch.linalg.eigh(cov)
         
@@ -365,13 +364,14 @@ def compute_geometric_features_7ch(shapes, k=15):
         sum_eig = torch.sum(eigval, dim=-1) + 1e-6
         curvature = (eigval[..., 0] / sum_eig).unsqueeze(-1) 
         
+        # 6채널(방향)과 7채널(방향+곡률)을 분리 생성하기 위해 묶어서 반환
         geom_features = torch.cat([principal_dir, curvature], dim=-1)
         geom_list.extend(geom_features.cpu().numpy())
         
     return geom_list
 
 # -----------------------------------------------------------------------------
-# Main Sampling Function
+# Main Sampling Function (Ablation 방어용 Multi-channel 저장)
 # -----------------------------------------------------------------------------
 def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data', partition=None):
     suffix = "sample" 
@@ -400,21 +400,31 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
         print("Sampling failed or empty.")
         return
 
-    print('   Baking 7-Channel Geometric Features (Eigenvectors & Eigenvalues)...')
+    print('   Baking 6-Ch & 7-Ch Geometric Features...')
     geom_features = compute_geometric_features_7ch(shape_sample, k=15)
     
-    shape_7ch_sample = []
+    shape_3ch_sample, shape_6ch_sample, shape_7ch_sample = [], [], []
     for i in range(len(shape_sample)):
-        shape_7ch = np.concatenate([shape_sample[i], geom_features[i]], axis=-1)
-        shape_7ch_sample.append(shape_7ch)
+        xyz = shape_sample[i]
+        vector = geom_features[i][:, :3] # 주방향(Eigenvector)
+        curv = geom_features[i][:, 3:]   # 곡률(Eigenvalue)
+        
+        shape_3ch_sample.append(xyz)
+        shape_6ch_sample.append(np.concatenate([xyz, vector], axis=-1))
+        shape_7ch_sample.append(np.concatenate([xyz, vector, curv], axis=-1))
 
     save_base_dir = os.path.join(data_root, f"{dataset}-npy")
     os.makedirs(save_base_dir, exist_ok=True)
     
     print(f"   Saving to: {save_base_dir} (Suffix: _{suffix})")
     np.save(os.path.join(save_base_dir, f'Heat_data_{suffix}.npy'), Heat_data_sample)
-    np.save(os.path.join(save_base_dir, f'shape_{suffix}.npy'),      shape_7ch_sample) 
-    np.save(os.path.join(save_base_dir, f'landmark_{suffix}.npy'),   landmark_position_sample)
-    np.save(os.path.join(save_base_dir, f'name_{suffix}.npy'),       np.array(name_all))
+    np.save(os.path.join(save_base_dir, f'landmark_{suffix}.npy'),  landmark_position_sample)
+    np.save(os.path.join(save_base_dir, f'name_{suffix}.npy'),      np.array(name_all))
+    
+    # 🌟 [핵심 수정]: 논문 디펜스(Ablation)를 위해 3가지 버전을 모두 굽기
+    # 기본 shape_ 파일은 SOTA 메인 성능을 위한 7채널로 덮어씁니다.
+    np.save(os.path.join(save_base_dir, f'shape_3ch_{suffix}.npy'),  shape_3ch_sample) # 3채널 전용 (비교군)
+    np.save(os.path.join(save_base_dir, f'shape_6ch_{suffix}.npy'),  shape_6ch_sample) # 6채널 전용 (비교군)
+    np.save(os.path.join(save_base_dir, f'shape_{suffix}.npy'),      shape_7ch_sample) # 7채널 전용 (디폴트)
 
     print("--- Done ---\n")

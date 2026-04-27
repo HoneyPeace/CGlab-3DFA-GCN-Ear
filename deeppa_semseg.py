@@ -12,13 +12,9 @@ from utils.timm.models.layers import DropPath
 from utils.cutils import knn_edge_maxpooling
 
 # =====================================================================
-# 유틸리티 함수
+# 유틸리티 함수 (기존과 동일)
 # =====================================================================
 def index_points(points, idx):
-    """
-    [특정 인덱스의 포인트 데이터 추출 (Gathering)]
-    다운샘플링(FPS)이나 K-NN 검색으로 얻은 인덱스(idx) 배열을 이용해, 원본 좌표/특징 텐서를 추출합니다.
-    """
     device = points.device
     B = points.shape[0]
     idx = idx.long() 
@@ -30,14 +26,13 @@ def index_points(points, idx):
     return points[batch_indices, idx, :]
 
 def checkpoint(function, *args, **kwargs):
-    """ VRAM 절약을 위한 PyTorch Gradient Checkpointing 래퍼 함수 """
     try:
         return torch_checkpoint(function, *args, use_reentrant=False, **kwargs)
     except ValueError:
         return torch_checkpoint(function, *args, **kwargs)
 
 # =====================================================================
-# 기본 빌딩 블록 (VFR, FFN, ResLFE)
+# 기본 빌딩 블록 (VFR, FFN, ResLFE) - (기존과 동일)
 # =====================================================================
 class VFR(nn.Module):
     def __init__(self, in_dim, out_dim, bn_momentum, init=0.):
@@ -94,7 +89,7 @@ class ResLFE_Block(nn.Module):
         return x
 
 # =====================================================================
-# 계층적(Hierarchical) 스테이지 설계
+# 계층적(Hierarchical) 스테이지 설계 (수정됨)
 # =====================================================================
 class Stage_PA(nn.Module):
     def __init__(self, args, depth=0):
@@ -109,18 +104,20 @@ class Stage_PA(nn.Module):
 
         dim = args.dims[depth]
         
-        # 🌟 [디펜스 포인트] Latent Feature 투영기 (게이트 OFF 시에도 채널 일치를 위해 무조건 실행됨)
+        # =====================================================================
+        # 🌟 [수정 1] Latent Feature 융합을 모든 스테이지(first 포함)에 적용하기 위한 준비
+        # =====================================================================
+        # 128차원의 PAConv 힌트를 현재 스테이지의 채널(dim) 크기로 맞춰주는 투영기
         self.prior_proj = nn.Sequential(
             nn.Linear(128, dim, bias=False), 
             nn.BatchNorm1d(dim, momentum=args.bn_momentum),
             args.act()
         )
         
-        # 🌟 [Ablation] 게이트 사용 스위치 로드 및 조건부 파라미터 생성
+        # args에서 use_gate 옵션을 동적으로 읽어옴 (기본값 True)
         self.use_gate = getattr(args, 'use_gate', True)
         
         if self.use_gate:
-            # 수식의 \sigma 부분: 2배 차원(DeepPA+PAConv)을 받아 0~1 게이트 점수 생성
             self.gate_mlp = nn.Sequential(
                 nn.Linear(dim * 2, dim, bias=False),
                 nn.BatchNorm1d(dim, momentum=args.bn_momentum),
@@ -130,6 +127,7 @@ class Stage_PA(nn.Module):
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             in_channels = getattr(args, 'in_channels', 3)
+            # 채널 구조 10, 13, 14 지원
             in_feat_dim = 14 if in_channels == 7 else (13 if in_channels == 6 else 10)
             
             self.nbr_embed = nn.Sequential(
@@ -170,14 +168,10 @@ class Stage_PA(nn.Module):
         self.reslfe = ResLFE_Block(dim, args.depths[depth], args.drop_paths[depth], args.mlp_ratio, cp_bn_momentum, args.act)
         self.drop = DropPath(args.head_drops[depth])
 
-        # =====================================================================
-        # 🚨 [버그 픽스 완료!] HDS 모의고사용 Semantic 로스 헤드
-        # 기존: 3채널(단순 거리)만 받던 것을 -> dim 채널(딥러닝 특징 전체)을 받도록 수정
-        # =====================================================================
         self.sem_sup = nn.Sequential(
             nn.Dropout(0.5),
-            nn.BatchNorm1d(dim, momentum=args.bn_momentum), # 3 -> dim 으로 수정됨
-            nn.Linear(dim, getattr(args, 'num_classes', 36), bias=False), # 3 -> dim 으로 수정됨
+            nn.BatchNorm1d(dim, momentum=args.bn_momentum),
+            nn.Linear(dim, getattr(args, 'num_classes', 36), bias=False), 
         )
 
         self.postproj = nn.Sequential(
@@ -207,7 +201,7 @@ class Stage_PA(nn.Module):
             x_vfr = index_points(self.vfr(x, prev_knn), ids)
             x = x_skip + x_vfr
             
-            # 해상도 동기화
+            # 해상도 동기화 (다운샘플링된 점의 위치에 맞게 힌트도 축소)
             if prior_heatmap is not None:
                 prior_heatmap = index_points(prior_heatmap, ids)
             
@@ -223,6 +217,7 @@ class Stage_PA(nn.Module):
             dist = torch.norm(nbr_rel, dim=-1, keepdim=True) 
             vector = nbr_rel / (dist + 1e-8)
             
+            # 14채널 기하 정보 묶기
             if C_in == 7: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 14)
             elif C_in == 6: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 13) 
             else: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
@@ -233,19 +228,19 @@ class Stage_PA(nn.Module):
             x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1)
 
         # =====================================================================
-        # 🌟 수식 완벽 구현: 게이트 기반 잔차 연결 vs 단순 덧셈 (Ablation)
+        # 🌟 [수정 2] 모든 스테이지(first 포함)에서 Latent 힌트 주입 및 Gate 제어
         # =====================================================================
-        if not self.first and prior_heatmap is not None:
-            # 1. PAConv 힌트(128ch)를 백본 차원(dim)에 맞게 투영 (차원 에러 방어!)
+        if prior_heatmap is not None:
+            # 1. PAConv 힌트(128ch)를 현재 백본 차원(dim)에 맞게 투영
             p_feat = self.prior_proj(prior_heatmap.view(-1, prior_heatmap.shape[-1])).view(B, N, -1)
             
-            if getattr(self, 'use_gate', True):
-                # 🌟 [게이트 ON]: 콘캣 -> 시그모이드 게이트 생성 -> 곱해서 더하기
+            if self.use_gate:
+                # 🌟 [게이트 ON]: 시그모이드 어텐션을 통한 비판적 수용
                 fused_for_gate = torch.cat([x, p_feat], dim=-1) 
                 gate_matrix = self.gate_mlp(fused_for_gate.view(-1, fused_for_gate.shape[-1])).view(B, N, -1)
                 x = x + (gate_matrix * p_feat)
             else:
-                # 🌟 [게이트 OFF]: 게이트 행렬 곱셈 없이 투영된 힌트를 그대로 덧셈 (Simple Residual Add)
+                # 🌟 [게이트 OFF]: 투영된 힌트를 단순 덧셈 (Ablation 용도)
                 x = x + p_feat
 
         pe = pe.view(-1, 3)
@@ -258,7 +253,6 @@ class Stage_PA(nn.Module):
         x = checkpoint(self.reslfe, x, pe, knn, pts) if self.training and self.cp else self.reslfe(x, pe, knn, pts)
 
         if self.training:
-            # HDS 모의고사 채점
             spa_info = xyz_knn - xyz.unsqueeze(2)
             spa_info.mul_(self.cor_std)
             feat_info = self.cor_head(x.view(-1, x.shape[-1])).view(B, N, -1)
@@ -268,9 +262,6 @@ class Stage_PA(nn.Module):
             closs = F.mse_loss(feat_info, spa_info) 
             sub_spa = sub_spa + closs if sub_spa is not None else closs
 
-            # =====================================================================
-            # 🚨 [버그 픽스 완료!] spa_info가 아닌 모델 특징 'x'를 투입!
-            # =====================================================================
             sem = self.sem_sup(x.view(-1, x.shape[-1])).view(B, N, -1) 
             
             if sub_sem is not None:
@@ -295,7 +286,7 @@ class Stage_PA(nn.Module):
         return sub_x, sub_spa, sub_sem
 
 # =====================================================================
-# 최종 통합 모델 (DeepPA_semseg 백본 진입점)
+# 최종 통합 모델 (DeepPA_semseg 백본 진입점) - (기존과 동일)
 # =====================================================================
 class DeepPA_semseg(nn.Module):
     def __init__(self, args):
@@ -303,7 +294,6 @@ class DeepPA_semseg(nn.Module):
         args.cp_bn_momentum = 1 - (1 - args.bn_momentum)**0.5
         self.stage = Stage_PA(args) 
         
-        # 🌟 [디펜스 포인트] 256채널 병목 제거 유지
         self.latent_head = nn.Sequential(
             nn.BatchNorm1d(args.head_dim, momentum=args.bn_momentum),
             args.act(),

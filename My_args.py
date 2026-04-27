@@ -2,16 +2,13 @@
 @Author: Yuan Wang (Modified by Researcher)
 @File: My_args.py
 @Description: 
-[NotebookLM을 위한 핵심 파일 요약]
-이 파일은 0.47mm 3D 귀/얼굴 랜드마크 검출 모델의 하이퍼파라미터 통제 센터입니다.
-불필요한 휴리스틱 튜닝(RLW 등)을 전면 배제하고, CVPR Eq.5 HDS 커리큘럼과 
-독립 덧셈형 3D 표면 기하학 로스를 제어하는 변수들로만 무결점하게 구성되었습니다.
+[S2G 3D 랜드마크 탐지 모델 - SOTA 최적화 통제 센터]
+- argparse 중복 에러 해결 및 파라미터 단일화 완료
 '''
 
 import argparse
 import torch
 import torch.nn as nn
-
 
 def str2bool(v):
     if isinstance(v, bool): return v
@@ -19,146 +16,132 @@ def str2bool(v):
     elif v.lower() in ('no', 'false', 'f', 'n', '0'): return False
     else: raise argparse.ArgumentTypeError('Boolean value expected.')
 
-parser = argparse.ArgumentParser(description='3D Ear/Face Landmark Detection')
+parser = argparse.ArgumentParser(description='S2G 3D Landmark Detection SOTA Configuration')
 
 # =============================================================================
-# [1] 기본 설정 (Base Args) & 모델 아키텍처
+# [1] 기본 설정 & I/O 
 # =============================================================================
-parser.add_argument('--exp_name', type=str, default='Ear_Project_Final', metavar='N', help='Name of the experiment')
+parser.add_argument('--exp_name', type=str, default='S2G_Final_Refinement', metavar='N')
+parser.add_argument('--model', type=str, default='deeppa_frozen', choices=['PAConv', 'DeepPA', 'deeppa_frozen', 'deeppa_e2e'])
+parser.add_argument('--dataset', type=str, default='Ear296_Korean')
+parser.add_argument('--data_root', type=str, default='../data')
+parser.add_argument('--output_root', type=str, default='../results')
+parser.add_argument('--train_dataset_name', type=str, default='Ear296_Korean')
+parser.add_argument('--test_dataset_name', type=str, default='')
+parser.add_argument('--run_id', type=str, default='')
+parser.add_argument('--user_tag', type=str, default='')
+parser.add_argument('--model_epoch', type=str, default="Frozen_Hybrid_last.t7")
 
-# 🔥 'deeppa_auto' 및 'deeppa_frozen' 옵션 유지
-# 1단계(PAConv): 전체적인 형태를 보고 랜드마크의 대략적인 위치(Global Context) 탐지 (Frozen)
-# 2단계(DeepPA): 기하학적 로스를 켜서 표면 굴곡에 완벽히 밀착(Local Refinement)
-parser.add_argument('--model', type=str, default='deeppa_frozen', metavar='N', choices=['PAConv_heat', 'PAConv', 'DeepLA', 'DeepPA', 'deeppa_frozen', 'deeppa_e2e'], help='Model to use')
-parser.add_argument('--no_cuda', type=str2bool, default=False, help='enables CUDA training')
-parser.add_argument('--model_path', type=str, default='', metavar='N', help='Pretrained model path')
-
-parser.add_argument('--dataset', type=str, default='Ear296_Korean', help='Target dataset name')
-parser.add_argument('--train_dataset_name', type=str, default='Ear296_Korean', help='Train dataset name')
-parser.add_argument('--test_dataset_name', type=str, default='', help='Test dataset name (Optional)')
-
-parser.add_argument('--data_root', type=str, default='../data', help='Root directory of data')
-parser.add_argument('--output_root', type=str, default='../results', help='Root directory for results')
-
-# 🌟 입력 채널 설정 (기본 7채널: xyz + 주방향 + 곡률)
-# 단순 3D 좌표뿐만 아니라, 오프라인 베이킹된 기하학적 특징(방향/곡률)을 주입하여 모델 수렴을 가속
-parser.add_argument('--in_channels', type=int, default=7, help='Input channels: 3 for (xyz), 7 for (xyz + principal_dir + curvature)')
-
+parser.add_argument('--no_cuda', type=str2bool, default=False)
+parser.add_argument('--seed', type=int, default=1)
+parser.add_argument('--in_channels', type=int, default=7)
+parser.add_argument('--num_points', type=int, default=8192)
+parser.add_argument('--landmark_num', type=int, default=36)
 
 # =============================================================================
-# [2] 학습 설정 (Train Args)
+# [2] 학습 및 최적화 설정
 # =============================================================================
-parser.add_argument('--eval', type=str2bool, default=False, help='evaluate the model')
-parser.add_argument('--batch_size', type=int, default=8, metavar='batch_size', help='Size of batch')
-parser.add_argument('--test_batch_size', type=int, default=1, metavar='batch_size', help='Size of batch')
-parser.add_argument('--epochs', type=int, default=500, metavar='N', help='number of episode to train')
-
-parser.add_argument('--dropout', type=float, default=0.5, help='dropout rate')
-parser.add_argument('--accumulation_steps', type=int, default=1, help='Gradient Accumulation Steps')
-
-# =============================================================================
-# [3] 최적화 설정 (Optimizer Args)
-# =============================================================================
-parser.add_argument('--loss', type=str, default='adaptive_wing', metavar='N', choices=['mse', 'adaptive_wing'], help='loss function to use')
-parser.add_argument('--use_sgd', type=str2bool, default=False, help='Use SGD')
-parser.add_argument('--lr', type=float, default=0.001, metavar='LR', help='learning rate')
-parser.add_argument('--momentum', type=float, default=0.9, metavar='M', help='SGD momentum')
-parser.add_argument('--scheduler', type=str, default='step', metavar='N', choices=['cos', 'step'], help='Scheduler to use')
-parser.add_argument('--weight_decay', type=float, default=0, metavar='WD', help='the weight decay')
+parser.add_argument('--epochs', type=int, default=500)
+parser.add_argument('--batch_size', type=int, default=8)
+parser.add_argument('--test_batch_size', type=int, default=1)
+parser.add_argument('--accumulation_steps', type=int, default=1)
+parser.add_argument('--lr', type=float, default=0.001)
+parser.add_argument('--scheduler', type=str, default='step', choices=['cos', 'step'])
+parser.add_argument('--dropout', type=float, default=0.5)
+parser.add_argument('--weight_decay', type=float, default=0.0)
 
 # =============================================================================
-# [4] 데이터 전처리 (Data Process & Heatmap)
+# [3] 120층 DeepPA 백본 & 4단계 압축 설정
 # =============================================================================
-parser.add_argument('--max_threshold', default=10, type=float, help='the maximum threshold of error_rate')
-parser.add_argument('--sample_way', type=str, default='FPS', metavar='sw', choices=['FPS', 'Random', 'CAGQ', 'Geometric'])
-parser.add_argument('--need_resample', type=str2bool, default=True, help='Must be True to generate NPY files initially')
-parser.add_argument('--seed', type=int, default=1, metavar='S', help='random seed')
+parser.add_argument('--depths', type=list, default=[20, 20, 60, 20])
+parser.add_argument('--dims', type=list, default=[64, 128, 256, 512])
+parser.add_argument('--npoints', type=list, default=[256, 64, 16, 4])
+parser.add_argument('--ks', type=list, default=[20, 20, 20, 20])
+parser.add_argument('--nbr_dims', type=list, default=[64, 128, 256, 512])
 
-parser.add_argument('--regression_point_num', type=int, default=10, metavar='RPN', help='points in landmark regression')
-parser.add_argument('--dataset_seed', type=int, default=1, metavar='S', help='train/test dataset random seed')
-parser.add_argument('--num_points', type=int, default=8192, help='num of points to use')
-
-# 3D 가우시안 히트맵의 분산(퍼짐 정도)
-parser.add_argument('--sigma', type=float, default=10.0, metavar='Sig', help='Gaussian Variance of heatmap')
-parser.add_argument('--k', type=int, default=30, metavar='N', help='Num of nearest neighbors')
-parser.add_argument('--emb_dims', type=int, default=1024, metavar='N', help='Dimension of embeddings')
-parser.add_argument('--landmark_num', type=int, default=36, metavar='L', help='the number of landmark')
+parser.add_argument('--use_gate', type=str2bool, default=True, help='Enable Gated Residual Fusion')
+parser.add_argument('--use_cp', type=str2bool, default=False, help='Gradient Checkpointing')
+parser.add_argument('--head_dim', type=int, default=256)
+parser.add_argument('--mlp_ratio', type=float, default=2.0)
+parser.add_argument('--bn_momentum', type=float, default=0.1)
+parser.add_argument('--act', default=nn.GELU)
 
 # =============================================================================
-# [5] 모델 구조 설정 (PAConv Args)
+# [4] 자율 로스 게이팅 (Adaptive Sigmoid Gating) 설정
 # =============================================================================
-parser.add_argument('--calc_scores', type=str, default='softmax', metavar='cs', help='The way to calculate score')
-parser.add_argument('--hidden', type=list, default=[[32], [32], [32], [32]], help='the hidden layers of ScoreNet')
-parser.add_argument('--num_matrices', type=list, default=[8, 8, 8, 8], help='the number of weight banks')
-
-# =============================================================================
-# [6] 기타 설정 (Etc)
-# =============================================================================
-parser.add_argument('--Eval_DataType', type=str, default="test", help='select npy train, test, sample')
-parser.add_argument('--model_epoch', type=str, default="Frozen_Hybrid_last.t7", help='load trained model file')
-parser.add_argument('--run_id', type=str, default='', help='Load specific run from backup (e.g., 1, 2)')
-parser.add_argument('--use_split_dataset', type=str2bool, default=True, help='Use split dataset mode')
-parser.add_argument('--user_tag', type=str, default='', help='Custom tag added to the folder name')
-parser.add_argument('--train_len', type=int, default=209, help='Number of training samples used in folder name')
+parser.add_argument('--gating_tau', type=float, default=0.65)
+parser.add_argument('--gating_beta', type=float, default=15.0)
 
 # =============================================================================
-# [7] 🌟 핵심 방어 논리 1: 하이브리드 표면 페널티 (loss.py 연동)
+# [5] 하이브리드 표면 기하 로스 & 통제 스위치
 # =============================================================================
-parser.add_argument('--plane_knn', type=int, default=5, help='K points for Local Tangent Plane estimation')
-parser.add_argument('--curv_knn', type=int, default=30, help='K points for Macroscopic Curvature & Direction estimation')
+parser.add_argument('--use_jitter', type=str2bool, default=False, help='가우시안 노이즈 증강 활성화')
+parser.add_argument('--use_loss_norm', type=str2bool, default=True, help='초기값 기반 기하 로스 스케일링 활성화')
+parser.add_argument('--use_rlw_for_pred', type=str2bool, default=True, help='기하 로스 전용 Random Loss Weighting 활성화')
+parser.add_argument('--target_norm', type=float, default=1.0)
 
-# [논문 디펜스 포인트]: 곱셈 교차항 오차를 막기 위한 "독립 선형 덧셈 패널티" 승수
-# Loss = P2P_Distance * (1 + alpha * Curv_Error + beta * Dir_Error)
-parser.add_argument('--curv_alpha', type=float, default=10.0, help='[Alpha] Penalty multiplier for curvature magnitude error')
-parser.add_argument('--dir_beta', type=float, default=1.0, help='[Beta] Penalty multiplier for eigenvector direction error')
-
-# =============================================================================
-# [8] 🌟 핵심 방어 논리 2: 최적화 안정성 및 회귀 제어
-# =============================================================================
-parser.add_argument('--use_direct_regression', type=str2bool, default=True, help='DeepPA가 히트맵 대신 (X,Y,Z) 좌표를 다이렉트로 출력')
-
-# [표준 Focal L1 설정]: 수렴이 불안정한 Dynamic 방식 제거, 검증된 Standard 방식 채택
-parser.add_argument('--focal_gamma', type=float, default=2.0, help='Gamma for Standard Focal L1 loss')
-parser.add_argument('--use_loss_norm', type=str2bool, default=False, help='Use Initial Loss Normalization')
-parser.add_argument('--target_norm', type=float, default=1.0, help='Target scale for Loss Normalization')
-#3가지 회귀 로스(Coord, Surface, Struct)에 대한 Random Loss Weighting 스위치 (기본값: False)
-parser.add_argument('--use_rlw_for_pred', type=str2bool, default=False, help='Use Random Loss Weighting for 3 prediction losses')
+# 🌟 문제의 중복 에러가 발생했던 구간 (단일화 완료)
+parser.add_argument('--regression_point_num', type=int, default=10, help='K points for Soft-Argmax')
+parser.add_argument('--plane_knn', type=int, default=5, help='Local Tangent Plane KNN')
+parser.add_argument('--curv_knn', type=int, default=30, help='Curvature KNN')
+parser.add_argument('--curv_alpha', type=float, default=10.0)
+parser.add_argument('--dir_beta', type=float, default=1.0)
+parser.add_argument('--focal_gamma', type=float, default=2.0)
+parser.add_argument('--hds_alpha', type=float, default=0.3)
+parser.add_argument('--hds_beta', type=float, default=0.005)
 
 # =============================================================================
-# [9] 🌟 핵심 방어 논리 3: DeepLA-Net CVPR Eq. (5) HDS 스케줄링
+# [6] 데이터 전처리 및 PAConv 내부 파라미터 (활성화 복구)
 # =============================================================================
-# [논문 디펜스 포인트]: 자의적인 감쇄율 튜닝(Heuristic)을 배제하고, SOTA 논문의 지수 감쇠(n=1/epoch) 수식을 완벽히 차용함.
-parser.add_argument('--hds_alpha', type=float, default=0.3, help='Eq(5) L_sem 시작 가중치 (논문 최적값 0.3)')
-parser.add_argument('--hds_beta', type=float, default=0.005, help='Eq(5) L_spa 시작 가중치 (논문 최적값 0.005)')
+parser.add_argument('--need_resample', type=str2bool, default=True)
+parser.add_argument('--sample_way', type=str, default='FPS')
+parser.add_argument('--dataset_seed', type=int, default=1)
+parser.add_argument('--sigma', type=float, default=10.0)
+parser.add_argument('--train_len', type=int, default=209)
+parser.add_argument('--Eval_DataType', type=str, default="test")
+parser.add_argument('--eval', type=str2bool, default=False)
 
+parser.add_argument('--k', type=int, default=30, help='PAConv base KNN')
+parser.add_argument('--calc_scores', type=str, default='softmax')
+parser.add_argument('--hidden', type=list, default=[[32], [32], [32], [32]])
+parser.add_argument('--num_matrices', type=list, default=[8, 8, 8, 8])
 
 # =============================================================================
-# [5-1] 🌟 DeepPA 초심층망 아키텍처 상세 설정 (120층 표준)
+# [DEPRECATED] 미사용 및 구버전 잔재 (사용하지 않음)
 # =============================================================================
-# [논문 디펜스 포인트]: DeepLA-Net CVPR 논문의 DeepLA-120 구성을 한 치의 오차 없이 재현함.
-# 각 스테이지의 ResLFE 블록 개수: 20 + 20 + 60 + 20 = 총 120 Blocks
-parser.add_argument('--depths', type=list, default=[20, 20, 60, 20], help='Number of blocks in each stage')
+'''
+parser.add_argument('--model_path', type=str, default='')
+parser.add_argument('--train_dataset_name', type=str, default='Ear296_Korean')
+parser.add_argument('--test_dataset_name', type=str, default='')
+parser.add_argument('--eval', type=str2bool, default=False)
+parser.add_argument('--test_batch_size', type=int, default=1)
+parser.add_argument('--accumulation_steps', type=int, default=1)
+parser.add_argument('--loss', type=str, default='adaptive_wing')
+parser.add_argument('--use_sgd', type=str2bool, default=False)
+parser.add_argument('--momentum', type=float, default=0.9)
+parser.add_argument('--weight_decay', type=float, default=0)
+parser.add_argument('--max_threshold', default=10, type=float)
+parser.add_argument('--sample_way', type=str, default='FPS')
+parser.add_argument('--need_resample', type=str2bool, default=True)
+parser.add_argument('--dataset_seed', type=int, default=1)
+parser.add_argument('--sigma', type=float, default=10.0)
+parser.add_argument('--k', type=int, default=30)
+parser.add_argument('--emb_dims', type=int, default=1024)
+parser.add_argument('--calc_scores', type=str, default='softmax')
+parser.add_argument('--hidden', type=list, default=[[32], [32], [32], [32]])
+parser.add_argument('--num_matrices', type=list, default=[8, 8, 8, 8])
+parser.add_argument('--Eval_DataType', type=str, default="test")
+parser.add_argument('--model_epoch', type=str, default="Frozen_Hybrid_last.t7")
+parser.add_argument('--run_id', type=str, default='')
+parser.add_argument('--use_split_dataset', type=str2bool, default=True)
+parser.add_argument('--user_tag', type=str, default='')
+parser.add_argument('--train_len', type=int, default=209)
+parser.add_argument('--use_loss_norm', type=str2bool, default=False)
+parser.add_argument('--target_norm', type=float, default=1.0)
+parser.add_argument('--up_dims', type=list, default=[128, 128, 256, 256])
 
-# 각 스테이지의 특징 차원(Channels)
-parser.add_argument('--dims', type=list, default=[64, 128, 256, 512], help='Feature dimensions in each stage')
-
-# 각 스테이지의 K-NN 이웃 개수
-parser.add_argument('--ks', type=list, default=[20, 20, 20, 20], help='K neighbors in each stage')
-
-# 각 스테이지의 다운샘플링 포인트 개수 (8192 -> 2048 -> 512 -> 128 -> 32)
-parser.add_argument('--npoints', type=list, default=[2048, 512, 128, 32], help='Number of points in each stage')
-
-# 기타 내부 파라미터 (고정값 권장)
-parser.add_argument('--head_dim', type=int, default=256, help='Latent head dimension')
-parser.add_argument('--mlp_ratio', type=float, default=2.0, help='FFN hidden dimension ratio')
-parser.add_argument('--bn_momentum', type=float, default=0.1, help='Batch Norm momentum')
-parser.add_argument('--act', default=nn.GELU, help='Activation function')
-parser.add_argument('--use_cp', type=bool, default=False, help='VRAM 절약을 위한 Gradient Checkpointing 사용 여부')
-parser.add_argument('--nbr_dims', type=list, default=[64, 128, 256, 512], help='각 스테이지별 이웃 특징(Neighborhood) 차원')
-parser.add_argument('--up_dims', type=list, default=[128, 128, 256, 256], help='업샘플링(디코더) 과정의 특징 차원 (에러 방지용)')
-
-# 게이트 기반 잔차 연결 스위치 (False로 설정 시 단순 채널 투영 후 덧셈으로 동작)
-parser.add_argument('--use_gate', type=str2bool, default=True, help='Enable Gated Residual Fusion (False for Simple Add)')
-
-# 최종 병합 직전 스파셜 어텐션(히트맵 곱셈) 스위치 (False로 설정 시 곱셈만 생략하고 Concat은 유지)
-parser.add_argument('--use_spatial_attention', type=str2bool, default=True, help='Enable Spatial Attention before final concat')
+# 259채널 슬림화 및 다이렉트 회귀 도입으로 폐기된 옵션
+parser.add_argument('--use_direct_regression', type=str2bool, default=True)
+parser.add_argument('--use_spatial_attention', type=str2bool, default=False)
+parser.add_argument('--use_rlw_for_pred', type=str2bool, default=False)
+'''

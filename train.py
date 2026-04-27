@@ -1,6 +1,6 @@
 # @Author: Yuan Wang (Modified by Researcher & AI Assistant)
 # @File: train.py
-# @Description: Unified Hybrid Pipeline + Constant Weight Transition + Safe Epoch Guard + BroadCasting Fix
+# @Description: Unified Hybrid Pipeline + Adaptive Gating + Isolated RLW & Scale (259ch Slim Fix)
 # ==============================================================================
 
 import os
@@ -19,7 +19,7 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-from loss import AdaptiveWingLoss, CurvatureSurfaceLoss, compute_structural_loss, focal_l1_loss, get_differentiable_coords
+from loss import AdaptiveWingLoss, CurvatureSurfaceLoss, compute_structural_loss, focal_l1_loss, get_differentiable_coords, S2GGatingManager
 from util import main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate, PointcloudJitter
 
@@ -62,11 +62,6 @@ def process_data_storage(dataset, prefix, paths):
     np.save(os.path.join(paths['npy_backup'], f"landmark_{prefix}.npy"), np.stack(landmark_list))
     np.save(os.path.join(paths['npy_backup'], f"Heat_data_{prefix}.npy"), np.stack(heatmap_list))
 
-"""
-================================================================================
-🌟 Unified Hybrid Pipeline (Ablation Safe Dimension Guard 적용)
-================================================================================
-"""
 class HybridPipeline(nn.Module):
     def __init__(self, args, landmark_num, mode='frozen'):
         super().__init__()
@@ -83,9 +78,11 @@ class HybridPipeline(nn.Module):
         if self.mode == 'stage1':
             s1_latent, s1_hm_raw = self.stage1_paconv(x)
             s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
-            
             points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
-            pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=getattr(self.stage1_paconv.args, 'k_softargmax', 10))
+            
+            # args.regression_point_num과 동기화
+            k_val = getattr(self.stage1_paconv.args, 'regression_point_num', 10)
+            pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=k_val)
             
             return pred_coords, torch.tensor(0.0).to(x.device), [s1_hm_raw], s1_hm_prob
             
@@ -93,13 +90,12 @@ class HybridPipeline(nn.Module):
             self.stage1_paconv.eval()
             with torch.no_grad():
                 s1_latent, s1_hm_raw = self.stage1_paconv(x)
-                
             s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
             s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
             
-            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted.detach(), prior_heatmap=s1_hm_raw.detach())
+            # 🌟 [에러 수정]: 259채널 슬림화에 맞춰 prior_heatmap 인자 완전 제거!
+            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted.detach())
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
-            
             return pred_coords, spa_loss, sem_list, s1_hm_raw
             
         elif self.mode == 'e2e':
@@ -107,9 +103,9 @@ class HybridPipeline(nn.Module):
             s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
             s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
             
-            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted, prior_heatmap=s1_hm_raw)
+            # 🌟 [에러 수정]: 259채널 슬림화에 맞춰 prior_heatmap 인자 완전 제거!
+            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted)
             pred_coords, spa_loss, sem_list = out[0], out[1] if len(out)>1 else torch.tensor(0.0).to(x.device), out[2] if len(out)>2 else []
-            
             return pred_coords, spa_loss, sem_list, s1_hm_raw
         
 def train(args):
@@ -150,14 +146,11 @@ def train(args):
             
         if pipeline_mode in ['stage1', 'frozen', 'e2e']: 
             model = HybridPipeline(args, args.landmark_num, mode=pipeline_mode).to(device)
-            
             if pipeline_mode in ['frozen', 'e2e']:
                 paconv_path = os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
                 if os.path.exists(paconv_path):
-                    print(f"📦 [Pretrained Load] 사전 학습된 PAConv 로드 완료! (Mode: {pipeline_mode.upper()})")
+                    print(f"📦 [Pretrained] 사전 학습된 PAConv 로드 완료!")
                     model.load_state_dict(torch.load(paconv_path, map_location=device), strict=False)
-                else:
-                    print(f"⚠️ [Warning] 사전 학습된 PAConv를 찾을 수 없습니다. 랜덤 가중치로 시작합니다.")
         else: 
             model = DeepPA_Wrapper(args, args.landmark_num).to(device)
             
@@ -165,42 +158,25 @@ def train(args):
         
         surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
         hm_criterion = AdaptiveWingLoss().to(device) 
+        gating_manager = S2GGatingManager(tau=getattr(args, 'gating_tau', 0.65), beta=getattr(args, 'gating_beta', 15.0))
         
         opt = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
         scheduler = CosineAnnealingLR(opt, T_max=current_epochs) if getattr(args, 'scheduler', 'cos') == 'cos' else StepLR(opt, step_size=40, gamma=0.9)
 
         excel_log_path = os.path.join(paths['root'], f'Training_Log_{stage_name}.xlsx')
         log_records = []
-        auto_scales = {'coord': 1.0, 'surface': 1.0, 'struct': 1.0}; target_norm = 1.0
+        best_val_mm = float('inf')
+        
+        auto_scales = {'coord': 1.0, 'surface': 1.0, 'struct': 1.0}
+        target_norm = getattr(args, 'target_norm', 1.0)
         use_loss_norm = getattr(args, 'use_loss_norm', False)
-
-        # 🌟 [수정됨] 상수 전환 제어 변수 및 강력한 안전장치
-        phase = 1
-        best_hds_loss = float('inf')
-        patience_counter = 0
-        patience_limit = 10      # 인내심 10에폭으로 넉넉하게
-        min_phase1_epochs = 30   # 최소 30에폭 동안은 무조건 1단계(상수 가중치) 유지
+        use_rlw = getattr(args, 'use_rlw_for_pred', False)
 
         for epoch in range(current_epochs):
             model.train() 
-                
             train_loss_norm = 0.0; t_hm_aux, t_crd, t_srf, t_str = 0.0, 0.0, 0.0, 0.0; train_mm = 0.0
+            avg_w_geom = 0.0
             opt.zero_grad() 
-            
-            # 🌟 [수정됨] 감쇠(Decay) 수식 완전 제거, 상수(Constant) 적용
-            if pipeline_mode == 'stage1':
-                w_sem, w_spa, w_pred = 1.0, 0.0, 0.0
-                current_phase_str = f"STAGE1 Heatmap Only"
-            else:
-                if phase == 1:
-                    # 1단계: 최대 가중치 유지로 강력한 구조 파악 유도
-                    w_sem, w_spa = 0.3, 0.005
-                    w_pred = 0.695
-                    current_phase_str = f"Phase 1: High-Power Structure Learning"
-                else:
-                    # 2단계: 보조 로스 완전 차단
-                    w_sem, w_spa, w_pred = 0.0, 0.0, 1.0
-                    current_phase_str = f"Phase 2: Sub-millimeter Refinement"
             
             with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"{stage_name} Ep {epoch+1:03d}", unit="batch", leave=False) as tepoch:
                 for i, (point, landmark, seg) in tepoch:
@@ -213,7 +189,7 @@ def train(args):
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_normal, augmented_landmark = ScaleAndTranslate(point_normal, landmark_normal)
                     
-                    if pipeline_mode != 'stage1':
+                    if getattr(args, 'use_jitter', False) and pipeline_mode != 'stage1':
                         point_normal = ApplyJitter(point_normal)
                     
                     point_input = point_normal.permute(0, 2, 1).contiguous()
@@ -227,41 +203,53 @@ def train(args):
                     else:
                         out = model(point_input)
                         pred_coords, spa_loss, sem_list = out[0], torch.tensor(0.0).to(device), []
+                        s1_hm = None
                         
                     L_spa = spa_loss if isinstance(spa_loss, torch.Tensor) else torch.tensor(0.0).to(device)
-                    safe_sem_list, target_list = [], []
 
-                    for idx, sp in enumerate(sem_list):
+                    # 🌟 1. Heatmap (Semantic) Loss 계산
+                    safe_sem_list, target_list = [], []
+                    for sp in sem_list:
                         if sp is None: continue
                         if sp.shape[1] != target_hm.shape[1]: sp = sp.permute(0, 2, 1).contiguous()
-                        
-                        curr_N = sp.shape[2]
-                        if curr_N == target_hm.shape[2]: 
-                            safe_sem_list.append(sp)
-                            target_list.append(target_hm)
+                        if sp.shape[2] == target_hm.shape[2]: 
+                            safe_sem_list.append(sp); target_list.append(target_hm)
 
-                    if len(safe_sem_list) > 0:
-                        L_sem = sum([hm_criterion(s, t) for s, t in zip(safe_sem_list, target_list)]) / len(safe_sem_list)
+                    L_sem = sum([hm_criterion(s, t) for s, t in zip(safe_sem_list, target_list)]) / len(safe_sem_list) if len(safe_sem_list) > 0 else torch.tensor(0.0).to(device)
+
+                    # 🌟 2. Pipeline 분기 최적화 (GPU 비용 절감 및 게이팅)
+                    if pipeline_mode == 'stage1':
+                        w_geom = 0.0
+                        total_loss = L_sem
+                        loss_coord = loss_surface = loss_struct = torch.tensor(0.0)
                     else:
-                        L_sem = torch.tensor(0.0).to(device)
+                        s1_hm_prob = F.softmax(s1_hm, dim=1) if s1_hm is not None else torch.zeros_like(target_hm)
+                        w_geom = gating_manager.get_geometric_weight(s1_hm_prob, target_hm).item() if s1_hm is not None else 1.0
                         
-                    loss_coord = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
-                    loss_surface, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
-                    loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
+                        force_geom_calc = (use_loss_norm and epoch == 0 and i == 0)
+                        
+                        if w_geom > 0.01 or force_geom_calc:
+                            loss_coord = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
+                            loss_surface, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
+                            loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
+                            
+                            if force_geom_calc:
+                                auto_scales['coord'] = target_norm / loss_coord.item() if loss_coord.item() > 0 else 1.0
+                                auto_scales['surface'] = target_norm / loss_surface.item() if loss_surface.item() > 0 else 1.0
+                                auto_scales['struct'] = target_norm / loss_struct.item() if loss_struct.item() > 0 else 1.0
 
-                    if use_loss_norm and epoch == 0 and i == 0 and w_pred > 0:
-                        auto_scales['coord'] = target_norm / loss_coord.item() if loss_coord.item() > 0 else 1.0
-                        auto_scales['surface'] = target_norm / loss_surface.item() if loss_surface.item() > 0 else 1.0
-                        auto_scales['struct'] = target_norm / loss_struct.item() if loss_struct.item() > 0 else 1.0
+                            if use_rlw:
+                                rand_w = F.softmax(torch.randn(3, device=device), dim=0)
+                                w_crd, w_srf, w_str = rand_w[0], rand_w[1], rand_w[2]
+                            else:
+                                w_crd, w_srf, w_str = 1.0, 1.0, 1.0
 
-                    if getattr(args, 'use_rlw_for_pred', False):
-                        rand_w = F.softmax(torch.randn(3, device=device), dim=0)
-                        w_crd, w_srf, w_str = rand_w[0], rand_w[1], rand_w[2]
-                    else:
-                        w_crd, w_srf, w_str = 1.0, 1.0, 1.0
-
-                    L_pred = (w_crd * loss_coord * auto_scales['coord']) + (w_srf * loss_surface * auto_scales['surface']) + (w_str * loss_struct * auto_scales['struct'])
-                    total_loss = (w_sem * L_sem) + (w_spa * L_spa) + (w_pred * L_pred)
+                            L_pred = (w_crd * loss_coord * auto_scales['coord']) + (w_srf * loss_surface * auto_scales['surface']) + (w_str * loss_struct * auto_scales['struct'])
+                        else:
+                            loss_coord = loss_surface = loss_struct = torch.tensor(0.0)
+                            L_pred = torch.tensor(0.0).to(device)
+                        
+                        total_loss = ((1.0 - w_geom) * L_sem) + (w_geom * L_pred) + L_spa
                                         
                     loss = total_loss / accum_steps
                     loss.backward()
@@ -275,13 +263,16 @@ def train(args):
                     train_loss_norm += total_loss.item()
                     t_hm_aux += L_sem.item(); t_crd += loss_coord.item(); t_srf += loss_surface.item(); t_str += loss_struct.item()
                     train_mm += mm_error
+                    avg_w_geom += w_geom
                     
-                    vram_str = f"{torch.cuda.max_memory_allocated() / (1024 ** 3):.1f}GB" if torch.cuda.is_available() else "CPU"
-                    tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", VRAM=vram_str)
+                    tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", w_geom=f"{w_geom:.2f}")
 
             num_b = len(train_loader)
-            t_loss_n, t_mm = train_loss_norm / num_b, train_mm / num_b
+            t_loss_n, t_mm, avg_w_geom = train_loss_norm / num_b, train_mm / num_b, avg_w_geom / num_b
 
+            # ----------------------------------------------------
+            # [Validation] 
+            # ----------------------------------------------------
             model.eval()
             val_mm_total, val_samples = 0.0, 0
             with torch.no_grad():
@@ -293,10 +284,9 @@ def train(args):
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1).contiguous() 
                     
-                    if pipeline_mode in ['stage1', 'frozen', 'e2e']: pred_coords, _, _, _ = model(point_input)
+                    if pipeline_mode in ['stage1', 'frozen', 'e2e']: pred_coords = model(point_input)[0]
                     else: pred_coords = model(point_input)[0]
 
-                    # 🌟 [수정됨] Broadcasting Error 해결을 위한 view_as 처리
                     val_mm_total += F.l1_loss(pred_coords, landmark_normal.view_as(pred_coords)).item() * avg_m * B_val
                     val_samples += B_val
             
@@ -305,58 +295,41 @@ def train(args):
             if pipeline_mode == 'stage1':
                 print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | L_sem(HM): {t_hm_aux/num_b:.4f} || Train_mm: {t_mm:.2f} | Val_mm: {v_mm:.2f}")
             else:
-                print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f} | Phase: {phase}")
-                print(f"  ├─ [Weights] w_sem: {w_sem:.4f} | w_spa: {w_spa:.4f} | w_pred: {w_pred:.4f}")
-                print(f"  ├─ [S2_Pred_Loss] Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}")
-                print(f"  └─ [HDS_Aux_Loss] L_sem(Heatmap): {t_hm_aux/num_b:.4f}")
+                rlw_status = "ON" if use_rlw else "OFF"
+                print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f} ")
+                print(f"  ├─ 🎛️ [Adaptive Gate] 기하 로스(L_pred) 개방률: {avg_w_geom*100:.1f}%  (RLW: {rlw_status})")
+                print(f"  └─ 🎯 [Loss] HM: {t_hm_aux/num_b:.4f} | Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}")
 
             log_records.append({
-                'Epoch': epoch + 1, 'Phase': current_phase_str,
-                'Total_Loss': t_loss_n, 'Val_mm': v_mm, 'Train_mm': t_mm,
-                'w_sem': w_sem, 'w_pred': w_pred,
+                'Epoch': epoch + 1, 'Total_Loss': t_loss_n, 'Val_mm': v_mm, 'Train_mm': t_mm,
+                'Gate(%)': avg_w_geom*100,
                 'L_sem_HM': t_hm_aux/num_b, 'L_coord': t_crd/num_b, 'L_surface': t_srf/num_b, 'L_struct': t_str/num_b
             })
             
             with pd.ExcelWriter(excel_log_path, engine='openpyxl') as writer:
-                df_log = pd.DataFrame(log_records)
-                df_log.to_excel(writer, sheet_name='Training_Log', index=False)
+                pd.DataFrame(log_records).to_excel(writer, sheet_name='Training_Log', index=False)
 
-            # 🌟 [수정됨] 진정한 Plateau 감지 및 안전장치가 적용된 전환 로직
-            if pipeline_mode != 'stage1' and phase == 1:
-                current_hds_loss = t_hm_aux / num_b
-                
-                # 유의미한 감소(-0.01) 확인
-                if current_hds_loss < best_hds_loss - 0.01:
-                    best_hds_loss = current_hds_loss
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                
-                # 최소 에폭을 채우고, 인내심도 바닥났을 때만 전환!
-                if (epoch + 1 >= min_phase1_epochs) and (patience_counter >= patience_limit):
-                    print(f"\n🚨 [알림] Epoch {epoch+1}: 진정한 HDS 로스 수렴 확인 (Patience: {patience_limit}). 다음 에폭부터 2단계 정밀 타격(Hard Cut-off)으로 전환합니다!")
-                    phase = 2
+            if v_mm < best_val_mm:
+                best_val_mm = v_mm
+                torch.save(model.state_dict(), os.path.join(paths['models'], f'{stage_name}_best.t7'))
 
             scheduler.step()
 
         print(f"\n💾 [Model Save] 학습 완료! 모델을 저장합니다.")
-        last_save_path = os.path.join(paths['models'], f'{stage_name}_last.t7')
-        torch.save(model.state_dict(), last_save_path)
+        torch.save(model.state_dict(), os.path.join(paths['models'], f'{stage_name}_last.t7'))
         return model 
 
     print(f"\n=== [Pipeline Start] ===")
     target_model = args.model.lower()
     if target_model == 'paconv':
-        print(f">>> [MODE: STAGE 1] 🎯 PAConv 단독 학습 (히트맵 100%)")
+        print(f">>> [MODE: STAGE 1] 🎯 PAConv 단독 학습 (히트맵 100%, GPU 초고속 최적화)")
         execute_stage('paconv', args.epochs, stage_name=f"Single_PAConv")
     elif target_model in ['deeppa_frozen', 'deeppa_auto']:
-        print(f">>> [MODE: FROZEN] ❄️ PAConv 프리징 + HDS 커리큘럼")
+        print(f">>> [MODE: FROZEN] ❄️ PAConv 프리징 + 자율 로스 게이팅(Adaptive Gating)")
         execute_stage('deeppa_frozen', args.epochs, stage_name=f"Frozen_Hybrid")
     elif target_model == 'deeppa_e2e':
-        print(f">>> [MODE: E2E] 🔥 PAConv 동시 학습(Joint Opt) + HDS 커리큘럼")
+        print(f">>> [MODE: E2E] 🔥 전체 동시 학습 + 자율 로스 게이팅")
         execute_stage('deeppa_e2e', args.epochs, stage_name=f"E2E_Hybrid")
-    else:
-        execute_stage(args.model, args.epochs, disable_norm=True, stage_name=f"Single_{args.model}")
         
     print(f"\n=== Training Finished. Results at: {paths['root']} ===")
 
