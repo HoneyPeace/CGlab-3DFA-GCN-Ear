@@ -127,7 +127,7 @@ class UniversalPipeline_Eval(nn.Module):
             multi_scale_hints, hm_raw = self.model(x)
             points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
             k_val = getattr(self.args, 'regression_point_num', 10)
-            pred_coords = get_differentiable_coords(points_xyz, F.softmax(hm_raw, dim=1), k=k_val)
+            pred_coords = get_differentiable_coords(points_xyz, hm_raw, k=k_val)
             return pred_coords, [], hm_raw
             
         elif self.mode == 'single_deeppa':
@@ -160,7 +160,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     os.makedirs(current_asc_dir, exist_ok=True)
 
     me_list, per_landmark_me_list = [], []
-    cos_sim_list, iou_list, time_list = [], []
+    cos_sim_list, iou_list, time_list = [], [], []
     
     eval_model.eval()
 
@@ -200,7 +200,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 
             # DeepPA가 Eval에서 히트맵을 뱉지 않으면 이 구역은 스킵됩니다 (에러 없음)
             if eval_target_hm_raw is not None:
-                eval_target_hm = F.softmax(eval_target_hm_raw, dim=1)
+                eval_target_hm = eval_target_hm_raw
                 pred_heatmap = eval_target_hm.permute(0, 2, 1) 
                 pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
                 
