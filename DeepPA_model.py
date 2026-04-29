@@ -167,6 +167,7 @@ class DeepPA_Wrapper(nn.Module):
         if self.training:
             spa_loss = out[1] if isinstance(out, tuple) else torch.tensor(0.0).to(device)
             sem_list = out[2] if isinstance(out, tuple) else []
+            sem_list = [F.softmax(s, dim=1) for s in raw_sem_list]
             return coords, spa_loss, sem_list
             
         return coords
