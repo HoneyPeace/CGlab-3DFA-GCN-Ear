@@ -1,5 +1,4 @@
 """
-@Author: Yuan Wang (Modified by Researcher)
 @File: augmentations.py
 @Description: 
 7채널(XYZ + Principal Direction + Curvature) 3D Point Cloud 데이터 증강 모듈.
@@ -24,7 +23,8 @@ def normalize_data(batch_data, landmark=None):
     m = m.view(-1, 1, 1)
     xyz = xyz / m
     
-    if C == 7 or C == 6:
+    # 🌟 7채널/3채널 직관적 분기 (C==6 삭제)
+    if C == 7:
         geom = batch_data[:, :, 3:]
         batch_data_out = torch.cat([xyz, geom], dim=-1)
     else:
@@ -55,17 +55,13 @@ class PointcloudScaleAndTranslate(object):
         
         xyz = torch.mul(xyz, scale) + translate
         
+        # 🌟 7채널/3채널 직관적 분기 (C==6 삭제)
         if C == 7:
             v = pc[:, :, 3:6]
             curv = pc[:, :, 6:]
             v = torch.mul(v, scale)
             v = F.normalize(v, p=2, dim=-1)
             pc_out = torch.cat([xyz, v, curv], dim=-1)
-        elif C == 6:
-            v = pc[:, :, 3:]
-            v = torch.mul(v, scale)
-            v = F.normalize(v, p=2, dim=-1)
-            pc_out = torch.cat([xyz, v], dim=-1)
         else:
             pc_out = xyz
         
@@ -74,12 +70,11 @@ class PointcloudScaleAndTranslate(object):
             return pc_out, landmark
         return pc_out
 
-'''3. 🌟 NEW: data Jitter (미세 센서 노이즈 시뮬레이션)'''
+'''3. data Jitter (미세 센서 노이즈 시뮬레이션)'''
 class PointcloudJitter(object):
     """
     [가우시안 지터링 (안전한 노이즈)]
     - 스캐너의 기계적 오차를 시뮬레이션하여 딥러닝 모델의 과적합(Overfitting)을 방지합니다.
-    - std=0.001 수준의 극미세 노이즈이므로 랜드마크의 절대 위치를 훼손하지 않습니다.
     """
     def __init__(self, std=0.001, clip=0.005):
         self.std = std
@@ -94,13 +89,12 @@ class PointcloudJitter(object):
         noise = torch.clamp(noise, -self.clip, self.clip)
         xyz_jittered = xyz + noise
         
-        # 🌟 기하학적 보존: 노이즈는 점의 위치만 미세하게 흔들 뿐, 표면의 주방향과 곡률은 훼손하지 않음
-        if C >= 6:
+        # 🌟 7채널/3채널 직관적 분기 (C>=6 삭제)
+        if C == 7:
             pc_out = torch.cat([xyz_jittered, pc[:, :, 3:]], dim=-1)
         else:
             pc_out = xyz_jittered
             
-        # [주의]: 랜드마크(정답지)는 흔들면 안 됩니다! Ground Truth는 고정되어야 함.
         if landmark is not None:
             return pc_out, landmark
         return pc_out

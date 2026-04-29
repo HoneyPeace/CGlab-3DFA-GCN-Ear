@@ -1,11 +1,11 @@
 '''
-@Author: Yuan Wang (Modified by Researcher & AI Assistant)
+@Author: Yuan Wang (Modified by Researcher Park Pyeong-hwa & AI Assistant)
 @File: eval.py
 @Description: 
-[S2G 전용 평가 스크립트 - 최적화 완결본]
-- DeepPA 259채널 아키텍처 호환 (prior_heatmap 제거)
-- in_channels에 따른 6ch/7ch 데이터 동적 로드 (dataset.py 동기화)
-- My_args.py의 regression_point_num(k=10) 보간법 완벽 적용
+[S2G 전용 평가 스크립트 - Universal Pipeline 완결본]
+- train.py의 UniversalPipeline 구조와 100% 동기화
+- 모드별 출력 자동 분기 및 런타임 에러(Tuple vs Tensor) 방어 로직 완벽 탑재
+- in_channels에 따른 6ch/7ch 데이터 동적 로드 지원
 '''
 
 from __future__ import print_function, division
@@ -26,8 +26,7 @@ from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
 
-# 🌟 아키텍처 및 보간법 임포트
-from DeepLA_model import DeepLA_Wrapper  
+# 🌟 아키텍처 임포트
 from DeepPA_model import DeepPA_Wrapper  
 from PAConv_model import PAConv          
 from loss import get_differentiable_coords 
@@ -53,7 +52,7 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
     plt.close()
 
 # -----------------------------------------------------------------------------
-# 1. 경로 및 데이터 로드 (🌟 채널 수에 따른 Ablation 분기 처리)
+# 1. 경로 및 데이터 로드 
 # -----------------------------------------------------------------------------
 if not getattr(args, 'run_id', None):
     print("Error: --run_id required (e.g., '1').")
@@ -79,7 +78,6 @@ try:
     in_channels = getattr(args, 'in_channels', 7)
     eval_datatype = getattr(args, 'Eval_DataType', 'test')
     
-    # 🌟 [수정 1]: dataset.py와 완벽히 동일한 다중 채널 로드 방식 적용
     if in_channels == 7:
         shape_filename = f"shape_{eval_datatype}.npy"
         print(f"   [INFO] 🎯 7-Channel Mode: Loading {shape_filename}")
@@ -107,39 +105,46 @@ test_dataset = TensorDataset(
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # -----------------------------------------------------------------------------
-# 2. 평가용 통합 Hybrid Pipeline (🌟 259채널 통신 최적화)
+# 2. 평가용 통합 Universal Pipeline 
 # -----------------------------------------------------------------------------
-class HybridPipeline_Eval(nn.Module):
-    def __init__(self, args, landmark_num, mode='frozen'):
+class UniversalPipeline_Eval(nn.Module):
+    def __init__(self, args, landmark_num, mode='single_paconv'):
         super().__init__()
-        self.args = args
         self.mode = mode.lower()
-        self.stage1_paconv = PAConv(args, landmark_num)
+        self.args = args
+        self.landmark_num = landmark_num
         
-        if self.mode in ['frozen', 'e2e']:
+        if self.mode in ['frozen', 'finetune', 'e2e']:
+            self.stage1_paconv = PAConv(args, landmark_num)
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
+        elif self.mode == 'single_paconv':
+            self.model = PAConv(args, landmark_num)
+        elif self.mode == 'single_deeppa':
+            self.model = DeepPA_Wrapper(args, landmark_num)
 
-    def forward(self, x):
-        if self.mode == 'stage1':
-            s1_latent, s1_hm_raw = self.stage1_paconv(x)
-            s1_hm_prob = F.softmax(s1_hm_raw, dim=1)
+    def forward(self, x):   
+        if self.mode == 'single_paconv':
+            multi_scale_hints, hm_raw = self.model(x)
             points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
-            
-            # My_args.py의 regression_point_num 동기화
             k_val = getattr(self.args, 'regression_point_num', 10)
-            pred_coords = get_differentiable_coords(points_xyz, s1_hm_prob, k=k_val)
-            return pred_coords, s1_hm_raw 
+            pred_coords = get_differentiable_coords(points_xyz, F.softmax(hm_raw, dim=1), k=k_val)
+            return pred_coords, [], hm_raw
             
-        elif self.mode in ['frozen', 'e2e']:
-            s1_latent, s1_hm_raw = self.stage1_paconv(x)
-            s1_latent_permuted = s1_latent.permute(0, 2, 1).contiguous()
+        elif self.mode == 'single_deeppa':
+            out = self.model(x)
+            # 🌟 [에러 방어] Eval 모드에서 DeepPA가 단일 텐서만 반환할 때를 완벽 방어
+            pred_coords = out[0] if isinstance(out, tuple) else out
+            sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
+            main_hm = sem_list[-1] if len(sem_list) > 0 else None
+            return pred_coords, sem_list, main_hm
             
-            # 🌟 [수정 2]: DeepPA_Wrapper(259ch)는 prior_heatmap을 받지 않음! 에러 방지
-            out = self.stage2_deeppa(x, prior_latent=s1_latent_permuted)
-            pred_coords = out[0] if isinstance(out, (list, tuple)) else out
-            
-            # 출력 시 평가지표를 위해 s1_hm_raw는 따로 반환
-            return pred_coords, s1_hm_raw
+        elif self.mode in ['frozen', 'finetune', 'e2e']:
+            multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
+            out = self.stage2_deeppa(x, prior_hints=multi_scale_hints)
+            # 🌟 [에러 방어] 
+            pred_coords = out[0] if isinstance(out, tuple) else out
+            sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
+            return pred_coords, sem_list, s1_hm_raw
 
 # -----------------------------------------------------------------------------
 # 3. 평가 수행 코어 함수
@@ -156,8 +161,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 
     me_list, per_landmark_me_list = [], []
     cos_sim_list, iou_list, time_list = [], []
-    per_landmark_cos_sim_list, per_landmark_iou_list = [], []
-
+    
     eval_model.eval()
 
     for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc=f"Eval {eval_name}")):
@@ -165,7 +169,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         real_name = name_sample[idx]
         B, N, C = point.shape
         
-        # [정규화 복원 세팅]
+        # [정규화 세팅]
         point_xyz = point[:, :, :3]
         centroid = torch.mean(point_xyz, axis=1, keepdim=True)
         point_centered = point_xyz - centroid
@@ -182,20 +186,21 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 
             point_input = point_norm.permute(0, 2, 1).contiguous()
             
-            if pipeline_mode in ['stage1', 'frozen', 'e2e']:
-                pred_coords_norm, s1_aux_hm = eval_model(point_input)
-            else:
-                out = eval_model(point_input)
-                pred_coords_norm, s1_aux_hm = (out[0], None) if isinstance(out, tuple) else (out, None)
+            # [출력 구조 통일]
+            pred_coords_norm, sem_list, paconv_or_main_hm = eval_model(point_input)
             
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)  
             
-            # 히트맵 평가 로직
-            if pipeline_mode == 'stage1': eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else None
-            else: eval_target_hm = F.softmax(s1_aux_hm, dim=1) if s1_aux_hm is not None else None
+            # [히트맵 품질 측정 타겟 선정]
+            if pipeline_mode == 'single_paconv':
+                eval_target_hm_raw = paconv_or_main_hm
+            else:
+                eval_target_hm_raw = sem_list[-1] if len(sem_list) > 0 else paconv_or_main_hm
                 
-            if eval_target_hm is not None:
+            # DeepPA가 Eval에서 히트맵을 뱉지 않으면 이 구역은 스킵됩니다 (에러 없음)
+            if eval_target_hm_raw is not None:
+                eval_target_hm = F.softmax(eval_target_hm_raw, dim=1)
                 pred_heatmap = eval_target_hm.permute(0, 2, 1) 
                 pred_vec, gt_vec = pred_heatmap.permute(0, 2, 1), gt_heatmap.permute(0, 2, 1)     
                 
@@ -253,7 +258,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         "지표 (Metric)": [
             "[Metadata]", "Experiment", "Run ID", "Model", 
             "[Metrics]", "Average ME (mm)", "Average Std (mm)", "Avg Time (ms)", 
-            "Cosine Sim (Anchor, %)", "95%ile Cosine (%)", "mIoU (Anchor @0.1, %)", 
+            "Cosine Sim (%), ", "95%ile Cosine (%)", "mIoU (@0.1, %)", 
             "95%ile mIoU (%)", "Success Rate (<10mm, %)", "Success Rate (<5mm, %)"
         ],
         eval_name: [
@@ -315,20 +320,16 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 # 4. 모델 로드 및 평가 분기
 # -----------------------------------------------------------------------------
 model_name_lower = args.model.lower()
-if model_name_lower == 'paconv': pipeline_mode = 'stage1'
-elif model_name_lower in ['deeppa_frozen', 'deeppa_auto']: pipeline_mode = 'frozen'
+if model_name_lower == 'paconv': pipeline_mode = 'single_paconv'
+elif model_name_lower == 'deeppa': pipeline_mode = 'single_deeppa'
+elif model_name_lower == 'deeppa_frozen': pipeline_mode = 'frozen'
+elif model_name_lower == 'deeppa_finetune': pipeline_mode = 'finetune'
 elif model_name_lower == 'deeppa_e2e': pipeline_mode = 'e2e'
-else: pipeline_mode = 'single_custom' 
+else: raise ValueError(f"Unknown model routing: {model_name_lower}")
 
-print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()} (Architecture: 259ch)")
+print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()} (Architecture: Universal)")
 
-if pipeline_mode in ['stage1', 'frozen', 'e2e']:
-    model = HybridPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)
-else:
-    if 'deepla' in model_name_lower:
-        model = DeepLA_Wrapper(args, args.landmark_num).to(device)
-    else:
-        model = DeepPA_Wrapper(args, args.landmark_num).to(device)
+model = UniversalPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)
 
 target_weight_path = os.path.join(run_root, 'models', getattr(args, 'model_epoch', f'{args.model}_last.t7'))
 

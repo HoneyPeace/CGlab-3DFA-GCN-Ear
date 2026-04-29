@@ -11,7 +11,8 @@ def knn(x, k):
     return idx, pairwise_distance                        
 
 def get_graph_feature(x, k=20, idx=None):
-    batch_size, C_in, num_points = x.size()             
+    # C_in 대신 raw_channels로 명칭 변경 (실제 입력되는 7 or 3)
+    batch_size, raw_channels, num_points = x.size()             
     
     xyz = x[:, :3, :]
     if idx is None:
@@ -25,33 +26,41 @@ def get_graph_feature(x, k=20, idx=None):
     x_trans = x.transpose(2, 1).contiguous()            
     
     neighbor = x_trans.view(batch_size * num_points, -1)[idx, :]   
-    neighbor = neighbor.view(batch_size, num_points, k, C_in)  
-    center = x_trans.view(batch_size, num_points, 1, C_in).repeat(1, 1, k, 1)  
+    neighbor = neighbor.view(batch_size, num_points, k, raw_channels)  
+    center = x_trans.view(batch_size, num_points, 1, raw_channels).repeat(1, 1, k, 1)  
 
+    # 공통 10채널 기하 특징: 상대(3) + 이웃(3) + 중심(3) + 거리(1)
     neighbor_xyz = neighbor[..., :3]
     center_xyz = center[..., :3]
     relative_xyz = neighbor_xyz - center_xyz
     dist = torch.linalg.vector_norm(relative_xyz, dim=3, keepdim=True)
 
-    # 🌟 [수정 1] 상대적 기하 정보 복원 (1.7mm 성능의 핵심)
-    # 단순히 중심점의 기하정보(center_geom)만 쓰는 것이 아니라,
-    # 이웃 점과의 주방향(Tangent) 및 곡률 차이(relative_geom)를 사용하여 엣지 특징을 극대화합니다.
-    if C_in == 7:
+    # =====================================================================
+    # 🌟 원시 입력 채널을 목표 엣지 채널(Target Edge Channels)로 직관적 매핑
+    # =====================================================================
+    if raw_channels == 7:
+        target_edge_channels = 14 # 곡률 포함 시 목표는 14채널
+    else:
+        target_edge_channels = 10 # 기본 XYZ 전용 시 목표는 10채널
+
+    # =====================================================================
+    # 🌟 14채널 / 10채널 직관적 분기 처리 (6채널 로직 완전 삭제)
+    # =====================================================================
+    if target_edge_channels == 14:
+        # 곡률 4채널 차이 계산 -> 엣지 피처 14채널 생성
         relative_geom = neighbor[..., 3:] - center[..., 3:]
         feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, relative_geom), dim=3)
-    elif C_in == 6:
-        relative_v = neighbor[..., 3:] - center[..., 3:]
-        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, relative_v), dim=3)
-    else:
+        
+    elif target_edge_channels == 10:
+        # 순수 XYZ 전용 -> 엣지 피처 10채널 생성
         feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist), dim=3)
 
     return feature.permute(0, 3, 1, 2).contiguous()     
 
 def get_scorenet_input(x, idx=None, k=20):
     """
-    🌟 [수정 2] 텐서 차원 검사 (연산량 반토막 튜닝)
-    PAConv_model.py에서 4차원 텐서(이미 연산된 엣지 피처)가 들어오면 
-    중복 연산 없이 그대로 패스합니다.
+    텐서 차원 검사 (연산량 튜닝 방어 코드)
+    PAConv_model.py에서 이미 연산된 엣지 피처(4차원)가 들어오면 중복 연산 없이 패스
     """
     if len(x.shape) == 4:
         return x
