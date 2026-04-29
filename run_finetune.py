@@ -1,11 +1,11 @@
 '''
 @Author: Researcher Park Pyeong-hwa & AI Assistant
-@File: run_frozen.py
+@File: run_finetune.py
 @Description: 
-[Ablation Study 풀-오토메이션 파이프라인 - Frozen 전용]
+[Ablation Study 풀-오토메이션 파이프라인 - Finetune 전용]
 1. Stage 1 (PAConv): 베이스라인 모델 1회 학습 및 평가 (엑셀 결과까지 꼼꼼히 체크)
 2. Bridge: PAConv 가중치를 PAConv_Pretrained 폴더로 자동 복사
-3. Stage 2 (DeepPA_Frozen): Raw(1344ch) vs Compressed(4단계) 연속 학습 및 평가
+3. Stage 2 (DeepPA_Finetune): Raw(1344ch) vs Compressed(4단계) 연속 학습 및 평가
 * 연구원님의 원본 에러 방어 로직 및 subprocess 제어 기능 100% 탑재
 '''
 
@@ -54,7 +54,7 @@ if __name__ == "__main__":
     user_args = sys.argv[1:]
     
     print("===============================================================")
-    print(" 🚀 [ABLATION PIPELINE START] 1 x PAConv + 2 x DeepPA_Frozen")
+    print(" 🚀 [ABLATION PIPELINE START] 1 x PAConv + 2 x DeepPA_Finetune")
     print("===============================================================\n")
 
     # 🌟 인자 필터링 (자동 주입할 변수들이 중복되지 않도록 방어)
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     # =========================================================================
     print(">>> [PHASE 1] Checking existing PAConv Baseline...")
     p1_tag = "Stage1_PAConv"
-    p1_model_name = "paconv_last.t7" # (주의: train.py의 저장 포맷이 paconv_last.t7이라 가정)
+    p1_model_name = "paconv_last.t7" 
     
     p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, args.exp_name, tag=p1_tag, required_model=p1_model_name)
 
@@ -119,14 +119,15 @@ if __name__ == "__main__":
     print(f"  └─ 📦 완료! PAConv 가중치 브릿지 성공. ({p1_model_name})")
 
     # =========================================================================
-    # [PHASE 2] DeepPA_Frozen Ablation 세트 연속 실행 (Raw vs Compressed)
+    # [PHASE 2] DeepPA_Finetune Ablation 세트 연속 실행 (Raw vs Compressed)
     # =========================================================================
     ablation_configs = [
-        {"name": "Frozen + Raw (1344ch 통째로 전달)",  "tag": "Stage2_Frozen_Raw",   "raw": "True"},
-        {"name": "Frozen + Compressed (4단계 압축)",   "tag": "Stage2_Frozen_Comp",  "raw": "False"},
+        {"name": "Finetune + Raw (1344ch 통째로 전달)",  "tag": "Stage2_Finetune_Raw",   "raw": "True"},
+        {"name": "Finetune + Compressed (4단계 압축)",   "tag": "Stage2_Finetune_Comp",  "raw": "False"},
     ]
 
-    p2_model_name = "deeppa_frozen_last.t7" # (주의: train.py의 저장 포맷에 맞춰주세요)
+    # 🌟 Finetune 전용 저장 이름으로 교체
+    p2_model_name = "deeppa_finetune_last.t7" 
 
     for config in ablation_configs:
         print(f"\n===============================================================")
@@ -141,11 +142,12 @@ if __name__ == "__main__":
             print(f"  └─ 📦 [SKIP] 기존 학습 완료! (Run ID: {p2_run_id})")
         else:
             print(f"  └─ 🚀 {config['name']} 학습 시작...")
+            # 🌟 모델 파라미터를 deeppa_finetune으로 변경
             deeppa_train_cmd = [sys.executable, "train.py"] + filtered_args + [
-                "--model", "deeppa_frozen", 
+                "--model", "deeppa_finetune", 
                 "--user_tag", config['tag'],
                 "--use_raw_injection", config['raw'],
-                "--model_epoch", p1_model_name # 사전학습된 PAConv 가중치 주입
+                "--model_epoch", p1_model_name # 사전학습된 PAConv 가중치 주입 후 전체 미세조정 시작
             ]
             try: subprocess.run(deeppa_train_cmd, check=True)
             except subprocess.CalledProcessError as e: sys.exit(1)
@@ -162,7 +164,7 @@ if __name__ == "__main__":
         else:
             print(f"  └─ 🚀 {config['name']} 평가 시작...")
             deeppa_eval_cmd = [sys.executable, "eval.py"] + filtered_args + [
-                "--model", "deeppa_frozen", 
+                "--model", "deeppa_finetune", 
                 "--run_id", str(p2_run_id), 
                 "--model_epoch", p2_model_name,
                 "--user_tag", config['tag'],
@@ -175,5 +177,5 @@ if __name__ == "__main__":
             except subprocess.CalledProcessError as e: sys.exit(1)
 
     print("\n===============================================================")
-    print(" 🎉 [PIPELINE SUCCESS] Frozen 논문 실험 세트가 모두 완료되었습니다!")
+    print(" 🎉 [PIPELINE SUCCESS] Finetune 논문 실험 세트가 모두 완료되었습니다!")
     print("===============================================================")

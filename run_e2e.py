@@ -1,11 +1,10 @@
 '''
 @Author: Researcher Park Pyeong-hwa & AI Assistant
-@File: run_frozen.py
+@File: run_e2e.py
 @Description: 
-[Ablation Study 풀-오토메이션 파이프라인 - Frozen 전용]
-1. Stage 1 (PAConv): 베이스라인 모델 1회 학습 및 평가 (엑셀 결과까지 꼼꼼히 체크)
-2. Bridge: PAConv 가중치를 PAConv_Pretrained 폴더로 자동 복사
-3. Stage 2 (DeepPA_Frozen): Raw(1344ch) vs Compressed(4단계) 연속 학습 및 평가
+[Ablation Study 풀-오토메이션 파이프라인 - E2E 전용]
+* 특징: PAConv 사전 가중치(Pretrained) 없이, 교사와 학생을 맨바닥(Scratch)에서 동시 학습.
+* Stage 1 & Bridge가 생략되며 바로 2가지 절제 연구(Raw vs Comp)를 연속 실행합니다.
 * 연구원님의 원본 에러 방어 로직 및 subprocess 제어 기능 100% 탑재
 '''
 
@@ -13,7 +12,6 @@ import os
 import sys
 import subprocess
 import re
-import shutil
 from My_args import parser
 
 def get_latest_run(output_root, exp_name, tag=None, required_model=None):
@@ -54,7 +52,7 @@ if __name__ == "__main__":
     user_args = sys.argv[1:]
     
     print("===============================================================")
-    print(" 🚀 [ABLATION PIPELINE START] 1 x PAConv + 2 x DeepPA_Frozen")
+    print(" 🚀 [ABLATION PIPELINE START] E2E Mode: 2 x DeepPA_E2E (Scratch)")
     print("===============================================================\n")
 
     # 🌟 인자 필터링 (자동 주입할 변수들이 중복되지 않도록 방어)
@@ -65,72 +63,25 @@ if __name__ == "__main__":
             skip_next = False
             continue
         # 🌟 이번 실험의 핵심 타겟인 use_raw_injection을 필터링합니다.
+        # E2E는 --model_epoch 자체를 받지 않으므로 여기서도 원천 차단합니다.
         if arg in ["--model", "--model_epoch", "--run_id", "--user_tag", "--use_raw_injection"]:
             skip_next = True
             continue
         filtered_args.append(arg)
 
     # =========================================================================
-    # [PHASE 1] PAConv 사전 학습 및 평가 (Stage 1) - 1회만 실행
-    # =========================================================================
-    print(">>> [PHASE 1] Checking existing PAConv Baseline...")
-    p1_tag = "Stage1_PAConv"
-    p1_model_name = "paconv_last.t7" # (주의: train.py의 저장 포맷이 paconv_last.t7이라 가정)
-    
-    p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, args.exp_name, tag=p1_tag, required_model=p1_model_name)
-
-    if p1_dir:
-        print(f"  └─ 📦 [SKIP] 완료된 PAConv 발견! (Run ID: {p1_run_id})")
-    else:
-        print("  └─ 🚀 PAConv 베이스라인 학습 시작...")
-        paconv_train_cmd = [sys.executable, "train.py"] + filtered_args + [
-            "--model", "paconv", "--user_tag", p1_tag
-        ]
-        try: subprocess.run(paconv_train_cmd, check=True)
-        except subprocess.CalledProcessError as e: sys.exit(1)
-        
-        p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, args.exp_name, tag=p1_tag, required_model=p1_model_name)
-
-    # 평가 로직 (엑셀 체크)
-    excel_exists = False
-    if p1_dir:
-        excel_exists = any(f.endswith('.xlsx') and 'Results' in f for f in os.listdir(p1_dir))
-        
-    if not excel_exists:
-        print(f"  └─ 🚀 PAConv 평가(eval.py) 시작...")
-        paconv_eval_cmd = [sys.executable, "eval.py"] + filtered_args + [
-            "--model", "paconv", "--run_id", str(p1_run_id), 
-            "--model_epoch", p1_model_name, "--user_tag", p1_tag
-        ]
-        if p1_train_len and "--train_len" not in filtered_args: paconv_eval_cmd.extend(["--train_len", str(p1_train_len)])
-        if "--Eval_DataType" not in filtered_args: paconv_eval_cmd.extend(["--Eval_DataType", "test"])
-        try: subprocess.run(paconv_eval_cmd, check=True)
-        except subprocess.CalledProcessError as e: sys.exit(1)
-
-    # =========================================================================
-    # [BRIDGE] 가중치 파일 자동 복사
-    # =========================================================================
-    print("\n>>> [BRIDGE] Preparing Pretrained Weights for DeepPA...")
-    source_model_path = os.path.join(p1_dir, "models", p1_model_name)
-    target_model_dir = os.path.join(args.output_root, "PAConv_Pretrained", "models")
-    os.makedirs(target_model_dir, exist_ok=True)
-    target_model_path = os.path.join(target_model_dir, p1_model_name)
-    shutil.copy(source_model_path, target_model_path)
-    print(f"  └─ 📦 완료! PAConv 가중치 브릿지 성공. ({p1_model_name})")
-
-    # =========================================================================
-    # [PHASE 2] DeepPA_Frozen Ablation 세트 연속 실행 (Raw vs Compressed)
+    # [E2E ABLATION] PAConv 선행학습 없이 바로 2종 세트 연속 실행
     # =========================================================================
     ablation_configs = [
-        {"name": "Frozen + Raw (1344ch 통째로 전달)",  "tag": "Stage2_Frozen_Raw",   "raw": "True"},
-        {"name": "Frozen + Compressed (4단계 압축)",   "tag": "Stage2_Frozen_Comp",  "raw": "False"},
+        {"name": "E2E + Raw (1344ch 통째로 전달)",  "tag": "Stage2_E2E_Raw",   "raw": "True"},
+        {"name": "E2E + Compressed (4단계 압축)",   "tag": "Stage2_E2E_Comp",  "raw": "False"},
     ]
 
-    p2_model_name = "deeppa_frozen_last.t7" # (주의: train.py의 저장 포맷에 맞춰주세요)
+    p2_model_name = "deeppa_e2e_last.t7" # E2E 전용 가중치 저장 이름
 
     for config in ablation_configs:
         print(f"\n===============================================================")
-        print(f" 🧪 [PHASE 2 ABLATION] Running Config: {config['name']}")
+        print(f" 🧪 [E2E ABLATION] Running Config: {config['name']}")
         print(f"    - Raw Injection : {config['raw']}")
         print(f"===============================================================")
         
@@ -140,12 +91,12 @@ if __name__ == "__main__":
         if p2_dir:
             print(f"  └─ 📦 [SKIP] 기존 학습 완료! (Run ID: {p2_run_id})")
         else:
-            print(f"  └─ 🚀 {config['name']} 학습 시작...")
+            print(f"  └─ 🚀 {config['name']} 학습 시작 (From Scratch)...")
+            # 🌟 사전 가중치(--model_epoch) 주입 생략!
             deeppa_train_cmd = [sys.executable, "train.py"] + filtered_args + [
-                "--model", "deeppa_frozen", 
+                "--model", "deeppa_e2e", 
                 "--user_tag", config['tag'],
-                "--use_raw_injection", config['raw'],
-                "--model_epoch", p1_model_name # 사전학습된 PAConv 가중치 주입
+                "--use_raw_injection", config['raw']
             ]
             try: subprocess.run(deeppa_train_cmd, check=True)
             except subprocess.CalledProcessError as e: sys.exit(1)
@@ -162,7 +113,7 @@ if __name__ == "__main__":
         else:
             print(f"  └─ 🚀 {config['name']} 평가 시작...")
             deeppa_eval_cmd = [sys.executable, "eval.py"] + filtered_args + [
-                "--model", "deeppa_frozen", 
+                "--model", "deeppa_e2e", 
                 "--run_id", str(p2_run_id), 
                 "--model_epoch", p2_model_name,
                 "--user_tag", config['tag'],
@@ -175,5 +126,5 @@ if __name__ == "__main__":
             except subprocess.CalledProcessError as e: sys.exit(1)
 
     print("\n===============================================================")
-    print(" 🎉 [PIPELINE SUCCESS] Frozen 논문 실험 세트가 모두 완료되었습니다!")
+    print(" 🎉 [PIPELINE SUCCESS] End-to-End 논문 실험 세트가 모두 완료되었습니다!")
     print("===============================================================")
