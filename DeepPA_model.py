@@ -1,3 +1,11 @@
+# @Author: Yuan Wang (Modified by Researcher Park Pyeong-hwa & AI Assistant)
+# @File: DeepPA_model.py
+# @Description: 
+# [S2G 3D 랜드마크 탐지 모델 - DeepPA Wrapper 완결본]
+# - 🌟 latent_injection_type ('none', 'raw', 'compressed') 옵션 완벽 동기화
+# - 리스트 병합 및 통제 로직 단일화
+# ==============================================================================
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -49,13 +57,16 @@ def farthest_point_sample(xyz, npoint):
         return centroids
 
 # ==============================================================================
-# 👑 최상위 마스터 융합 모델 (Raw Injection 대응 완결본)
+# 👑 최상위 마스터 융합 모델
 # ==============================================================================
 class DeepPA_Wrapper(nn.Module):
     def __init__(self, args, landmark_num): 
         super().__init__()
         self.args = args
         self.landmark_num = landmark_num
+        
+        # 🌟 1. 3지 선다형 옵션 도입 (기존 use_raw_injection 삭제)
+        self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
         
         if not hasattr(args, 'use_cp'): args.use_cp = False
             
@@ -71,15 +82,6 @@ class DeepPA_Wrapper(nn.Module):
                 
             if not hasattr(args, 'head_drops'): args.head_drops = [0.1, 0.1, 0.1, 0.1]
             if not hasattr(args, 'cor_std'): args.cor_std = [1.0, 1.0, 1.0, 1.0]
-        
-        # 🌟 [뿌리 수정 1] Raw Injection을 수신할 번역기(Translator) 레이어 준비
-        # 교사가 1344 날것을 던지면, 학생이 알아서 4단계(64,128,256,512)로 깎아냅니다.
-        self.use_raw_injection = getattr(args, 'use_raw_injection', False)
-        if self.use_raw_injection:
-            self.raw_proj_1 = nn.Conv1d(1344, 64, kernel_size=1, bias=False)
-            self.raw_proj_2 = nn.Conv1d(1344, 128, kernel_size=1, bias=False)
-            self.raw_proj_3 = nn.Conv1d(1344, 256, kernel_size=1, bias=False)
-            self.raw_proj_4 = nn.Conv1d(1344, 512, kernel_size=1, bias=False)
                 
         # 🟡 DeepPA 백본
         self.model = DeepPA_semseg(args)
@@ -105,16 +107,31 @@ class DeepPA_Wrapper(nn.Module):
     def forward(self, x, prior_hints=None):
         B, C_in, N_in = x.shape
         device = x.device
-        
-        # 🌟 [뿌리 수정 2] 단일 텐서(1344)가 들어오면 학생이 자체적으로 리스트로 쪼갭니다.
-        # 이렇게 하면 기존 백본(DeepPA_semseg) 코드를 한 줄도 고치지 않아도 완벽 호환됩니다.
-        if self.use_raw_injection and prior_hints is not None and isinstance(prior_hints, torch.Tensor):
-            # prior_hints는 (B, 1344, N) 상태입니다.
-            h1 = self.raw_proj_1(prior_hints)
-            h2 = self.raw_proj_2(prior_hints)
-            h3 = self.raw_proj_3(prior_hints)
-            h4 = self.raw_proj_4(prior_hints)
-            prior_hints = [h1, h2, h3, h4]
+
+        # ==============================================================================
+        # 🌟 2. [Ablation 핵심 로직] 3지 선다 옵션에 따른 전처리
+        # ==============================================================================
+        if self.injection_type == 'none':
+            prior_hints = None
+            
+        if prior_hints is not None and isinstance(prior_hints, list):
+            if self.injection_type == 'raw':
+                # [실험 B] Raw 모드: 만약 이전 모델이나 캐시에서 리스트로 넘어왔다면 1344ch 텐서로 강제 병합(Concat)
+                upsampled_hints = []
+                target_N = prior_hints[0].shape[2] 
+                
+                for hint in prior_hints:
+                    if hint.shape[2] != target_N:
+                        hint_up = F.interpolate(hint, size=target_N, mode='nearest')
+                        upsampled_hints.append(hint_up)
+                    else:
+                        upsampled_hints.append(hint)
+                        
+                prior_hints = torch.cat(upsampled_hints, dim=1) 
+            elif self.injection_type == 'compressed':
+                # [실험 A] Compressed 모드: 리스트 그대로 놔둠. 백본이 알아서 1:1로 빼 씀.
+                pass 
+        # ==============================================================================
 
         # 1. 공간 좌표 분리 및 인덱스 세트 구성
         xyz_coords = x[:, :3, :].permute(0, 2, 1).contiguous() 
@@ -145,7 +162,6 @@ class DeepPA_Wrapper(nn.Module):
         # 2. 백본 통과
         in_features = x.permute(0, 2, 1).contiguous()
         
-        # 🌟 prior_hints는 이제 완벽히 [64, 128, 256, 512] 리스트 형태이므로 무사 통과합니다.
         out = self.model(xyz=xyz_coords, x=in_features, indices=indices, prior_hints=prior_hints)
         
         dense_features = out[0] if isinstance(out, tuple) else out
@@ -166,8 +182,8 @@ class DeepPA_Wrapper(nn.Module):
         
         if self.training:
             spa_loss = out[1] if isinstance(out, tuple) else torch.tensor(0.0).to(device)
-            sem_list = out[2] if isinstance(out, tuple) else []
-            sem_list = [F.softmax(s, dim=1) for s in raw_sem_list]
+            raw_sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
+            sem_list = [F.softmax(s, dim=1) for s in raw_sem_list] if len(raw_sem_list) > 0 else []
             return coords, spa_loss, sem_list
             
         return coords

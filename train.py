@@ -1,13 +1,13 @@
 # @Author: Yuan Wang (Modified by Researcher Park Pyeong-hwa & AI Assistant)
-# @File: train.py
-# @Description: Universal Pipeline + Adaptive Gating + CW-KD (Optimized & Cleaned)
+# @File: train_all_integrated.py
+# @Description: All Pipelines + DeepLA Standalone Ablation + Frozen Aux HDS Ablation + Single DeepPA
 # ==============================================================================
 
 import os
 import time
+import math
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
@@ -20,27 +20,16 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-from loss import AdaptiveWingLoss, CurvatureSurfaceLoss, compute_structural_loss, focal_l1_loss, get_differentiable_coords, S2GGatingManager
+from loss import AdaptiveWingLoss, CurvatureSurfaceLoss, compute_structural_loss, focal_l1_loss, get_differentiable_coords
+from loss import DeepPA_HierarchicalHeatmapLoss 
 from util import main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate, PointcloudJitter
 
 from PAConv_model import PAConv
-from DeepPA_model import DeepPA_Wrapper  # DeepLA와 역할이 동일하므로 DeepPA 단일 래퍼 사용
+from DeepPA_model import DeepPA_Wrapper  
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# ==============================================================================
-# 🌟 채널별 지식 증류 (Channel-wise KD) 함수
-# ==============================================================================
-def channel_wise_kd_loss(hm_student, hm_teacher, T=4.0):
-    """
-    배경 노이즈를 억제하고 랜드마크 샐리언시(Saliency) 영역만 집중적으로 증류합니다.
-    """
-    student_log_prob = F.log_softmax(hm_student / T, dim=-1)
-    teacher_prob = F.softmax(hm_teacher / T, dim=-1)
-    kd_loss = F.kl_div(student_log_prob, teacher_prob, reduction='batchmean') * (T * T)
-    return kd_loss
 
 def weight_init(m):
     if isinstance(m, torch.nn.Linear):
@@ -74,9 +63,6 @@ def process_data_storage(dataset, prefix, paths):
     np.save(os.path.join(paths['npy_backup'], f"landmark_{prefix}.npy"), np.stack(landmark_list))
     np.save(os.path.join(paths['npy_backup'], f"Heat_data_{prefix}.npy"), np.stack(heatmap_list))
 
-# ==============================================================================
-# 🌟 [유니버설 래퍼] 단일 모델 / 하이브리드 모델 통합 관리
-# ==============================================================================
 class UniversalPipeline(nn.Module):
     def __init__(self, args, landmark_num, mode='single_paconv'):
         super().__init__()
@@ -90,29 +76,30 @@ class UniversalPipeline(nn.Module):
                 for param in self.stage1_paconv.parameters(): param.requires_grad = False
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
             
-        elif self.mode == 'single_paconv':
+        elif self.mode in ['single_paconv', 'single_paconv_heat']: 
             self.model = PAConv(args, landmark_num)
-        elif self.mode == 'single_deeppa':
+            
+        # 🌟 [수정됨] deeppa 단독 모드 추가 대응
+        elif self.mode in ['single_deepla', 'single_deeppa']:
             self.model = DeepPA_Wrapper(args, landmark_num)
 
     def forward(self, x):   
-        # [A] 단일 PAConv
-        if self.mode == 'single_paconv':
+        points_norm_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
+        k_val = getattr(self.args, 'regression_point_num', 10)
+
+        if self.mode in ['single_paconv', 'single_paconv_heat']: 
             multi_scale_hints, hm_raw = self.model(x)
-            points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
-            k_val = getattr(self.args, 'regression_point_num', 10)
-            pred_coords = get_differentiable_coords(points_xyz, F.softmax(hm_raw, dim=1), k=k_val)
+            pred_coords = get_differentiable_coords(points_norm_xyz, hm_raw, k=k_val)
             return pred_coords, [], hm_raw
             
-        # [B] 단일 DeepPA (DeepLA와 동일 역할)
-        elif self.mode == 'single_deeppa':
-            out = self.model(x)
+        # 🌟 [수정됨] deeppa 단독 모드 대응 (힌트 없이 자체 피처로만 예측)
+        elif self.mode in ['single_deepla', 'single_deeppa']:
+            out = self.model(x) # prior_hints=None 상태로 들어감
             pred_coords = out[0]
             sem_list = out[2] if len(out) > 2 else [] 
             main_hm = sem_list[-1] if len(sem_list) > 0 else None
             return pred_coords, sem_list, main_hm
             
-        # [C] 하이브리드 모드 (Frozen / Finetune / E2E)
         elif self.mode in ['frozen', 'finetune', 'e2e']:
             if self.mode == 'frozen':
                 self.stage1_paconv.eval()
@@ -128,22 +115,16 @@ class UniversalPipeline(nn.Module):
         
 def train(args):
     accum_steps = args.accumulation_steps
-    MODE = "SPLIT" if not args.test_dataset_name or (args.train_dataset_name == args.test_dataset_name) else "SEPARATE"
+    MODE = "SEPARATE" 
 
-    # [데이터 로드 및 증강]
     if args.need_resample:
         main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.train_dataset_name, args.data_root, partition='train')
         main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.test_dataset_name, args.data_root, partition='test')
 
-    if MODE == "SPLIT":
-        full_dataset = FaceLandmarkData(data_root=args.data_root, partition='trainval', data=args.train_dataset_name, in_channels=args.in_channels)
-        train_size = int(len(full_dataset) * 0.7)
-        test_size = len(full_dataset) - train_size
-        torch.manual_seed(args.dataset_seed)
-        train_dataset, test_dataset = torch.utils.data.random_split(full_dataset, [train_size, test_size])
-    else:
-        train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name, in_channels=args.in_channels)
-        test_dataset = FaceLandmarkData(data_root=args.data_root, partition='test', data=args.test_dataset_name, in_channels=args.in_channels)
+    print(f">> [INFO] Loading Separate Datasets: {args.train_dataset_name} (train) & {args.test_dataset_name} (test)")
+    
+    train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name, in_channels=args.in_channels)
+    test_dataset = FaceLandmarkData(data_root=args.data_root, partition='test', data=args.test_dataset_name, in_channels=args.in_channels)
 
     paths = get_experiment_paths(args, len(train_dataset))
     process_data_storage(train_dataset, "train", paths)
@@ -154,38 +135,43 @@ def train(args):
     
     ScaleAndTranslate = PointcloudScaleAndTranslate()
     ApplyJitter = PointcloudJitter(std=0.001)
-
-    def execute_stage(current_model_name, current_epochs, disable_norm=False, stage_name=""):
+    
+    def execute_stage(current_model_name, current_epochs, stage_name=""):
         model_name_lower = current_model_name.lower()
         
-        # 🌟 모델 라우팅
+        # 🌟 라우팅 맵핑
         if model_name_lower == 'paconv': pipeline_mode = 'single_paconv'
-        elif model_name_lower == 'deeppa': pipeline_mode = 'single_deeppa'
-        elif model_name_lower == 'deeppa_frozen': pipeline_mode = 'frozen'
+        elif model_name_lower == 'paconv_heat': pipeline_mode = 'single_paconv_heat' 
+        elif model_name_lower == 'deeppa_frozen_no_heat': pipeline_mode = 'deeppa_frozen_no_heat' 
         elif model_name_lower == 'deeppa_finetune': pipeline_mode = 'finetune'
         elif model_name_lower == 'deeppa_e2e': pipeline_mode = 'e2e'
+        
+        # 🚀 [추가됨] DeepPA 단독 모델 부활 
+        elif model_name_lower == 'deeppa': pipeline_mode = 'single_deeppa'
+        
+        # 기존 DeepLA 단독 (보존)
+        elif model_name_lower in ['deepla_ori', 'deepla_all', 'deepla_all_tied', 'deepla_progress']: 
+            pipeline_mode = 'single_deepla'
+            
+        # Frozen Ablation 그룹
+        elif model_name_lower in ['deeppa_frozen', 'frozen_aux_drop', 'frozen_aux_fixed', 'frozen_no_aux']:
+            pipeline_mode = 'frozen'
         else: raise ValueError(f"Unknown model routing: {model_name_lower}")
             
         model = UniversalPipeline(args, args.landmark_num, mode=pipeline_mode).to(device)
         model.apply(weight_init)
         
-        # 사전 학습 가중치 로드
         if pipeline_mode in ['frozen', 'finetune']:
             original_paconv_path = os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
             backup_paconv_path = os.path.join(paths['models'], "Backup_Pretrained_PAConv.t7")
             if os.path.exists(original_paconv_path):
                 shutil.copy2(original_paconv_path, backup_paconv_path)
-                print(f"📦 [Pretrained] 사전 학습된 PAConv 로드 완료!")
+                print(f"📦 [Pretrained] Coarse Anchor용 PAConv 로드 완료!")
                 model.stage1_paconv.load_state_dict(torch.load(backup_paconv_path, map_location=device), strict=False)
-            else:
-                print(f"⚠️ [Warning] 사전 학습 모델({original_paconv_path})이 없습니다! STEP 1을 먼저 실행하세요.")
-        
+            
         surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
         hm_criterion = AdaptiveWingLoss().to(device) 
-        
-        # 🌟 게이트 매니저 (구조 개방용 & KD 개방용)
-        gating_manager = S2GGatingManager(tau=getattr(args, 'gating_tau', 0.65), beta=getattr(args, 'gating_beta', 15.0))
-        kd_gating_manager = S2GGatingManager(tau=0.30, beta=15.0) 
+        hierarchical_hm_loss = DeepPA_HierarchicalHeatmapLoss(hm_criterion).to(device)
         
         opt = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
         scheduler = CosineAnnealingLR(opt, T_max=current_epochs) if getattr(args, 'scheduler', 'cos') == 'cos' else StepLR(opt, step_size=40, gamma=0.9)
@@ -194,21 +180,29 @@ def train(args):
         log_records = []
         best_val_mm = float('inf')
         
-        # RLW & 스케일러 설정 (기본값 OFF)
         use_loss_norm = getattr(args, 'use_loss_norm', False)
-        use_rlw = getattr(args, 'use_rlw_for_pred', False)
-        auto_scales = {'coord': 1.0, 'surface': 1.0, 'struct': 1.0}
         target_norm = getattr(args, 'target_norm', 1.0)
+        auto_scales = {'coord': 1.0, 'surface': 1.0, 'struct': 1.0}
         
-        rho = getattr(args, 'yield_factor', 0.8) 
+        rho = getattr(args, 'yield_factor', 0.9) 
         lambda_anchor = getattr(args, 'lambda_anchor', 0.1) 
-        lambda_kd = getattr(args, 'lambda_kd', 1.0) 
+        patience = getattr(args, 'patience', 5)
+
+        weight_PA, weight_DP = 1.0, 0.0   
+        stagnation_counter = 0
+        stagnation_counter_val = 0
+        val_decay = 1.0  # single_deepla 전용
+
+        use_rlw = getattr(args, 'use_rlw_for_pred', False)
+        if use_rlw: print(f"  └─ 🎲 [RLW ON] 기하 구조 로스 랜덤 가중치 활성화!")
 
         for epoch in range(current_epochs):
             model.train() 
             if pipeline_mode == 'frozen': model.stage1_paconv.eval()
-            train_loss_norm = 0.0; t_hm_aux, t_kd, t_crd, t_srf, t_str = 0.0, 0.0, 0.0, 0.0, 0.0; train_mm = 0.0
+            train_loss_norm, train_mm = 0.0, 0.0
+            t_hm_PA, t_hm_main, t_hm_aux, t_crd, t_srf, t_str = 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
             avg_w_geom = 0.0
+            w_hds_current = 0.0 
             opt.zero_grad() 
             
             with tqdm(enumerate(train_loader), total=len(train_loader), desc=f"{stage_name} Ep {epoch+1:03d}", unit="batch", leave=False) as tepoch:
@@ -227,82 +221,107 @@ def train(args):
                     points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                     target_hm = seg.permute(0, 2, 1).contiguous()
                     
-                    # 🌟 Forward Pass
                     pred_coords, sem_list, main_hm_or_paconv_hm = model(point_input)
 
-                    # 🌟 1. 정답지(GT) 기반 히트맵 로스 분리 계산
                     L_sem_PA = torch.tensor(0.0).to(device)
-                    if pipeline_mode in ['single_paconv', 'frozen', 'finetune', 'e2e'] and main_hm_or_paconv_hm is not None:
+                    if pipeline_mode in ['single_paconv', 'single_paconv_heat', 'frozen', 'finetune', 'e2e'] and main_hm_or_paconv_hm is not None:
                         L_sem_PA = hm_criterion(main_hm_or_paconv_hm, target_hm)
                     
-                    safe_sem_list, target_list = [], []
-                    for sp in sem_list:
-                        if sp.shape[1] != target_hm.shape[1]: sp = sp.permute(0, 2, 1).contiguous()
-                        if sp.shape[2] == target_hm.shape[2]: 
-                            safe_sem_list.append(sp); target_list.append(target_hm)
+                    L_main_hm, L_aux_hm = hierarchical_hm_loss(sem_list, target_hm)
+                    L_sem_DP = L_main_hm + L_aux_hm 
 
-                    L_sem_DP = sum([hm_criterion(s, t) for s, t in zip(safe_sem_list, target_list)]) / len(safe_sem_list) if len(safe_sem_list) > 0 else torch.tensor(0.0).to(device)
-
-                    # 🌟 2. 하이브리드 모드 채널별 지식 증류 (CW-KD)
-                    L_KD = torch.tensor(0.0).to(device)
-                    if pipeline_mode in ['frozen', 'finetune', 'e2e'] and main_hm_or_paconv_hm is not None and len(sem_list) > 0:
-                        teacher_hm_detached = main_hm_or_paconv_hm.detach() # 역전파 차단
-                        student_final_hm = sem_list[-1]
-                        
-                        if pipeline_mode == 'e2e':
-                            q_pa_prob = F.softmax(teacher_hm_detached, dim=1)
-                            w_kd = kd_gating_manager.get_geometric_weight(q_pa_prob, target_hm).item()
-                            if w_kd > 0.01:
-                                L_KD = w_kd * lambda_kd * channel_wise_kd_loss(student_final_hm, teacher_hm_detached)
-                        else:
-                            L_KD = lambda_kd * channel_wise_kd_loss(student_final_hm, teacher_hm_detached)
-
-                    # 🌟 3. 구조 로스 (Geom) 자율 게이팅
-                    w_geom = 0.0
-                    eval_hm = sem_list[-1] if len(sem_list) > 0 else main_hm_or_paconv_hm
-                    if eval_hm is not None:
-                        q_prob = F.softmax(eval_hm, dim=1)
-                        w_geom = gating_manager.get_geometric_weight(q_prob, target_hm).item()
-
-                    force_geom_calc = (use_loss_norm and epoch == 0 and i == 0)
-                        
-                    if w_geom > 0.01 or force_geom_calc:
-                        loss_coord = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
-                        loss_surface, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
-                        loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
-                            
-                        if force_geom_calc:
-                            auto_scales['coord'] = target_norm / loss_coord.item() if loss_coord.item() > 0 else 1.0
-                            auto_scales['surface'] = target_norm / loss_surface.item() if loss_surface.item() > 0 else 1.0
-                            auto_scales['struct'] = target_norm / loss_struct.item() if loss_struct.item() > 0 else 1.0
-
-                        if use_rlw:
-                            rand_w = F.softmax(torch.randn(3, device=device), dim=0)
-                            w_crd, w_srf, w_str = rand_w[0], rand_w[1], rand_w[2]
-                        else:
-                            w_crd, w_srf, w_str = 1.0, 1.0, 1.0
-
-                        L_pred = (w_crd * loss_coord * auto_scales['coord']) + (w_srf * loss_surface * auto_scales['surface']) + (w_str * loss_struct * auto_scales['struct'])
-                    else:
-                        loss_coord = loss_surface = loss_struct = torch.tensor(0.0).to(device)
-                        L_pred = torch.tensor(0.0).to(device)
-                        
-                    # 🌟 4. [최종 수학적 융합] 모드별 라우팅
-                    hm_yield_weight = (1.0 - rho * w_geom)  # 기하 로스가 열릴 때 히트맵 텐션 양보
+                    loss_coord = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
+                    loss_surface, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
+                    loss_struct = compute_structural_loss(pred_coords, augmented_landmark)
                     
-                    # [단일 모델 그룹]
-                    if pipeline_mode == 'single_paconv':
-                        total_loss = (hm_yield_weight * L_sem_PA) + (w_geom * L_pred)
-                    elif pipeline_mode == 'single_deeppa':
-                        total_loss = (hm_yield_weight * L_sem_DP) + (w_geom * L_pred)
-                        
-                    # [하이브리드 그룹]
+                    force_geom_calc = (use_loss_norm and epoch == 0 and i == 0)
+                    if force_geom_calc:
+                        auto_scales['coord'] = target_norm / loss_coord.item() if loss_coord.item() > 0 else 1.0
+                        auto_scales['surface'] = target_norm / loss_surface.item() if loss_surface.item() > 0 else 1.0
+                        auto_scales['struct'] = target_norm / loss_struct.item() if loss_struct.item() > 0 else 1.0
+
+                    if use_rlw:
+                        w_crd, w_srf, w_str = torch.rand(3).to(device)
+                        total_w = w_crd + w_srf + w_str
+                        w_crd, w_srf, w_str = 3.0 * w_crd/total_w, 3.0 * w_srf/total_w, 3.0 * w_str/total_w
+                        L_pred = (loss_coord * w_crd * auto_scales['coord']) + (loss_surface * w_srf * auto_scales['surface']) + (loss_struct * w_str * auto_scales['struct'])
+                    else:
+                        L_pred = (loss_coord * auto_scales['coord']) + (loss_surface * auto_scales['surface']) + (loss_struct * auto_scales['struct'])
+                    
+                    w_geom_effective = 1.0 
+
+                    # =================================================================
+                    # 🚀 [단독 추가] Single DeepPA 로스 제어 (Frozen과 완벽히 동일한 비율 적용)
+                    # =================================================================
+                    if pipeline_mode == 'single_deeppa':
+                        warmup_limit = 10
+                        w_geom_effective = min(1.0, (epoch / warmup_limit) ** 2) if warmup_limit > 0 else 1.0
+                        total_loss = ((1.0 - rho * w_geom_effective) * L_sem_DP) + (w_geom_effective * L_pred)
+
+                    # =================================================================
+                    # 🚀 Frozen 환경 맞춤형 로스 및 가중치 제어
+                    # =================================================================
                     elif pipeline_mode == 'frozen':
-                        total_loss = hm_yield_weight * (L_sem_DP + L_KD) + (w_geom * L_pred)
+                        warmup_limit = 10
+                        w_geom_effective = min(1.0, (epoch / warmup_limit) ** 2) if warmup_limit > 0 else 1.0
+                        
+                        if model_name_lower == 'deeppa_frozen':
+                            total_loss = ((1.0 - rho * w_geom_effective) * L_sem_DP) + (w_geom_effective * L_pred)
+                            
+                        elif model_name_lower in ['frozen_aux_drop', 'frozen_aux_fixed', 'frozen_no_aux']:
+                            w_main = 1.0 - (rho * w_geom_effective)
+                            
+                            if model_name_lower == 'frozen_aux_drop':
+                                w_hds_current = max(0.0, 1.0 - (epoch / 15.0))
+                                total_loss = (w_hds_current * L_aux_hm) + (w_main * L_main_hm) + (w_geom_effective * L_pred)
+                                
+                            elif model_name_lower == 'frozen_aux_fixed':
+                                w_hds_current = 0.1
+                                total_loss = (w_hds_current * L_aux_hm) + (w_main * L_main_hm) + (w_geom_effective * L_pred)
+                                
+                            elif model_name_lower == 'frozen_no_aux':
+                                w_hds_current = 0.0
+                                total_loss = (w_main * L_main_hm) + (w_geom_effective * L_pred)
+
+                    # =================================================================
+                    # 🚀 [보존] DeepLA 단독 4종 Ablation
+                    # =================================================================
+                    elif pipeline_mode == 'single_deepla':
+                        w_main = val_decay
+                        w_geom = 1.0 - val_decay 
+                        w_geom_effective = w_geom 
+                        
+                        if model_name_lower == 'deepla_ori':
+                            w_hds_current = val_decay
+                            total_loss = (w_hds_current * L_aux_hm) + (w_geom * L_pred)
+                        elif model_name_lower == 'deepla_all':
+                            w_hds_current = 0.3 * (1.0 / (epoch + 1.0))
+                            total_loss = (w_hds_current * L_aux_hm) + (w_main * L_main_hm) + (w_geom * L_pred)
+                        elif model_name_lower == 'deepla_all_tied':
+                            w_hds_current = 0.3 * val_decay
+                            total_loss = (w_hds_current * L_aux_hm) + (w_main * L_main_hm) + (w_geom * L_pred)
+                        elif model_name_lower == 'deepla_progress':
+                            w_hds_current = 0.0
+                            total_loss = (w_main * L_main_hm) + (w_geom * L_pred)
+
+                    # =================================================================
+                    # [기타 파이프라인]
+                    # =================================================================
+                    elif pipeline_mode == 'single_paconv_heat': 
+                        w_geom_effective = 0.0
+                        total_loss = L_sem_PA
+                    elif pipeline_mode == 'single_paconv':
+                        total_loss = ((1.0 - rho) * L_sem_PA) + (w_geom_effective * L_pred)
+                    elif pipeline_mode == 'deeppa_frozen_no_heat':
+                        total_loss = L_pred 
                     elif pipeline_mode == 'finetune':
-                        total_loss = (lambda_anchor * L_sem_PA) + hm_yield_weight * (L_sem_DP + L_KD) + (w_geom * L_pred)
+                        total_loss = (lambda_anchor * L_sem_PA) + ((1.0 - rho) * L_sem_DP) + (w_geom_effective * L_pred)
                     elif pipeline_mode == 'e2e':
-                        total_loss = hm_yield_weight * (0.5 * L_sem_PA + 0.5 * L_sem_DP + L_KD) + (w_geom * L_pred)
+                        progress = epoch / current_epochs
+                        if weight_DP > weight_PA or ((weight_DP >= 0.9) and (stagnation_counter >= 1)) or (progress >= 0.5):
+                            w_geom_effective = (weight_DP ** 2) 
+                        else: w_geom_effective = 0.0
+                        total_loss = (1.0 - rho * w_geom_effective) * (weight_PA * L_sem_PA + weight_DP * L_sem_DP) + (w_geom_effective * L_pred)
                                         
                     loss = total_loss / accum_steps
                     loss.backward()
@@ -314,19 +333,21 @@ def train(args):
                         mm_error = F.l1_loss(pred_coords, augmented_landmark).item() * avg_m
 
                     train_loss_norm += total_loss.item()
-                    t_hm_aux += L_sem_DP.item() if L_sem_DP.item() > 0 else L_sem_PA.item()
-                    t_kd += L_KD.item()
+                    t_hm_PA += L_sem_PA.item(); t_hm_main += L_main_hm.item(); t_hm_aux += L_aux_hm.item()
                     t_crd += loss_coord.item(); t_srf += loss_surface.item(); t_str += loss_struct.item()
                     train_mm += mm_error
-                    avg_w_geom += w_geom
+                    avg_w_geom += w_geom_effective
                     
-                    tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", w_geom=f"{w_geom:.2f}")
+                    if pipeline_mode == 'single_deepla':
+                        tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", ValDecay=f"{val_decay:.2f}")
+                    else:
+                        tepoch.set_postfix(Loss=f"{total_loss.item():.4f}", PA=f"{weight_PA:.2f}", DP=f"{weight_DP:.2f}")
 
             num_b = len(train_loader)
             t_loss_n, t_mm, avg_w_geom = train_loss_norm / num_b, train_mm / num_b, avg_w_geom / num_b
 
             # ----------------------------------------------------
-            # 🌟 [Validation] 검증 단계 
+            # 🌟 [Validation]
             # ----------------------------------------------------
             model.eval()
             val_mm_total, val_samples = 0.0, 0
@@ -338,59 +359,111 @@ def train(args):
                     avg_m = torch.mean(torch.max(torch.sqrt(torch.sum((point_xyz - torch.mean(point_xyz, axis=1, keepdim=True)) ** 2, axis=2)), axis=1)[0]).item()
                     point_normal, landmark_normal = normalize_data(point, landmark)
                     point_input = point_normal.permute(0, 2, 1).contiguous() 
-                    
                     pred_coords = model(point_input)[0]
-
                     val_mm_total += F.l1_loss(pred_coords, landmark_normal.view_as(pred_coords)).item() * avg_m * B_val
                     val_samples += B_val
             
             v_mm = val_mm_total / val_samples if val_samples > 0 else 0.0                     
 
-            rlw_status = "ON" if use_rlw else "OFF"
-            scale_status = "ON" if use_loss_norm else "OFF"
-            print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.3f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f} ")
-            print(f"  ├─ 🎛️ [Adaptive Gate] 기하 로스 개방률: {avg_w_geom*100:.1f}%  (RLW: {rlw_status} / Scale: {scale_status})")
-            print(f"  └─ 🎯 [Loss] HM: {t_hm_aux/num_b:.4f} | KD: {t_kd/num_b:.4f} | Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}")
+            # ========================================================
+            # 🔄 [가중치 전환 스케줄러]
+            # ========================================================
+            if v_mm < best_val_mm:
+                best_val_mm = v_mm
+                stagnation_counter = 0; stagnation_counter_val = 0 
+            else:
+                stagnation_counter += 1; stagnation_counter_val += 1 
+            
+            if pipeline_mode == 'e2e' and stagnation_counter >= patience:
+                weight_PA = max(0.1, weight_PA - 0.05) 
+                weight_DP = 1.0 - weight_PA
+                stagnation_counter = 0
+                print(f"\n🔄 [E2E 교대] 모델 정체 감지! PAConv({weight_PA:.2f}) -> DeepPA({weight_DP:.2f})\n")
+            
+            if pipeline_mode == 'single_deepla' and stagnation_counter_val >= patience:
+                val_decay = max(0.1, val_decay - 0.05) 
+                stagnation_counter_val = 0
+                print(f"\n🔄 [Val-Driven 교대] 정체 감지! Main_HM({val_decay:.2f}) -> Geom_Loss({1.0 - val_decay:.2f}) 비중 이동\n")
 
+           # ----------------------------------------------------
+            # 📊 모델별 동적 출력 로깅 (디버깅 최적화 분리 출력)
+            # ----------------------------------------------------
+            print(f" [{stage_name} Ep {epoch+1:03d}] Total_L: {t_loss_n:.4f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f} ")
+            
+            if pipeline_mode == 'frozen':
+                if model_name_lower in ['frozen_aux_drop', 'frozen_aux_fixed', 'frozen_no_aux']:
+                    print(f"  ├─ ⚙️ [{stage_name}] Main_W: {1.0 - (rho * avg_w_geom):.2f} | Geom_W: {avg_w_geom:.2f} | Aux_W(HDS): {w_hds_current:.3f}")
+                    print(f"  └─ 🎯 [Active Loss] Main_HM: {t_hm_main/num_b:.4f} | Aux_HM: {t_hm_aux/num_b:.4f} | Geom: {(t_crd+t_srf)/num_b:.4f}")
+                else:
+                    # 🌟 [수정됨] Original Frozen 로스 분리
+                    print(f"  ├─ ⚙️ [Frozen_Ori] DP(Main+Aux)_W: {1.0 - (rho * avg_w_geom):.2f} | Geom_W: {avg_w_geom:.2f}")
+                    print(f"  └─ 🎯 [Loss] Main_HM: {t_hm_main/num_b:.4f} | Aux_HM: {t_hm_rlwhsaux/num_b:.4f} | Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f}")
+
+            elif pipeline_mode == 'single_deepla':
+                if model_name_lower in ['deepla_ori', 'deepla_all', 'deepla_all_tied', 'deepla_progress']:
+                    print(f"  ├─ ⚙️ [{stage_name}] Main_W: {val_decay:.2f} | Geom_W: {w_geom_effective:.2f} | Aux_W(HDS): {w_hds_current:.3f}")
+                    print(f"  └─ 🎯 [Active Loss] Main_HM: {t_hm_main/num_b:.4f} | Aux_HM: {t_hm_aux/num_b:.4f} | Geom: {(t_crd+t_srf)/num_b:.4f}")
+                    
+            elif pipeline_mode == 'single_deeppa':
+                # 🌟 [수정됨] Single DeepPA 로스 분리
+                print(f"  ├─ ⚙️ [Single_DeepPA] DP(Main+Aux)_W: {1.0 - (rho * avg_w_geom):.2f} | Geom_W: {avg_w_geom:.2f}")
+                print(f"  └─ 🎯 [Loss] Main_HM: {t_hm_main/num_b:.4f} | Aux_HM: {t_hm_aux/num_b:.4f} | Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f}")
+            
+            elif pipeline_mode == 'e2e':
+                # 🌟 [수정됨] E2E 로스 분리 (PA_HM 추가)
+                print(f"  ├─ ⚙️ [Val-Driven E2E] PA: {weight_PA:.2f} | DP: {weight_DP:.2f}")
+                print(f"  └─ 🎯 [Loss] PA_HM: {t_hm_PA/num_b:.4f} | Main_HM: {t_hm_main/num_b:.4f} | Aux_HM: {t_hm_aux/num_b:.4f} | Geom: {(t_crd+t_srf)/num_b:.4f}")
+
+            # 엑셀 기록 부분 (여기는 이미 개별로 저장되도록 분리되어 있습니다)
             log_records.append({
                 'Epoch': epoch + 1, 'Total_Loss': t_loss_n, 'Val_mm': v_mm, 'Train_mm': t_mm,
-                'Gate(%)': avg_w_geom*100,
-                'L_sem_HM': t_hm_aux/num_b, 'L_KD': t_kd/num_b, 
-                'L_coord': t_crd/num_b, 'L_surface': t_srf/num_b, 'L_struct': t_str/num_b
+                'W_Main_or_Aux': val_decay, 'W_Geom': avg_w_geom, 'W_Aux_HDS': w_hds_current,
+                'L_main_hm': t_hm_main/num_b, 'L_aux_hm': t_hm_aux/num_b, 
+                'L_coord': t_crd/num_b, 'L_surface': t_srf/num_b
             })
             
             with pd.ExcelWriter(excel_log_path, engine='openpyxl') as writer:
                 pd.DataFrame(log_records).to_excel(writer, sheet_name='Training_Log', index=False)
 
-            if v_mm < best_val_mm:
-                best_val_mm = v_mm
-                torch.save(model.state_dict(), os.path.join(paths['models'], f'{stage_name}_best.t7'))
-
             scheduler.step()
 
-        print(f"\n💾 [Model Save] 학습 완료! 모델을 저장합니다.")
+        print(f"\n💾 [Model Save] {stage_name} 학습 완료! 최종 모델을 저장합니다.")
         torch.save(model.state_dict(), os.path.join(paths['models'], f'{stage_name}_last.t7'))
-        return model 
+        return model
 
     print(f"\n=== [Pipeline Start] ===")
     target_model = args.model.lower()
     
-    # 🌟 라우팅 분기 실행
-    if target_model == 'paconv':
-        print(f">>> [MODE: Single] 🎯 PAConv 단독 학습")
-        execute_stage('paconv', args.epochs, stage_name=f"Single_PAConv")
-    elif target_model == 'deeppa':
-        print(f">>> [MODE: Single] 🎯 DeepPA 단독 학습 (DeepLA와 동일)")
+    # 기본 파이프라인
+    if target_model == 'paconv': execute_stage('paconv', args.epochs, stage_name=f"Single_PAConv")
+    elif target_model == 'paconv_heat': execute_stage('paconv_heat', args.epochs, stage_name=f"Single_PAConv_Heat")
+    elif target_model == 'deeppa_frozen_no_heat': execute_stage('deeppa_frozen_no_heat', args.epochs, stage_name=f"DeepPA_NoHeat")
+    elif target_model == 'deeppa_frozen': execute_stage('deeppa_frozen', args.epochs, stage_name=f"DeepPA_Frozen")
+    elif target_model == 'deeppa_finetune': execute_stage('deeppa_finetune', args.epochs, stage_name=f"DeepPA_Finetune")
+    elif target_model == 'deeppa_e2e': execute_stage('deeppa_e2e', args.epochs, stage_name=f"DeepPA_E2E")
+    
+    # 🚀 [부활] DeepPA 단독 모델
+    elif target_model == 'deeppa': 
+        print(f">>> [MODE: Single_DeepPA] 🎯 DeepPA 단독 학습 (라텐트 피처 없음)")
         execute_stage('deeppa', args.epochs, stage_name=f"Single_DeepPA")
-    elif target_model == 'deeppa_frozen':
-        print(f">>> [MODE: FROZEN] ❄️ PAConv 프리징 + DeepPA 하이브리드 학습")
-        execute_stage('deeppa_frozen', args.epochs, stage_name=f"DeepPA_Frozen")
-    elif target_model == 'deeppa_finetune':
-        print(f">>> [MODE: FINETUNE] 🛠️ PAConv 닻(Anchor) + 전체 하이브리드 학습")
-        execute_stage('deeppa_finetune', args.epochs, stage_name=f"DeepPA_Finetune")
-    elif target_model == 'deeppa_e2e':
-        print(f">>> [MODE: E2E] 🔥 처음부터 전체 하이브리드 모델 동시 학습")
-        execute_stage('deeppa_e2e', args.epochs, stage_name=f"DeepPA_E2E")
+    
+    # Frozen Aux Ablation 3종
+    elif target_model == 'frozen_aux_drop': 
+        print(f">>> [MODE: Frozen_Aux_Drop] 🎯 Frozen 환경 + Aux 선형 감소(15ep) 후 Off")
+        execute_stage('frozen_aux_drop', args.epochs, stage_name=f"Frozen_Aux_Drop")
+    elif target_model == 'frozen_aux_fixed': 
+        print(f">>> [MODE: Frozen_Aux_Fixed] 🎯 Frozen 환경 + Aux 0.1 고정 유지")
+        execute_stage('frozen_aux_fixed', args.epochs, stage_name=f"Frozen_Aux_Fixed")
+    elif target_model == 'frozen_no_aux': 
+        print(f">>> [MODE: Frozen_No_Aux] 🎯 Frozen 환경 + Aux 전면 제거 (대조군)")
+        execute_stage('frozen_no_aux', args.epochs, stage_name=f"Frozen_No_Aux")
+
+    # 기존 DeepLA 단독 4종 
+    elif target_model == 'deepla_ori': execute_stage('deepla_ori', args.epochs, stage_name=f"DeepLA_ORI")
+    elif target_model == 'deepla_all': execute_stage('deepla_all', args.epochs, stage_name=f"DeepLA_ALL")
+    elif target_model == 'deepla_all_tied': execute_stage('deepla_all_tied', args.epochs, stage_name=f"DeepLA_ALL_Tied")
+    elif target_model == 'deepla_progress': execute_stage('deepla_progress', args.epochs, stage_name=f"DeepLA_PROGRESS")
+    
     else:
         print(f"❌ [Error] 지원하지 않는 모델 모드입니다: {target_model}")
         

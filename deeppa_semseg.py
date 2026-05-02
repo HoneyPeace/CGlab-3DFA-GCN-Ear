@@ -1,3 +1,12 @@
+# @Author: Yuan Wang (Modified by Researcher Park Pyeong-hwa & AI Assistant)
+# @File: deeppa_semseg.py
+# @Description: 
+# [S2G 백본 최적화 - 단일 파라미터 체계 완벽 적용]
+# - args.latent_injection_type ('none', 'raw', 'compressed') 옵션 전면 적용
+# - args.use_feature_gating 스위치 완벽 동기화 (게이트 vs 잔차)
+# - 3D 물리적 좌표 기반의 다운샘플링(index_points)을 통한 완벽한 해상도 매칭
+# =====================================================================
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,9 +20,6 @@ sys.path.append(str(Path(__file__).absolute().parent.parent))
 from utils.timm.models.layers import DropPath
 from utils.cutils import knn_edge_maxpooling
 
-# =====================================================================
-# 유틸리티 함수 (기존과 동일)
-# =====================================================================
 def index_points(points, idx):
     device = points.device
     B = points.shape[0]
@@ -31,9 +37,6 @@ def checkpoint(function, *args, **kwargs):
     except ValueError:
         return torch_checkpoint(function, *args, **kwargs)
 
-# =====================================================================
-# 기본 빌딩 블록 (VFR, FFN, ResLFE) - (기존과 동일)
-# =====================================================================
 class VFR(nn.Module):
     def __init__(self, in_dim, out_dim, bn_momentum, init=0.):
         super().__init__()
@@ -53,8 +56,7 @@ class FFN(nn.Module):
         super().__init__()
         hid_dim = round(in_dim * mlp_ratio)
         self.ffn = nn.Sequential(
-            nn.Linear(in_dim, hid_dim),
-            act(),
+            nn.Linear(in_dim, hid_dim), act(),
             nn.Linear(hid_dim, in_dim, bias=False),
             nn.BatchNorm1d(in_dim, momentum=bn_momentum),
         )
@@ -76,8 +78,7 @@ class ResLFE_Block(nn.Module):
         self.dp = [dp > 0. for dp in drop_path]
 
     def drop_path(self, x, i):
-        if not self.dp[i] or not self.training:
-            return x
+        if not self.dp[i] or not self.training: return x
         return self.drop_paths[i](x)
 
     def forward(self, x, pe, knn, pts=None):
@@ -88,9 +89,6 @@ class ResLFE_Block(nn.Module):
             x = x + self.drop_path(self.FFNs[i](x), i)
         return x
 
-# =====================================================================
-# 계층적(Hierarchical) 스테이지 설계 (수정됨)
-# =====================================================================
 class Stage_PA(nn.Module):
     def __init__(self, args, depth=0):
         super().__init__()
@@ -105,29 +103,41 @@ class Stage_PA(nn.Module):
         dim = args.dims[depth]
         
         # =====================================================================
-        # 🌟 [수정 1] Latent Feature 융합을 모든 스테이지(first 포함)에 적용하기 위한 준비
+        # 🌟 1. 옵션 파라미터 단일화 (3지 선다형 문자열 기반)
         # =====================================================================
-        # 128차원의 PAConv 힌트를 현재 스테이지의 채널(dim) 크기로 맞춰주는 투영기
-        self.prior_proj = nn.Sequential(
-            nn.Linear(128, dim, bias=False), 
-            nn.BatchNorm1d(dim, momentum=args.bn_momentum),
-            args.act()
-        )
+        self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
+        self.use_feature_gating = getattr(args, 'use_feature_gating', False) 
         
-        # args에서 use_gate 옵션을 동적으로 읽어옴 (기본값 True)
-        self.use_gate = getattr(args, 'use_gate', True)
-        
-        if self.use_gate:
-            self.gate_mlp = nn.Sequential(
-                nn.Linear(dim * 2, dim, bias=False),
-                nn.BatchNorm1d(dim, momentum=args.bn_momentum),
-                nn.Sigmoid() 
-            )
+        # 🌟 2. 주입 타입별 투영(Projection) 레이어 및 게이트 레이어 동적 생성
+        if self.injection_type != 'none':
+            if self.injection_type == 'raw':
+                # [Raw 모드]: 항상 1344ch 수신 -> 현재 층의 dim으로 압축
+                self.prior_proj = nn.Sequential(
+                    nn.Conv1d(1344, dim, kernel_size=1, bias=False), 
+                    nn.BatchNorm1d(dim, momentum=args.bn_momentum),
+                    args.act()
+                )
+            elif self.injection_type == 'compressed':
+                # [Compressed 모드]: 스테이지별로 PAConv가 던진 채널수를 맞춤
+                in_c_list = [64, 128, 256, 512]
+                in_c = in_c_list[depth] if depth < len(in_c_list) else 512
+                self.prior_proj = nn.Sequential(
+                    nn.Linear(in_c, dim, bias=False), 
+                    nn.BatchNorm1d(dim, momentum=args.bn_momentum),
+                    args.act()
+                )
+            
+            # 게이팅 활성화 시 어텐션 MLP 생성
+            if self.use_feature_gating:
+                self.gate_mlp = nn.Sequential(
+                    nn.Linear(dim * 2, dim, bias=False),
+                    nn.BatchNorm1d(dim, momentum=args.bn_momentum),
+                    nn.Sigmoid() 
+                )
 
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             in_channels = getattr(args, 'in_channels', 3)
-            # 채널 구조 10, 13, 14 지원
             in_feat_dim = 14 if in_channels == 7 else (13 if in_channels == 6 else 10)
             
             self.nbr_embed = nn.Sequential(
@@ -191,20 +201,43 @@ class Stage_PA(nn.Module):
         if not self.last:
             self.sub_stage = Stage_PA(args, depth + 1)
 
-    def forward(self, x, xyz, prev_knn, indices, pts_list, prior_heatmap=None, sub_spa=None, sub_sem=None):
+    def forward(self, x, xyz, prev_knn, indices, pts_list, prior_hints=None, sub_spa=None, sub_sem=None):
         B, N_in, C_in = x.shape
+
+        # =====================================================================
+        # 🌟 3. 데이터 전처리 및 None 처리
+        # =====================================================================
+        current_stage_hint = None
         
+        # 대조군 모드: 힌트를 원천 차단
+        if self.injection_type == 'none':
+            prior_hints = None 
+
+        if prior_hints is not None:
+            if isinstance(prior_hints, list):
+                hint_idx = min(self.depth, len(prior_hints) - 1)
+                current_stage_hint = prior_hints[hint_idx]
+            else:
+                current_stage_hint = prior_hints
+                
+            # 통일성 확보 (B, N, C 포맷)
+            if current_stage_hint.shape[2] > current_stage_hint.shape[1]: 
+                current_stage_hint = current_stage_hint.permute(0, 2, 1).contiguous()
+
+        # =====================================================================
+        # 🌟 4. 물리적 좌표 기반 해상도 다운샘플링 매칭
+        # =====================================================================
         if not self.first:
-            ids = indices.pop()
+            ids = indices.pop() 
             xyz = index_points(xyz, ids)
             x_skip = index_points(self.skip_proj(x.view(-1, C_in)).view(B, N_in, -1), ids)
             x_vfr = index_points(self.vfr(x, prev_knn), ids)
             x = x_skip + x_vfr
             
-            # 해상도 동기화 (다운샘플링된 점의 위치에 맞게 힌트도 축소)
-            if prior_heatmap is not None:
-                prior_heatmap = index_points(prior_heatmap, ids)
-            
+            if current_stage_hint is not None:
+                if current_stage_hint.shape[1] != ids.shape[1]:
+                     current_stage_hint = index_points(current_stage_hint, ids) 
+
         knn = indices.pop()
         B, N, C = x.shape
 
@@ -217,7 +250,6 @@ class Stage_PA(nn.Module):
             dist = torch.norm(nbr_rel, dim=-1, keepdim=True) 
             vector = nbr_rel / (dist + 1e-8)
             
-            # 14채널 기하 정보 묶기
             if C_in == 7: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 14)
             elif C_in == 6: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 13) 
             else: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
@@ -228,20 +260,21 @@ class Stage_PA(nn.Module):
             x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1)
 
         # =====================================================================
-        # 🌟 [수정 2] 모든 스테이지(first 포함)에서 Latent 힌트 주입 및 Gate 제어
+        # 🌟 5. 타입별 피처 주입 & 게이팅 제어
         # =====================================================================
-        if prior_heatmap is not None:
-            # 1. PAConv 힌트(128ch)를 현재 백본 차원(dim)에 맞게 투영
-            p_feat = self.prior_proj(prior_heatmap.view(-1, prior_heatmap.shape[-1])).view(B, N, -1)
+        if current_stage_hint is not None:
+            if self.injection_type == 'raw':
+                p_feat = self.prior_proj(current_stage_hint.permute(0, 2, 1).contiguous())
+                p_feat = p_feat.permute(0, 2, 1).contiguous() 
+            elif self.injection_type == 'compressed':
+                p_feat = self.prior_proj(current_stage_hint)
             
-            if self.use_gate:
-                # 🌟 [게이트 ON]: 시그모이드 어텐션을 통한 비판적 수용
+            if self.use_feature_gating:
                 fused_for_gate = torch.cat([x, p_feat], dim=-1) 
                 gate_matrix = self.gate_mlp(fused_for_gate.view(-1, fused_for_gate.shape[-1])).view(B, N, -1)
-                x = x + (gate_matrix * p_feat)
+                x = x + (gate_matrix * p_feat) 
             else:
-                # 🌟 [게이트 OFF]: 투영된 힌트를 단순 덧셈 (Ablation 용도)
-                x = x + p_feat
+                x = x + p_feat 
 
         pe = pe.view(-1, 3)
         pe_embed_func = lambda t: self.pe_embed(t).view(B, N, self.k, -1).max(dim=2)[0]
@@ -270,7 +303,7 @@ class Stage_PA(nn.Module):
                 sub_sem = [sem]
 
         if not self.last:
-            sub_x, sub_spa, sub_sem = self.sub_stage(x, xyz, knn, indices, pts_list, prior_heatmap, sub_spa, sub_sem)
+            sub_x, sub_spa, sub_sem = self.sub_stage(x, xyz, knn, indices, pts_list, prior_hints, sub_spa, sub_sem)
         else:
             sub_x = None
             self.spa, self.sem = sub_spa, sub_sem
@@ -285,9 +318,6 @@ class Stage_PA(nn.Module):
 
         return sub_x, sub_spa, sub_sem
 
-# =====================================================================
-# 최종 통합 모델 (DeepPA_semseg 백본 진입점) - (기존과 동일)
-# =====================================================================
 class DeepPA_semseg(nn.Module):
     def __init__(self, args):
         super().__init__()
@@ -311,9 +341,9 @@ class DeepPA_semseg(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, xyz, x, indices, prior_heatmap=None, pts_list=None):
+    def forward(self, xyz, x, indices, prior_hints=None, pts_list=None):
         indices = indices[:]
-        x, spa, sem = self.stage(x, xyz, None, indices, pts_list, prior_heatmap)
+        x, spa, sem = self.stage(x, xyz, None, indices, pts_list, prior_hints)
         B, N, C = x.shape
         
         x = self.latent_head(x.view(-1, C)).view(B, N, -1)

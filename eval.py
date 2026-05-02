@@ -1,12 +1,10 @@
-'''
-@Author: Yuan Wang (Modified by Researcher Park Pyeong-hwa & AI Assistant)
-@File: eval.py
-@Description: 
-[S2G 전용 평가 스크립트 - Universal Pipeline 완결본]
-- train.py의 UniversalPipeline 구조와 100% 동기화
-- 모드별 출력 자동 분기 및 런타임 에러(Tuple vs Tensor) 방어 로직 완벽 탑재
-- in_channels에 따른 6ch/7ch 데이터 동적 로드 지원
-'''
+# @Author: Yuan Wang (Modified by Researcher Park Pyeong-hwa & AI Assistant)
+# @File: eval_final.py
+# @Description: 
+# [S2G 전용 평가 스크립트 - Frozen Aux Ablation 지원 추가]
+# - train.py와 100% 동일한 normalize_data 함수 Import 적용 
+# - Frozen 기반 Ablation 3종(Drop, Fixed, No_Aux) 평가 라우팅 완벽 지원
+# ==============================================================================
 
 from __future__ import print_function, division
 
@@ -26,10 +24,11 @@ from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
 
-# 🌟 아키텍처 임포트
+# 🌟 아키텍처 및 학습과 동일한 정규화 로직 임포트
 from DeepPA_model import DeepPA_Wrapper  
 from PAConv_model import PAConv          
 from loss import get_differentiable_coords 
+from augmentations import normalize_data  # [핵심] 학습 코드와 정규화 동기화
 
 matplotlib.use('Agg')
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -105,7 +104,7 @@ test_dataset = TensorDataset(
 test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # -----------------------------------------------------------------------------
-# 2. 평가용 통합 Universal Pipeline 
+# 2. 평가용 통합 Universal Pipeline (train.py와 동기화)
 # -----------------------------------------------------------------------------
 class UniversalPipeline_Eval(nn.Module):
     def __init__(self, args, landmark_num, mode='single_paconv'):
@@ -117,22 +116,21 @@ class UniversalPipeline_Eval(nn.Module):
         if self.mode in ['frozen', 'finetune', 'e2e']:
             self.stage1_paconv = PAConv(args, landmark_num)
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
-        elif self.mode == 'single_paconv':
+        elif self.mode in ['single_paconv', 'single_paconv_heat']:
             self.model = PAConv(args, landmark_num)
-        elif self.mode == 'single_deeppa':
+        elif self.mode in ['single_deeppa', 'single_deepla']:
             self.model = DeepPA_Wrapper(args, landmark_num)
 
     def forward(self, x):   
-        if self.mode == 'single_paconv':
+        if self.mode in ['single_paconv', 'single_paconv_heat']:
             multi_scale_hints, hm_raw = self.model(x)
             points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
             k_val = getattr(self.args, 'regression_point_num', 10)
             pred_coords = get_differentiable_coords(points_xyz, hm_raw, k=k_val)
             return pred_coords, [], hm_raw
             
-        elif self.mode == 'single_deeppa':
+        elif self.mode in ['single_deeppa', 'single_deepla']:
             out = self.model(x)
-            # 🌟 [에러 방어] Eval 모드에서 DeepPA가 단일 텐서만 반환할 때를 완벽 방어
             pred_coords = out[0] if isinstance(out, tuple) else out
             sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
             main_hm = sem_list[-1] if len(sem_list) > 0 else None
@@ -141,7 +139,6 @@ class UniversalPipeline_Eval(nn.Module):
         elif self.mode in ['frozen', 'finetune', 'e2e']:
             multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
             out = self.stage2_deeppa(x, prior_hints=multi_scale_hints)
-            # 🌟 [에러 방어] 
             pred_coords = out[0] if isinstance(out, tuple) else out
             sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
             return pred_coords, sem_list, s1_hm_raw
@@ -169,36 +166,32 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         real_name = name_sample[idx]
         B, N, C = point.shape
         
-        # [정규화 세팅]
+        # 1. 역정규화를 위한 Centroid와 Scale 계산
         point_xyz = point[:, :, :3]
         centroid = torch.mean(point_xyz, axis=1, keepdim=True)
         point_centered = point_xyz - centroid
         m = torch.max(torch.sqrt(torch.sum(point_centered ** 2, axis=2)), axis=1)[0]
         scale = m.view(-1, 1, 1)
-        point_norm_xyz = point_centered / scale 
-        
-        if C >= 6: point_norm = torch.cat([point_norm_xyz, point[:, :, 3:]], dim=-1)
-        else: point_norm = point_norm_xyz
         
         with torch.no_grad():
             if device.type == 'cuda': torch.cuda.synchronize()
             start_time = time.time()  
 
-            point_input = point_norm.permute(0, 2, 1).contiguous()
+            point_normal, _ = normalize_data(point, gt_landmark)
+            point_input = point_normal.permute(0, 2, 1).contiguous()
             
-            # [출력 구조 통일]
+            # 모델 추론
             pred_coords_norm, sem_list, paconv_or_main_hm = eval_model(point_input)
             
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)  
             
-            # [히트맵 품질 측정 타겟 선정]
-            if pipeline_mode == 'single_paconv':
+            # [히트맵 품질 추출]
+            if pipeline_mode in ['single_paconv', 'single_paconv_heat']:
                 eval_target_hm_raw = paconv_or_main_hm
             else:
                 eval_target_hm_raw = sem_list[-1] if len(sem_list) > 0 else paconv_or_main_hm
                 
-            # DeepPA가 Eval에서 히트맵을 뱉지 않으면 이 구역은 스킵됩니다 (에러 없음)
             if eval_target_hm_raw is not None:
                 eval_target_hm = eval_target_hm_raw
                 pred_heatmap = eval_target_hm.permute(0, 2, 1) 
@@ -221,18 +214,21 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                     for lm_idx in range(heatmap_np.shape[1]):
                          save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], current_hm_dir, real_name, lm_idx, f"pred_{eval_name}")
 
-            # 3D 좌표 오차 채점
+            # 4. 정밀 스케일 복원 (Denormalization)
             pred_landmark = (pred_coords_norm * scale) + centroid
+            
             pred_np = pred_landmark.cpu().numpy().squeeze(0)
             gt_np = gt_landmark.cpu().numpy().squeeze(0)
                 
+            # 5. 밀리미터 단위 오차(ME) 추출
             dists = np.linalg.norm(pred_np - gt_np, axis=1)
             me = np.mean(dists)
             me_list.append(me)
             per_landmark_me_list.append(dists)
+            
             np.savetxt(os.path.join(current_asc_dir, f"{eval_name}_pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
 
-    # ------------------ 최종 집계 및 저장 ------------------
+    # ------------------ 지표 산출 및 리포팅 ------------------
     avg_cos_sim = np.mean(cos_sim_list) if cos_sim_list else 0.0
     cos_sim_5_global = np.percentile(cos_sim_list, 5) if cos_sim_list else 0.0
     avg_iou = np.mean(iou_list) if iou_list else 0.0
@@ -320,14 +316,23 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 # 4. 모델 로드 및 평가 분기
 # -----------------------------------------------------------------------------
 model_name_lower = args.model.lower()
+
 if model_name_lower == 'paconv': pipeline_mode = 'single_paconv'
-elif model_name_lower == 'deeppa': pipeline_mode = 'single_deeppa'
-elif model_name_lower == 'deeppa_frozen': pipeline_mode = 'frozen'
+elif model_name_lower == 'paconv_heat': pipeline_mode = 'single_paconv_heat'
+elif model_name_lower == 'deeppa': pipeline_mode = 'single_deeppa' 
 elif model_name_lower == 'deeppa_finetune': pipeline_mode = 'finetune'
 elif model_name_lower == 'deeppa_e2e': pipeline_mode = 'e2e'
+
+# 🌟 [수정됨] deeppa_frozen_no_heat 등 구버전 이름이 들어와도 안전하게 frozen 모드로 매핑
+elif model_name_lower in ['deeppa_frozen', 'deeppa_frozen_no_heat', 'frozen_aux_drop', 'frozen_aux_fixed', 'frozen_no_aux']: 
+    pipeline_mode = 'frozen'
+
+# 기존 DeepLA 단독 모델 (추후 단독 실험 시 문제없도록 보존)
+elif model_name_lower in ['deepla_ori', 'deepla_all', 'deepla_all_tied', 'deepla_progress']:
+    pipeline_mode = 'single_deepla' 
 else: raise ValueError(f"Unknown model routing: {model_name_lower}")
 
-print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()} (Architecture: Universal)")
+print(f">>> [INFO] 🚀 Evaluation Mode: {pipeline_mode.upper()} (Model: {args.model})")
 
 model = UniversalPipeline_Eval(args, args.landmark_num, mode=pipeline_mode).to(device)
 

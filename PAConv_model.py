@@ -9,12 +9,11 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 '''
 ================================================================================
-[PAConv Feature Extractor - Universal Injection판]
-- 모듈명: PAConv (Position Adaptive Convolution) 
-- 🌟 핵심 업데이트: 
-  args.use_raw_injection 옵션에 따라 정보 전달 방식을 우아하게 전환합니다.
-  True: 1344차원 날것 그대로(Raw) DeepPA에 전달 (교수님 권장/순수 지식)
-  False: 기존 4단계(64,128,256,512) 정제 후 전달 (VRAM 절약/기존 방식)
+[PAConv Feature Extractor - Universal Injection 완결본]
+- 🌟 핵심 업데이트: My_args의 latent_injection_type 파라미터와 완벽 동기화
+  1. 'none': 주입 피처 생성 안 함 (속도 최우선)
+  2. 'raw': 1344ch 통짜 피처 전달 (교수님 권장/순수 정보)
+  3. 'compressed': 각 스테이지별 채널(64,128,256,512) 정제 후 전달 (기존 방식)
 ================================================================================
 '''
 class PAConv(nn.Module):
@@ -27,13 +26,11 @@ class PAConv(nn.Module):
         self.hidden = args.hidden
         self.m2, self.m3, self.m4, self.m5 = args.num_matrices
         
-        # 🌟 옵션 스위치 장착
-        self.use_raw_injection = getattr(args, 'use_raw_injection', False)
+        # 🌟 파라미터 단일화 반영
+        self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
         
-        # 🌟 [채널 동기화 수정] 
-        # 입력 채널(in_channels)의 2배가 실제 Conv1이 받아야 할 edge_channels입니다.
         in_channels = getattr(args, 'in_channels', 3)
-        self.edge_channels = in_channels * 2 # 7채널 입력 시 자동으로 14채널 할당
+        self.edge_channels = in_channels * 2 
         
         self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
         self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])
@@ -69,10 +66,9 @@ class PAConv(nn.Module):
         )
         
         # ====================================================================
-        # 🌟 [뿌리 수정 1] Raw Injection이 "아닐 때만" 투영 레이어를 생성합니다.
-        # 이렇게 하면 불필요한 파라미터가 모델에 등재되지 않아 매우 깔끔해집니다.
+        # 🌟 'compressed' 모드일 때만 64~512ch로 압축하는 레이어 생성
         # ====================================================================
-        if not self.use_raw_injection:
+        if self.injection_type == 'compressed':
             def make_refinement_proj(in_c, out_c):
                 return nn.Sequential(
                     nn.Conv1d(in_c, out_c, kernel_size=1, bias=False),
@@ -88,9 +84,6 @@ class PAConv(nn.Module):
             self.proj_st3 = make_refinement_proj(1344, 256)
             self.proj_st4 = make_refinement_proj(1344, 512)
         
-        # ====================================================================
-        # [기존 유지] 자체 학습 및 히트맵 닻(Anchor) 생성을 위한 경로
-        # ====================================================================
         self.conv6 = nn.Sequential(nn.Conv1d(1344, 512, kernel_size=1, bias=False), nn.BatchNorm1d(512))
         self.dp1 = nn.Dropout(p=0.5)
         self.conv7 = nn.Sequential(nn.Conv1d(512, 256, kernel_size=1, bias=False), nn.BatchNorm1d(256))
@@ -138,19 +131,19 @@ class PAConv(nn.Module):
         cls = xc.view(B, 1024, 1).repeat(1, 1, N)
         x_concat = torch.cat((xx, cls), dim=1)
         
-        # 🌟 [뿌리 수정 2] 조건에 따라 넘겨주는 포맷을 분기 처리합니다.
-        if self.use_raw_injection:
-            # 교수님 권장 방식: 날것(1344 채널) 통째로 전달
+        # 🌟 분기 처리
+        if self.injection_type == 'raw':
             prior_hints = x_concat
-        else:
-            # 기존 방식: 4단계 다중 해상도로 깎아서 리스트로 전달
+        elif self.injection_type == 'compressed':
             hint_st1 = self.proj_st1(x_concat) 
             hint_st2 = self.proj_st2(x_concat) 
             hint_st3 = self.proj_st3(x_concat) 
             hint_st4 = self.proj_st4(x_concat) 
             prior_hints = [hint_st1, hint_st2, hint_st3, hint_st4]
+        else: # 'none'
+            prior_hints = None
         
-        # 자체 학습 및 히트맵 예측용 라텐트 압축
+        # 자체 학습 및 히트맵 예측용 (항상 계산)
         x_res = F.relu(self.conv6(x_concat))
         x_res = self.dp1(x_res)
         x_res = F.relu(self.conv7(x_res))   
