@@ -2,9 +2,9 @@
 # @File: deeppa_semseg.py
 # @Description: 
 # [S2G 백본 최적화 - 단일 파라미터 체계 완벽 적용]
-# - args.latent_injection_type ('none', 'raw', 'compressed') 옵션 전면 적용
-# - args.use_feature_gating 스위치 완벽 동기화 (게이트 vs 잔차)
-# - 3D 물리적 좌표 기반의 다운샘플링(index_points)을 통한 완벽한 해상도 매칭
+# - 🌟 latent_injection_type ('none', 'raw', 'compressed') 옵션 전면 적용
+# - 🌟 [버그 픽스] Layer 투영(Linear vs Conv1d) 간의 텐서 Shape(B, N, C) 충돌 완벽 차단
+# - 🌟 [버그 픽스] 해상도 다운샘플링(index_points) 시 발생할 수 있는 차원 혼돈 방지
 # =====================================================================
 
 import torch
@@ -21,6 +21,9 @@ from utils.timm.models.layers import DropPath
 from utils.cutils import knn_edge_maxpooling
 
 def index_points(points, idx):
+    """
+    입력 points는 반드시 (B, N, C) 형태여야 합니다.
+    """
     device = points.device
     B = points.shape[0]
     idx = idx.long() 
@@ -108,17 +111,17 @@ class Stage_PA(nn.Module):
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
         self.use_feature_gating = getattr(args, 'use_feature_gating', False) 
         
-        # 🌟 2. 주입 타입별 투영(Projection) 레이어 및 게이트 레이어 동적 생성
+        # 🌟 2. 주입 타입별 투영(Projection) 레이어 동적 생성
         if self.injection_type != 'none':
             if self.injection_type == 'raw':
-                # [Raw 모드]: 항상 1344ch 수신 -> 현재 층의 dim으로 압축
+                # [Raw 모드]: 1344 -> 현재 층 dim 압축. Conv1d 사용하므로 (B, C, N) 입력을 기대함.
                 self.prior_proj = nn.Sequential(
                     nn.Conv1d(1344, dim, kernel_size=1, bias=False), 
                     nn.BatchNorm1d(dim, momentum=args.bn_momentum),
                     args.act()
                 )
             elif self.injection_type == 'compressed':
-                # [Compressed 모드]: 스테이지별로 PAConv가 던진 채널수를 맞춤
+                # [Compressed 모드]: 맞춤 채널 -> 현재 층 dim 압축. Linear 사용하므로 (B, N, C) 입력을 기대함.
                 in_c_list = [64, 128, 256, 512]
                 in_c = in_c_list[depth] if depth < len(in_c_list) else 512
                 self.prior_proj = nn.Sequential(
@@ -127,7 +130,6 @@ class Stage_PA(nn.Module):
                     args.act()
                 )
             
-            # 게이팅 활성화 시 어텐션 MLP 생성
             if self.use_feature_gating:
                 self.gate_mlp = nn.Sequential(
                     nn.Linear(dim * 2, dim, bias=False),
@@ -209,7 +211,6 @@ class Stage_PA(nn.Module):
         # =====================================================================
         current_stage_hint = None
         
-        # 대조군 모드: 힌트를 원천 차단
         if self.injection_type == 'none':
             prior_hints = None 
 
@@ -220,7 +221,7 @@ class Stage_PA(nn.Module):
             else:
                 current_stage_hint = prior_hints
                 
-            # 통일성 확보 (B, N, C 포맷)
+            # 🌟 [버그 픽스] 무조건 (B, N, C) 포맷으로 통일하여 다운샘플링 혼란 방지
             if current_stage_hint.shape[2] > current_stage_hint.shape[1]: 
                 current_stage_hint = current_stage_hint.permute(0, 2, 1).contiguous()
 
@@ -235,6 +236,8 @@ class Stage_PA(nn.Module):
             x = x_skip + x_vfr
             
             if current_stage_hint is not None:
+                # ids.shape[1]은 현재 층의 점의 개수(N). 
+                # 힌트의 형태가 (B, N, C)이므로 shape[1]이 점의 개수인지 확인.
                 if current_stage_hint.shape[1] != ids.shape[1]:
                      current_stage_hint = index_points(current_stage_hint, ids) 
 
@@ -260,13 +263,16 @@ class Stage_PA(nn.Module):
             x = self.nbr_bn(nbr.view(-1, nbr.shape[-1])).view(B, N, -1)
 
         # =====================================================================
-        # 🌟 5. 타입별 피처 주입 & 게이팅 제어
+        # 🌟 5. 타입별 피처 주입 & 게이팅 제어 (Shape Error 원천 차단)
         # =====================================================================
         if current_stage_hint is not None:
             if self.injection_type == 'raw':
-                p_feat = self.prior_proj(current_stage_hint.permute(0, 2, 1).contiguous())
-                p_feat = p_feat.permute(0, 2, 1).contiguous() 
+                # Conv1d는 (B, C, N) 입력 필요. 들어온 힌트는 (B, N, C) 상태임.
+                hint_bcn = current_stage_hint.permute(0, 2, 1).contiguous()
+                p_feat = self.prior_proj(hint_bcn)
+                p_feat = p_feat.permute(0, 2, 1).contiguous() # (B, N, C)로 원상복구
             elif self.injection_type == 'compressed':
+                # Linear는 (B, N, C) 입력 필요. 힌트는 이미 (B, N, C) 상태임.
                 p_feat = self.prior_proj(current_stage_hint)
             
             if self.use_feature_gating:

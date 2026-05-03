@@ -1,21 +1,19 @@
+# @Author: Yuan Wang (Modified by Researcher Park Pyeong-hwa & AI Assistant)
+# @File: PAConv_model.py
+# @Description: 
+# [PAConv Feature Extractor - Universal Injection 완결본]
+# - 🌟 핵심 업데이트: My_args의 latent_injection_type 파라미터와 완벽 동기화
+# - 🌟 [안정성] 'none' 모드 시 None 대신 빈 리스트([]) 반환하여 크래시 방지
+# ================================================================================
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from My_args import *
 from PAConv.util.PAConv_util import knn, get_graph_feature, get_scorenet_input, feat_trans_dgcnn, ScoreNet, Attention_Layer
 from PAConv.cuda_lib.functional import assign_score_withk as assemble_dgcnn
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-'''
-================================================================================
-[PAConv Feature Extractor - Universal Injection 완결본]
-- 🌟 핵심 업데이트: My_args의 latent_injection_type 파라미터와 완벽 동기화
-  1. 'none': 주입 피처 생성 안 함 (속도 최우선)
-  2. 'raw': 1344ch 통짜 피처 전달 (교수님 권장/순수 정보)
-  3. 'compressed': 각 스테이지별 채널(64,128,256,512) 정제 후 전달 (기존 방식)
-================================================================================
-'''
 class PAConv(nn.Module):
     def __init__(self, args, landmark_num):
         super(PAConv, self).__init__()
@@ -65,9 +63,7 @@ class PAConv(nn.Module):
             nn.BatchNorm1d(1024)
         )
         
-        # ====================================================================
-        # 🌟 'compressed' 모드일 때만 64~512ch로 압축하는 레이어 생성
-        # ====================================================================
+        # 'compressed' 모드 전용 압축 헤드
         if self.injection_type == 'compressed':
             def make_refinement_proj(in_c, out_c):
                 return nn.Sequential(
@@ -93,45 +89,37 @@ class PAConv(nn.Module):
 
     def forward(self, xyz, feature=None):
         B, C, N = xyz.shape
-
         xyz_coords = xyz[:, :3, :].contiguous() 
         idx, _ = knn(xyz_coords, self.k)
 
         x_edge_feat = get_graph_feature(xyz, k=self.k, idx=idx)
         scorenet_input = get_scorenet_input(x_edge_feat, idx=idx, k=self.k)
 
-        x1 = self.conv1(x_edge_feat)
-        x1 = x1.max(dim=-1, keepdim=False)[0]
+        x1 = self.conv1(x_edge_feat).max(dim=-1, keepdim=False)[0]
 
         x2, center2 = feat_trans_dgcnn(point_input=x1, kernel=self.matrice2, m=self.m2)
         score2 = self.scorenet2(scorenet_input, calc_scores=self.calc_scores, bias=0)
-        x_asm = assemble_dgcnn(score=score2, point_input=x2, center_input=center2, knn_idx=idx, aggregate='sum')
-        x2 = F.relu(self.bn2(x_asm))
+        x2 = F.relu(self.bn2(assemble_dgcnn(score=score2, point_input=x2, center_input=center2, knn_idx=idx, aggregate='sum')))
 
         x3, center3 = feat_trans_dgcnn(point_input=x2, kernel=self.matrice3, m=self.m3)
         score3 = self.scorenet3(scorenet_input, calc_scores=self.calc_scores, bias=0)
-        x_asm = assemble_dgcnn(score=score3, point_input=x3, center_input=center3, knn_idx=idx, aggregate='sum')
-        x3 = F.relu(self.bn3(x_asm))
+        x3 = F.relu(self.bn3(assemble_dgcnn(score=score3, point_input=x3, center_input=center3, knn_idx=idx, aggregate='sum')))
 
         x4, center4 = feat_trans_dgcnn(point_input=x3, kernel=self.matrice4, m=self.m4)
         score4 = self.scorenet4(scorenet_input, calc_scores=self.calc_scores, bias=0)
-        x_asm = assemble_dgcnn(score=score4, point_input=x4, center_input=center4, knn_idx=idx, aggregate='sum')
-        x4 = F.relu(self.bn4(x_asm))
+        x4 = F.relu(self.bn4(assemble_dgcnn(score=score4, point_input=x4, center_input=center4, knn_idx=idx, aggregate='sum')))
 
         x5, center5 = feat_trans_dgcnn(point_input=x4, kernel=self.matrice5, m=self.m5)
         score5 = self.scorenet5(scorenet_input, calc_scores=self.calc_scores, bias=0)
-        x_asm = assemble_dgcnn(score=score5, point_input=x5, center_input=center5, knn_idx=idx, aggregate='sum')
-        x5 = F.relu(self.bn5(x_asm))
+        x5 = F.relu(self.bn5(assemble_dgcnn(score=score5, point_input=x5, center_input=center5, knn_idx=idx, aggregate='sum')))
 
         xx = torch.cat((x1, x2, x3, x4, x5), dim=1)
-
         xc = F.relu(self.convt(xx))
         xc = F.adaptive_max_pool1d(xc, 1).view(B, -1)
-        
         cls = xc.view(B, 1024, 1).repeat(1, 1, N)
         x_concat = torch.cat((xx, cls), dim=1)
         
-        # 🌟 분기 처리
+        # 🌟 분기 처리 (Return 값 안정화)
         if self.injection_type == 'raw':
             prior_hints = x_concat
         elif self.injection_type == 'compressed':
@@ -141,15 +129,14 @@ class PAConv(nn.Module):
             hint_st4 = self.proj_st4(x_concat) 
             prior_hints = [hint_st1, hint_st2, hint_st3, hint_st4]
         else: # 'none'
-            prior_hints = None
+            prior_hints = [] # <--- 💥 None 대신 빈 리스트 반환하여 에러 방지
         
-        # 자체 학습 및 히트맵 예측용 (항상 계산)
+        # 히트맵 예측
         x_res = F.relu(self.conv6(x_concat))
         x_res = self.dp1(x_res)
         x_res = F.relu(self.conv7(x_res))   
         x_res = self.dp2(x_res)
         latent_hint = F.relu(self.conv8(x_res))
-        heatmap_anchor = self.conv9(latent_hint)
-        heatmap_anchor = F.softmax(heatmap_anchor, dim=1)
+        heatmap_anchor = F.softmax(self.conv9(latent_hint), dim=1)
         
         return prior_hints, heatmap_anchor

@@ -3,6 +3,7 @@
 # @Description: 
 # [S2G 3D 랜드마크 탐지 모델 - SOTA 최적화 통제 센터]
 # - 🌟 파라미터 통합: latent_injection_type (none / raw / compressed) 도입
+# - 🌟 모델 리스트 및 스케줄러 파라미터(HDS 0.1 고정 등) 컨트롤러 동기화
 # ==============================================================================
 
 import argparse
@@ -19,10 +20,13 @@ parser = argparse.ArgumentParser(description='S2G 3D Landmark Detection SOTA Con
 
 # [1] 기본 설정 & I/O 
 parser.add_argument('--exp_name', type=str, default='S2G_Final_Refinement', metavar='N')
+
+# 🌟 [수정됨] 컨트롤러 로직과 100% 일치하도록 모델 리스트 업데이트 (deepla_decay 포함)
 parser.add_argument('--model', type=str, default='deeppa_frozen', 
                     choices=[
                         'paconv', 'paconv_heat', 'deeppa_frozen', 'deeppa_frozen_no_heat', 'deeppa_finetune', 'deeppa_e2e',
-                        'deepla_ori', 'deepla_all', 'deepla_all_tied', 'deepla_progress',
+                        'single_deeppa', # 🌟 명시적 추가
+                        'deepla_ori', 'deepla_decay', 'deepla_all_tied', 'deepla_progress', # 🌟 deepla_decay 반영
                         'frozen_aux_drop', 'frozen_aux_fixed', 'frozen_no_aux' 
                     ])
 parser.add_argument('--dataset', type=str, default='Ear296_Korean')
@@ -65,7 +69,7 @@ parser.add_argument('--bn_momentum', type=float, default=0.1)
 parser.add_argument('--act', default=nn.GELU)
 
 # =============================================================================
-# 🌟 [직관성 극대화] 피처 주입 3지 선다형 옵션 도입 🌟
+# 🌟 [직관성 극대화] 피처 주입 3지 선다형 옵션 도입
 # =============================================================================
 parser.add_argument('--latent_injection_type', type=str, default='raw', 
                     choices=['none', 'raw', 'compressed'], 
@@ -84,7 +88,11 @@ parser.add_argument('--use_jitter', type=str2bool, default=False)
 parser.add_argument('--use_loss_norm', type=str2bool, default=False) 
 parser.add_argument('--use_rlw_for_pred', type=str2bool, default=False) 
 parser.add_argument('--target_norm', type=float, default=1.0)
-parser.add_argument('--patience', type=int, default=5)
+
+# 🌟 [수정됨] 컨트롤러 연동 파라미터 (HDS 0.1 고정 반영)
+parser.add_argument('--patience', type=int, default=5, help='에폭 정체 대기 한도')
+parser.add_argument('--val_decay_step', type=float, default=0.05, help='정체 시 깎이는 메인 가중치 비율')
+parser.add_argument('--hds_buffer', type=float, default=0.1, help='Aux(HDS) 기본 고정 가중치 (0.3에서 0.1로 하향)')
 
 parser.add_argument('--regression_point_num', type=int, default=10)
 parser.add_argument('--plane_knn', type=int, default=5)
@@ -92,9 +100,6 @@ parser.add_argument('--curv_knn', type=int, default=30)
 parser.add_argument('--curv_alpha', type=float, default=10.0)
 parser.add_argument('--dir_beta', type=float, default=1.0)
 parser.add_argument('--focal_gamma', type=float, default=1.0)
-
-parser.add_argument('--val_decay_step', type=float, default=0.05)
-parser.add_argument('--hds_buffer', type=float, default=0.3)
 
 # [6] 데이터 전처리 및 PAConv 내부 파라미터 
 parser.add_argument('--need_resample', type=str2bool, default=True) 
@@ -111,41 +116,18 @@ parser.add_argument('--hidden', type=list, default=[[32], [32], [32], [32]])
 parser.add_argument('--num_matrices', type=list, default=[8, 8, 8, 8])
 
 # =============================================================================
-# [DEPRECATED] 미사용 및 구버전 잔재 (사용하지 않음)
+# [DEPRECATED] 미사용 및 구버전 잔재 (사용하지 않음) - 정리 완료
 # =============================================================================
 '''
-parser.add_argument('--model_path', type=str, default='')
-parser.add_argument('--train_dataset_name', type=str, default='Ear296_Korean')
-parser.add_argument('--test_dataset_name', type=str, default='')
-parser.add_argument('--eval', type=str2bool, default=False)
-parser.add_argument('--test_batch_size', type=int, default=1)
-parser.add_argument('--accumulation_steps', type=int, default=1)
+# 폐기된 옵션: 259채널 슬림화 및 다이렉트 회귀 도입으로 인한 미사용 파라미터
+parser.add_argument('--use_direct_regression', type=str2bool, default=True)
+parser.add_argument('--use_spatial_attention', type=str2bool, default=False)
+parser.add_argument('--up_dims', type=list, default=[128, 128, 256, 256])
+parser.add_argument('--use_split_dataset', type=str2bool, default=True)
+parser.add_argument('--max_threshold', default=10, type=float)
 parser.add_argument('--loss', type=str, default='adaptive_wing')
 parser.add_argument('--use_sgd', type=str2bool, default=False)
 parser.add_argument('--momentum', type=float, default=0.9)
-parser.add_argument('--weight_decay', type=float, default=0)
-parser.add_argument('--max_threshold', default=10, type=float)
-parser.add_argument('--sample_way', type=str, default='FPS')
-parser.add_argument('--need_resample', type=str2bool, default=True)
-parser.add_argument('--dataset_seed', type=int, default=1)
-parser.add_argument('--sigma', type=float, default=10.0)
-parser.add_argument('--k', type=int, default=30)
 parser.add_argument('--emb_dims', type=int, default=1024)
-parser.add_argument('--calc_scores', type=str, default='softmax')
-parser.add_argument('--hidden', type=list, default=[[32], [32], [32], [32]])
-parser.add_argument('--num_matrices', type=list, default=[8, 8, 8, 8])
-parser.add_argument('--Eval_DataType', type=str, default="test")
-parser.add_argument('--model_epoch', type=str, default="Frozen_Hybrid_last.t7")
-parser.add_argument('--run_id', type=str, default='')
-parser.add_argument('--use_split_dataset', type=str2bool, default=True)
-parser.add_argument('--user_tag', type=str, default='')
-parser.add_argument('--train_len', type=int, default=209)
-parser.add_argument('--use_loss_norm', type=str2bool, default=False)
-parser.add_argument('--target_norm', type=float, default=1.0)
-parser.add_argument('--up_dims', type=list, default=[128, 128, 256, 256])
-
-# 259채널 슬림화 및 다이렉트 회귀 도입으로 폐기된 옵션
-parser.add_argument('--use_direct_regression', type=str2bool, default=True)
-parser.add_argument('--use_spatial_attention', type=str2bool, default=False)
-parser.add_argument('--use_rlw_for_pred', type=str2bool, default=False)
+parser.add_argument('--model_path', type=str, default='')
 '''

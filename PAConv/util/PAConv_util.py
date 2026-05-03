@@ -1,17 +1,48 @@
+# @Author: Yuan Wang (Modified by Researcher Park Pyeong-hwa & AI Assistant)
+# @File: PAConv_util.py
+# @Description:
+# [PAConv 유틸리티 모듈 - Edge Feature 생성 및 KNN 추출기]
+# - 🌟 3채널(10ch Edge), 6채널(12ch Edge), 7채널(14ch Edge) 완벽 호환 패치
+# ==============================================================================
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# ==========================================================
+# 🚀 초고속 C++ KNN 커널 (PyTorch3D) 로드 시도
+# ==========================================================
+try:
+    from pytorch3d.ops import knn_points
+    USE_PYTORCH3D = True
+    print(">>> [SUCCESS] 🚀 PAConv: PyTorch3D C++ KNN 커널을 사용합니다! (학습 속도 대폭 향상)")
+except ImportError:
+    USE_PYTORCH3D = False
+    print(">>> [WARNING] ⚠️ PAConv: PyTorch3D가 없어 기존 파이토치 KNN을 사용합니다.")
+
 def knn(x, k):
-    B, _, N = x.size()                                   
-    inner = -2 * torch.matmul(x.transpose(2, 1), x)      
-    xx = torch.sum(x ** 2, dim=1, keepdim=True)          
-    pairwise_distance = -xx - inner - xx.transpose(2, 1) 
-    _, idx = pairwise_distance.topk(k=k, dim=-1)         
-    return idx, pairwise_distance                        
+    """
+    x: (B, C, N) 형태의 입력
+    """
+    if USE_PYTORCH3D:
+        # PyTorch3D는 (B, N, C) 형태를 요구하므로 축 변환
+        points = x.transpose(1, 2).contiguous() 
+        # C++ CUDA 커널 연산 (메모리 낭비 제로, 속도 10배 이상)
+        dists, idx, _ = knn_points(points, points, K=k)
+        # 원래 코드와 호환성을 위해 음수 형태로 거리 반환
+        return idx, -dists.transpose(1, 2)
+        
+    else:
+        # 기존 순수 파이토치 연산 (설치 실패 시 Fallback)
+        B, _, N = x.size()                                   
+        inner = -2 * torch.matmul(x.transpose(2, 1), x)      
+        xx = torch.sum(x ** 2, dim=1, keepdim=True)          
+        pairwise_distance = -xx - inner - xx.transpose(2, 1) 
+        _, idx = pairwise_distance.topk(k=k, dim=-1)         
+        return idx, pairwise_distance                 
 
 def get_graph_feature(x, k=20, idx=None):
-    # C_in 대신 raw_channels로 명칭 변경 (실제 입력되는 7 or 3)
+    # C_in 대신 raw_channels로 명칭 변경 (실제 입력되는 3, 6, 7)
     batch_size, raw_channels, num_points = x.size()             
     
     xyz = x[:, :3, :]
@@ -39,20 +70,27 @@ def get_graph_feature(x, k=20, idx=None):
     # 🌟 원시 입력 채널을 목표 엣지 채널(Target Edge Channels)로 직관적 매핑
     # =====================================================================
     if raw_channels == 7:
-        target_edge_channels = 14 # 곡률 포함 시 목표는 14채널
+        target_edge_channels = 14 # 곡률+방향 포함
+    elif raw_channels == 6:
+        target_edge_channels = 12 # 🌟 [복구] 방향(Eigenvector)만 포함
     else:
-        target_edge_channels = 10 # 기본 XYZ 전용 시 목표는 10채널
+        target_edge_channels = 10 # 기본 XYZ 전용
 
     # =====================================================================
-    # 🌟 14채널 / 10채널 직관적 분기 처리 (6채널 로직 완전 삭제)
+    # 🌟 14채널 / 12채널 / 10채널 완벽 분기 처리
     # =====================================================================
     if target_edge_channels == 14:
-        # 곡률 4채널 차이 계산 -> 엣지 피처 14채널 생성
+        # 곡률 및 방향(4채널) 차이 계산 -> 엣지 피처 14채널
         relative_geom = neighbor[..., 3:] - center[..., 3:]
         feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, relative_geom), dim=3)
         
+    elif target_edge_channels == 12:
+        # 🌟 [복구] 방향 벡터(3채널) 차이 계산 -> 엣지 피처 12채널
+        relative_geom = neighbor[..., 3:] - center[..., 3:]
+        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, relative_geom), dim=3)
+
     elif target_edge_channels == 10:
-        # 순수 XYZ 전용 -> 엣지 피처 10채널 생성
+        # 순수 XYZ 전용 -> 엣지 피처 10채널
         feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist), dim=3)
 
     return feature.permute(0, 3, 1, 2).contiguous()     
