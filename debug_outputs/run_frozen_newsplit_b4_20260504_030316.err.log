@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "run_frozen.py", line 77, in <module>
+    print(f" \U0001f680 [AUX ABLATION PIPELINE] Injection Mode: {current_inj_type.upper()}")
+UnicodeEncodeError: 'cp949' codec can't encode character '\U0001f680' in position 1: illegal multibyte sequence

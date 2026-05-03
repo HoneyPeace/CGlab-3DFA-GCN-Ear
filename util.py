@@ -103,6 +103,8 @@ def load_shape_data(dataset, data_root, partition=None):
     target_folder_name = None
     if partition == 'train': target_folder_name = 'train' 
     elif partition == 'test': target_folder_name = 'test'
+    elif partition in ['val', 'validation', 'valiation']:
+        target_folder_name = dataset if dataset else partition
         
     if target_folder_name:
         target_path = os.path.join(data_root, target_folder_name)
@@ -146,6 +148,8 @@ def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
     target_folder_name = None
     if partition == 'train': target_folder_name = 'train'
     elif partition == 'test': target_folder_name = 'test'
+    elif partition in ['val', 'validation', 'valiation']:
+        target_folder_name = dataset if dataset else partition
 
     if target_folder_name:
         target_path = os.path.join(data_root, target_folder_name)
@@ -414,6 +418,7 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
     suffix = "sample" 
     if partition == 'train': suffix = "train"
     elif partition == 'test': suffix = "test"
+    elif partition in ['val', 'validation', 'valiation']: suffix = partition
 
     print(f'\n--- Processing: {dataset} [Partition: {partition if partition else "ALL"}] ---')
     

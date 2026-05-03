@@ -1,0 +1,10 @@
+===============================================================
+ 🚀 [AUX ABLATION PIPELINE] Injection Mode: RAW
+    1 x PAConv + 3 x DeepPA (Aux Fixed / Drop / No_Aux)
+===============================================================
+
+>>> [PHASE 1] Checking existing PAConv Baseline (using train.py)...
+  └─ 🚀 PAConv 베이스라인 학습 시작...
+>>> [SUCCESS] 🚀 util.py에서 C++ 초고속 FPS 커널을 성공적으로 로드했습니다!
+>>> [WARNING] ⚠️ util.py: PyTorch3D가 없습니다. 메모리 최적화(Chunk) 모드로 안전하게 굽습니다.
+>>> [WARNING] ⚠️ PAConv: PyTorch3D가 없어 기존 파이토치 KNN을 사용합니다.

@@ -24,7 +24,7 @@ parser.add_argument('--exp_name', type=str, default='S2G_Final_Refinement', meta
 # 🌟 [수정됨] 컨트롤러 로직과 100% 일치하도록 모델 리스트 업데이트 (deepla_decay 포함)
 parser.add_argument('--model', type=str, default='deeppa_frozen', 
                     choices=[
-                        'paconv', 'paconv_heat', 'deeppa_frozen', 'deeppa_frozen_no_heat', 'deeppa_finetune', 'deeppa_e2e',
+                        'paconv', 'paconv_heat', 'paconv_struct', 'deeppa_frozen', 'deeppa_frozen_no_heat', 'deeppa_finetune', 'deeppa_e2e',
                         'single_deeppa', # 🌟 명시적 추가
                         'deepla_ori', 'deepla_decay', 'deepla_all_tied', 'deepla_progress', # 🌟 deepla_decay 반영
                         'frozen_aux_drop', 'frozen_aux_fixed', 'frozen_no_aux' 
@@ -33,6 +33,8 @@ parser.add_argument('--dataset', type=str, default='Ear296_Korean')
 parser.add_argument('--data_root', type=str, default='../data')
 parser.add_argument('--output_root', type=str, default='../results')
 parser.add_argument('--train_dataset_name', type=str, default='Ear296_Korean')
+parser.add_argument('--val_dataset_name', type=str, default='')
+parser.add_argument('--val_partition', type=str, default='val')
 parser.add_argument('--test_dataset_name', type=str, default='')
 parser.add_argument('--run_id', type=str, default='')
 parser.add_argument('--user_tag', type=str, default='')
@@ -78,6 +80,11 @@ parser.add_argument('--use_feature_gating', type=str2bool, default=False,
                     help='True: 주입 시 게이팅 어텐션 사용 / False: 단순 잔차 덧셈')
 
 # [4] 자율 로스 게이팅 & 스케줄링 설정
+parser.add_argument('--use_interaction_fusion', type=str2bool, default=True,
+                    help='True: use fusion_mlp interaction residual for PAConv hints')
+parser.add_argument('--coord_from_heatmap', type=str2bool, default=True,
+                    help='True: derive final DeepPA coordinates from main heatmap by differentiable top-k')
+
 parser.add_argument('--yield_factor', type=float, default=0.8)
 parser.add_argument('--lambda_anchor', type=float, default=0.1)
 parser.add_argument('--gating_tau', type=float, default=0.65)
@@ -93,6 +100,9 @@ parser.add_argument('--target_norm', type=float, default=1.0)
 parser.add_argument('--patience', type=int, default=5, help='에폭 정체 대기 한도')
 parser.add_argument('--val_decay_step', type=float, default=0.05, help='정체 시 깎이는 메인 가중치 비율')
 parser.add_argument('--hds_buffer', type=float, default=0.1, help='Aux(HDS) 기본 고정 가중치 (0.3에서 0.1로 하향)')
+
+parser.add_argument('--min_heatmap_warmup', type=int, default=30,
+                    help='Minimum heatmap-only warmup epochs before val-based transition')
 
 parser.add_argument('--regression_point_num', type=int, default=10)
 parser.add_argument('--plane_knn', type=int, default=5)

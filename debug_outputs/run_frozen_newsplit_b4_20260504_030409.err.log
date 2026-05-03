@@ -1,0 +1,31 @@
+INFO: Could not find files for the given pattern(s).
+C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py:305: UserWarning: Error checking compiler version for cl: [WinError 2] 지정된 파일을 찾을 수 없습니다
+  warnings.warn(f'Error checking compiler version for {compiler}: {error}')
+Traceback (most recent call last):
+  File "train.py", line 27, in <module>
+    from PAConv_model import PAConv
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv_model.py", line 13, in <module>
+    from PAConv.cuda_lib.functional import assign_score_withk as assemble_dgcnn
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv\cuda_lib\functional.py", line 1, in <module>
+    from . import functions
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv\cuda_lib\functions\__init__.py", line 1, in <module>
+    from .assignscore import *
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv\cuda_lib\functions\assignscore.py", line 4, in <module>
+    from .. import src
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv\cuda_lib\src\__init__.py", line 26, in <module>
+    gpu = load('gpconv_cuda', [
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1080, in load
+    return _jit_compile(
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1293, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1392, in _write_ninja_file_and_build_library
+    _write_ninja_file_to_build_library(
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1824, in _write_ninja_file_to_build_library
+    _write_ninja_file(
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1949, in _write_ninja_file
+    cl_paths = subprocess.check_output(['where',
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\subprocess.py", line 415, in check_output
+    return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\subprocess.py", line 516, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['where', 'cl']' returned non-zero exit status 1.

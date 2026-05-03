@@ -6,10 +6,12 @@ import torch
 import pandas as pd
 
 class DeepPALossController:
-    def __init__(self, patience=5, base_hds=0.1, decay_step=0.05): # 🌟 decay_step 수신부 추가
+    def __init__(self, patience=5, base_hds=0.1, decay_step=0.05, min_heatmap_warmup=30, use_rlw_for_pred=False): # 🌟 decay_step 수신부 추가
         self.patience = patience
         self.base_hds = base_hds     # Aux(HDS) 기본 가중치
         self.decay_step = decay_step # 가중치 감소 보폭
+        self.min_heatmap_warmup = min_heatmap_warmup
+        self.use_rlw_for_pred = use_rlw_for_pred
         self.val_decay = 1.0         # Main HM 가중치. 1.0으로 시작
         self.stagnation_counter = 0
         self.best_val_mm = float('inf')
@@ -18,8 +20,14 @@ class DeepPALossController:
         self.weight_PA = 1.0
         self.weight_DP = 0.0
 
-    def update_patience(self, current_val_mm):
+    def update_patience(self, current_val_mm, epoch=None):
         """Val 정체 여부를 확인하고 가중치를 업데이트"""
+        if epoch is not None and epoch < self.min_heatmap_warmup:
+            if current_val_mm < self.best_val_mm:
+                self.best_val_mm = current_val_mm
+            self.stagnation_counter = 0
+            return False
+
         if current_val_mm < self.best_val_mm:
             self.best_val_mm = current_val_mm
             self.stagnation_counter = 0
@@ -44,9 +52,22 @@ class DeepPALossController:
         m_name = model_name.lower()
         if L_pa is None: L_pa = torch.tensor(0.0).to(L_crd.device)
         
-        w_main = max(0.1, self.val_decay)
-        w_geom = 1.0 - w_main  
-        L_pred = L_crd + L_srf + L_str 
+        warmup_modes = [
+            'single_deeppa', 'deeppa_frozen', 'frozen_aux_fixed', 'frozen_aux_drop',
+            'frozen_no_aux', 'deepla_progress', 'deeppa_frozen_no_heat',
+            'deepla_ori', 'deepla_decay', 'deepla_all', 'deepla_all_tied',
+            'paconv_struct'
+        ]
+        warmup_active = (m_name in warmup_modes) and (epoch < self.min_heatmap_warmup)
+        w_main = 1.0 if warmup_active else max(0.1, self.val_decay)
+        w_geom = 0.0 if warmup_active else 1.0 - w_main
+
+        if self.use_rlw_for_pred:
+            rand_weights = torch.rand(3, device=L_crd.device)
+            rand_weights = rand_weights / rand_weights.sum().clamp_min(1e-8)
+            L_pred = rand_weights[0] * L_crd + rand_weights[1] * L_srf + rand_weights[2] * L_str
+        else:
+            L_pred = L_crd + L_srf + L_str 
         
         # 기본값 세팅
         w_hds = self.base_hds
@@ -56,9 +77,13 @@ class DeepPALossController:
         # =================================================================
         # 🌟 PAConv 및 기타 브랜치 완벽 대응
         # =================================================================
-        if m_name == 'single_paconv_heat':
+        if m_name in ['paconv_heat', 'single_paconv_heat']:
             total_loss = L_pa
             w_geom, w_main, w_hds = 0.0, 0.0, 0.0
+
+        elif m_name == 'paconv_struct':
+            total_loss = (w_main * L_pa) + (w_geom * L_pred)
+            w_hds = 0.0
             
         elif m_name in ['paconv', 'single_paconv']:
             rho = 0.9
@@ -124,7 +149,11 @@ class DeepPALossController:
             w_str = f"PA_W: {weights['w_pa']:.2f} | DP_Main_W: {weights['w_dp'] * weights['w_main']:.2f} | Aux_W: {weights['w_hds']:.2f}"
             l_str = f"PA_HM: {t_hm_PA/num_b:.4f} | Main_HM: {t_hm_main/num_b:.4f} | Aux_HM: {t_hm_aux/num_b:.4f} | Geom: {(t_crd+t_srf+t_str)/num_b:.4f}"
             
-        elif m_name in ['paconv', 'single_paconv']:
+        elif m_name == 'paconv_struct':
+            w_str = f"PA_W: {weights['w_main']:.2f} | Geom_W: {weights['w_geom']:.2f}"
+            l_str = f"PA_HM: {t_hm_PA/num_b:.4f} | Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}"
+
+        elif m_name in ['paconv_heat', 'single_paconv_heat', 'paconv', 'single_paconv']:
             w_str = f"PA_W: 1.0 | Geom_W: {weights['w_geom']:.2f}"
             l_str = f"PA_HM: {t_hm_PA/num_b:.4f} | Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}"
             

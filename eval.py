@@ -9,6 +9,7 @@
 from __future__ import print_function, division
 
 import sys
+import subprocess
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,6 +24,11 @@ from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 from torch.utils.data import TensorDataset, DataLoader
 from My_args import parser
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # 🌟 아키텍처 및 학습과 동일한 정규화 로직 임포트
 from DeepPA_model import DeepPA_Wrapper  
@@ -50,6 +56,23 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
     plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')
     plt.close()
 
+def save_eval_command_txt(run_root, eval_name):
+    command = subprocess.list2cmdline([sys.executable] + sys.argv)
+    safe_name = eval_name.lower()
+    base_path = os.path.join(run_root, f'command_eval_{safe_name}.txt')
+    save_path = base_path
+    if os.path.exists(save_path):
+        stamp = time.strftime('%Y%m%d_%H%M%S')
+        root, ext = os.path.splitext(base_path)
+        save_path = f'{root}_{stamp}{ext}'
+
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write('[Working Directory]\n')
+        f.write(os.getcwd() + '\n\n')
+        f.write('[Command]\n')
+        f.write(command + '\n')
+    print(f"[INFO] Evaluation command saved to: {save_path}")
+
 # -----------------------------------------------------------------------------
 # 1. 경로 및 데이터 로드 
 # -----------------------------------------------------------------------------
@@ -68,6 +91,8 @@ run_root = os.path.join(project_dir, target_folder_name)
 if not os.path.exists(run_root):
     print(f"Error: Experiment folder not found: {run_root}")
     sys.exit(1)
+
+save_eval_command_txt(run_root, args.model)
 
 data_dir = os.path.join(run_root, 'npy_data')
 heatmap_save_dir_base = os.path.join(run_root, "Pred_Heatmaps")
@@ -317,7 +342,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 # -----------------------------------------------------------------------------
 model_name_lower = args.model.lower()
 
-if model_name_lower == 'paconv': pipeline_mode = 'single_paconv'
+if model_name_lower in ['paconv', 'paconv_struct']: pipeline_mode = 'single_paconv'
 elif model_name_lower == 'paconv_heat': pipeline_mode = 'single_paconv_heat'
 elif model_name_lower == 'deeppa': pipeline_mode = 'single_deeppa' 
 elif model_name_lower == 'deeppa_finetune': pipeline_mode = 'finetune'

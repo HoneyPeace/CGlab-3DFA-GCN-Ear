@@ -11,7 +11,15 @@ import sys
 import subprocess
 import re
 import shutil
+import time
 from My_args import parser
+
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 def get_latest_run(output_root, exp_name, tag=None, required_model=None):
     """지정된 실험 폴더에서 특정 태그와 모델 파일을 가진 가장 최근 폴더를 찾습니다."""
@@ -46,9 +54,37 @@ def get_latest_run(output_root, exp_name, tag=None, required_model=None):
         
     return None, None, None
 
+def set_arg_value(args_list, flag, value):
+    updated_args = []
+    skip_next = False
+    for arg in args_list:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == flag:
+            skip_next = True
+            continue
+        updated_args.append(arg)
+    updated_args.extend([flag, value])
+    return updated_args
+
+def save_pipeline_command_txt():
+    output_dir = os.path.join(os.getcwd(), "debug_outputs")
+    os.makedirs(output_dir, exist_ok=True)
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    save_path = os.path.join(output_dir, f"command_run_frozen_{stamp}.txt")
+    command = subprocess.list2cmdline([sys.executable] + sys.argv)
+    with open(save_path, "w", encoding="utf-8") as f:
+        f.write("[Working Directory]\n")
+        f.write(os.getcwd() + "\n\n")
+        f.write("[Command]\n")
+        f.write(command + "\n")
+    print(f"[INFO] Pipeline command saved to: {save_path}")
+
 if __name__ == "__main__":
     args = parser.parse_args()
     user_args = sys.argv[1:]
+    save_pipeline_command_txt()
     
     MAIN_SCRIPT = "train.py" 
     
@@ -76,11 +112,18 @@ if __name__ == "__main__":
             continue
         filtered_args.append(arg)
 
+    if "--need_resample" not in filtered_args:
+        filtered_args.extend(["--need_resample", "False"])
+        print(">>> [INFO] run_frozen.py: --need_resample False")
+
+    no_resample_args = set_arg_value(filtered_args, "--need_resample", "False")
+    tag_prefix = f"{args.user_tag}_" if getattr(args, "user_tag", "") else ""
+
     # =========================================================================
     # [PHASE 1] PAConv 사전 학습 및 평가 (Stage 1)
     # =========================================================================
     print(f">>> [PHASE 1] Checking existing PAConv Baseline (using {MAIN_SCRIPT})...")
-    p1_tag = "Stage1_PAConv"
+    p1_tag = f"{tag_prefix}Stage1_PAConv"
     p1_model_name = "Single_PAConv_last.t7" 
     
     p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, args.exp_name, tag=p1_tag, required_model=p1_model_name)
@@ -90,7 +133,7 @@ if __name__ == "__main__":
     else:
         print("  └─ 🚀 PAConv 베이스라인 학습 시작...")
         paconv_train_cmd = [sys.executable, MAIN_SCRIPT] + filtered_args + [
-            "--model", "paconv", "--user_tag", p1_tag
+            "--model", "paconv_heat", "--user_tag", p1_tag
         ]
         try: subprocess.run(paconv_train_cmd, check=True)
         except subprocess.CalledProcessError as e: sys.exit(1)
@@ -103,12 +146,12 @@ if __name__ == "__main__":
         
     if not excel_exists:
         print(f"  └─ 🚀 PAConv 평가(eval.py) 시작...")
-        paconv_eval_cmd = [sys.executable, "eval.py"] + filtered_args + [
-            "--model", "paconv", "--run_id", str(p1_run_id), 
+        paconv_eval_cmd = [sys.executable, "eval.py"] + no_resample_args + [
+            "--model", "paconv_heat", "--run_id", str(p1_run_id), 
             "--model_epoch", p1_model_name, "--user_tag", p1_tag
         ]
-        if p1_train_len and "--train_len" not in filtered_args: paconv_eval_cmd.extend(["--train_len", str(p1_train_len)])
-        if "--Eval_DataType" not in filtered_args: paconv_eval_cmd.extend(["--Eval_DataType", "test"])
+        if p1_train_len and "--train_len" not in no_resample_args: paconv_eval_cmd.extend(["--train_len", str(p1_train_len)])
+        if "--Eval_DataType" not in no_resample_args: paconv_eval_cmd.extend(["--Eval_DataType", "test"])
         try: subprocess.run(paconv_eval_cmd, check=True)
         except subprocess.CalledProcessError as e: sys.exit(1)
 
@@ -128,9 +171,9 @@ if __name__ == "__main__":
     # =========================================================================
     # 🌟 연구자님의 3가지 모델로 루프를 돕니다.
     ablation_configs = [
-        {"model": "frozen_aux_fixed", "name": "Aux 0.1 고정", "tag": f"Stage2_{current_inj_type.upper()}_AuxFixed", "saved_name": "Frozen_Aux_Fixed_last.t7"},
-        {"model": "frozen_aux_drop",  "name": "Aux 15ep 점진적 감소", "tag": f"Stage2_{current_inj_type.upper()}_AuxDrop", "saved_name": "Frozen_Aux_Drop_last.t7"},
-        {"model": "frozen_no_aux",    "name": "Aux 완전 배제", "tag": f"Stage2_{current_inj_type.upper()}_NoAux", "saved_name": "Frozen_No_Aux_last.t7"},
+        {"model": "frozen_aux_fixed", "name": "Aux 0.1 고정", "tag": f"{tag_prefix}Stage2_{current_inj_type.upper()}_AuxFixed", "saved_name": "Frozen_Aux_Fixed_last.t7"},
+        {"model": "frozen_aux_drop",  "name": "Aux 15ep 점진적 감소", "tag": f"{tag_prefix}Stage2_{current_inj_type.upper()}_AuxDrop", "saved_name": "Frozen_Aux_Drop_last.t7"},
+        {"model": "frozen_no_aux",    "name": "Aux 완전 배제", "tag": f"{tag_prefix}Stage2_{current_inj_type.upper()}_NoAux", "saved_name": "Frozen_No_Aux_last.t7"},
     ]
 
     for config in ablation_configs:
@@ -147,7 +190,7 @@ if __name__ == "__main__":
             print(f"  └─ 📦 [SKIP] 기존 학습 완료! (Run ID: {p2_run_id})")
         else:
             print(f"  └─ 🚀 {config['name']} 학습 시작...")
-            deeppa_train_cmd = [sys.executable, MAIN_SCRIPT] + filtered_args + [
+            deeppa_train_cmd = [sys.executable, MAIN_SCRIPT] + no_resample_args + [
                 "--model", config['model'], 
                 "--user_tag", config['tag'],
                 "--latent_injection_type", current_inj_type, 
@@ -167,15 +210,15 @@ if __name__ == "__main__":
             print(f"  └─ 📊 [SKIP] 기존 평가 결과(Excel) 발견!")
         else:
             print(f"  └─ 🚀 {config['name']} 평가 시작...")
-            deeppa_eval_cmd = [sys.executable, "eval.py"] + filtered_args + [
+            deeppa_eval_cmd = [sys.executable, "eval.py"] + no_resample_args + [
                 "--model", config['model'], 
                 "--run_id", str(p2_run_id), 
                 "--model_epoch", config['saved_name'],
                 "--user_tag", config['tag'],
                 "--latent_injection_type", current_inj_type 
             ]
-            if p2_train_len and "--train_len" not in filtered_args: deeppa_eval_cmd.extend(["--train_len", str(p2_train_len)])
-            if "--Eval_DataType" not in filtered_args: deeppa_eval_cmd.extend(["--Eval_DataType", "test"])
+            if p2_train_len and "--train_len" not in no_resample_args: deeppa_eval_cmd.extend(["--train_len", str(p2_train_len)])
+            if "--Eval_DataType" not in no_resample_args: deeppa_eval_cmd.extend(["--Eval_DataType", "test"])
                 
             try: subprocess.run(deeppa_eval_cmd, check=True)
             except subprocess.CalledProcessError as e: sys.exit(1)

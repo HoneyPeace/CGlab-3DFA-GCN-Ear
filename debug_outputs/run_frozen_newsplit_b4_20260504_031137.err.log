@@ -1,0 +1,2 @@
+C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py:305: UserWarning: Error checking compiler version for cl: 'utf-8' codec can't decode byte 0xc3 in position 20: invalid continuation byte
+  warnings.warn(f'Error checking compiler version for {compiler}: {error}')

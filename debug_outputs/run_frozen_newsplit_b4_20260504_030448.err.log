@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "train.py", line 28, in <module>
+    from DeepPA_model import DeepPA_Wrapper  
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\DeepPA_model.py", line 22, in <module>
+    from deeppa_semseg import DeepPA_semseg, index_points
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\deeppa_semseg.py", line 21, in <module>
+    from utils.cutils import knn_edge_maxpooling
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\utils\cutils\__init__.py", line 18, in <module>
+    cutils = load(
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1087, in load
+    build_directory or _get_build_directory(name, verbose),
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1613, in _get_build_directory
+    os.makedirs(build_directory, exist_ok=True)
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\os.py", line 223, in makedirs
+    mkdir(name, mode)
+FileExistsError: [WinError 183] 파일이 이미 있으므로 만들 수 없습니다: 'C:\\Users\\CGlab\\AppData\\Local\\torch_extensions\\torch_extensions\\Cache\\cutils_'

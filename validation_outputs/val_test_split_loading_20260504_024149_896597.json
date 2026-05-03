@@ -1,0 +1,103 @@
+{
+  "splits": [
+    {
+      "label": "train",
+      "data_name": "Ear296_Korean",
+      "partition": "train",
+      "shape_path": "..\\data\\Ear296_Korean-npy\\shape_train.npy",
+      "heatmap_path": "..\\data\\Ear296_Korean-npy\\Heat_data_train.npy",
+      "landmark_path": "..\\data\\Ear296_Korean-npy\\landmark_train.npy",
+      "num_samples": 209,
+      "shape_shape": [
+        209,
+        8192,
+        7
+      ],
+      "heatmap_shape": [
+        209,
+        8192,
+        36
+      ],
+      "landmark_shape": [
+        209,
+        36,
+        3
+      ],
+      "shape_nan_count": 0,
+      "heatmap_nan_count": 0,
+      "landmark_nan_count": 0,
+      "shape_min": -54.26001739501953,
+      "shape_max": 57.29874038696289,
+      "heatmap_min": 0.0,
+      "heatmap_max": 0.9999999999968943,
+      "landmark_min": -33.024,
+      "landmark_max": 44.364
+    },
+    {
+      "label": "val",
+      "data_name": "",
+      "partition": "test",
+      "shape_path": "..\\data\\-npy\\shape_test.npy",
+      "heatmap_path": "..\\data\\-npy\\Heat_data_test.npy",
+      "landmark_path": "..\\data\\-npy\\landmark_test.npy",
+      "num_samples": 54,
+      "shape_shape": [
+        54,
+        8192,
+        7
+      ],
+      "heatmap_shape": [
+        54,
+        8192,
+        36
+      ],
+      "landmark_shape": [
+        54,
+        36,
+        3
+      ],
+      "shape_nan_count": 0,
+      "heatmap_nan_count": 0,
+      "landmark_nan_count": 0,
+      "shape_min": -33.36829376220703,
+      "shape_max": 47.17178726196289,
+      "heatmap_min": 1.2560075284964982e-227,
+      "heatmap_max": 0.9999999999973501,
+      "landmark_min": -26.68,
+      "landmark_max": 45.544
+    },
+    {
+      "label": "test",
+      "data_name": "",
+      "partition": "test",
+      "shape_path": "..\\data\\-npy\\shape_test.npy",
+      "heatmap_path": "..\\data\\-npy\\Heat_data_test.npy",
+      "landmark_path": "..\\data\\-npy\\landmark_test.npy",
+      "num_samples": 54,
+      "shape_shape": [
+        54,
+        8192,
+        7
+      ],
+      "heatmap_shape": [
+        54,
+        8192,
+        36
+      ],
+      "landmark_shape": [
+        54,
+        36,
+        3
+      ],
+      "shape_nan_count": 0,
+      "heatmap_nan_count": 0,
+      "landmark_nan_count": 0,
+      "shape_min": -33.36829376220703,
+      "shape_max": 47.17178726196289,
+      "heatmap_min": 1.2560075284964982e-227,
+      "heatmap_max": 0.9999999999973501,
+      "landmark_min": -26.68,
+      "landmark_max": 45.544
+    }
+  ]
+}

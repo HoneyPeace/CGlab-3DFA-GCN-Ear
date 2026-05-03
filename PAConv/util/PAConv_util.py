@@ -81,8 +81,8 @@ def get_graph_feature(x, k=20, idx=None):
     # =====================================================================
     if target_edge_channels == 14:
         # 곡률 및 방향(4채널) 차이 계산 -> 엣지 피처 14채널
-        relative_geom = neighbor[..., 3:] - center[..., 3:]
-        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, relative_geom), dim=3)
+        center_geom = center[..., 3:]
+        feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, center_geom), dim=3)
         
     elif target_edge_channels == 12:
         # 🌟 [복구] 방향 벡터(3채널) 차이 계산 -> 엣지 피처 12채널

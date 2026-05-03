@@ -110,6 +110,7 @@ class Stage_PA(nn.Module):
         # =====================================================================
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
         self.use_feature_gating = getattr(args, 'use_feature_gating', False) 
+        self.use_interaction_fusion = getattr(args, 'use_interaction_fusion', True)
         
         # 🌟 2. 주입 타입별 투영(Projection) 레이어 동적 생성
         if self.injection_type != 'none':
@@ -135,6 +136,12 @@ class Stage_PA(nn.Module):
                     nn.Linear(dim * 2, dim, bias=False),
                     nn.BatchNorm1d(dim, momentum=args.bn_momentum),
                     nn.Sigmoid() 
+                )
+            if self.use_interaction_fusion:
+                self.fusion_mlp = nn.Sequential(
+                    nn.Linear(dim * 2, dim, bias=False),
+                    nn.BatchNorm1d(dim, momentum=args.bn_momentum),
+                    args.act()
                 )
 
         if self.first:
@@ -253,7 +260,10 @@ class Stage_PA(nn.Module):
             dist = torch.norm(nbr_rel, dim=-1, keepdim=True) 
             vector = nbr_rel / (dist + 1e-8)
             
-            if C_in == 7: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 14)
+            if C_in == 7:
+                center_xyz = xyz.unsqueeze(2).expand(-1, -1, self.k, -1)
+                center_geom = x[:, :, 3:].unsqueeze(2).expand(-1, -1, self.k, -1)
+                nbr = torch.cat([nbr_rel, x_knn[..., :3], center_xyz, dist, center_geom], dim=-1).view(-1, 14)
             elif C_in == 6: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 13) 
             else: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
             
@@ -275,7 +285,11 @@ class Stage_PA(nn.Module):
                 # Linear는 (B, N, C) 입력 필요. 힌트는 이미 (B, N, C) 상태임.
                 p_feat = self.prior_proj(current_stage_hint)
             
-            if self.use_feature_gating:
+            if self.use_interaction_fusion:
+                fused = torch.cat([x, p_feat], dim=-1)
+                mixed_residual = self.fusion_mlp(fused.view(-1, fused.shape[-1])).view(B, N, -1)
+                x = x + mixed_residual
+            elif self.use_feature_gating:
                 fused_for_gate = torch.cat([x, p_feat], dim=-1) 
                 gate_matrix = self.gate_mlp(fused_for_gate.view(-1, fused_for_gate.shape[-1])).view(B, N, -1)
                 x = x + (gate_matrix * p_feat) 

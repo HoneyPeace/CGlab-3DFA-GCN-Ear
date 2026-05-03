@@ -1,0 +1,55 @@
+{
+  "config": {
+    "batch_size": 2,
+    "num_points": 64,
+    "k": 8,
+    "use_rlw": true,
+    "output_dir": "validation_outputs"
+  },
+  "center_geom_max_abs_diff": 0.0,
+  "warmup_weights": {
+    "w_main": 1.0,
+    "w_hds": 0.1,
+    "w_geom": 0.0,
+    "w_pa": 1.0,
+    "w_dp": 0.0
+  },
+  "transition_weights": {
+    "w_main": 0.7,
+    "w_hds": 0.1,
+    "w_geom": 0.30000000000000004,
+    "w_pa": 1.0,
+    "w_dp": 0.0
+  },
+  "tensor_stats": [
+    {
+      "name": "edge_features",
+      "shape": [
+        2,
+        14,
+        64,
+        8
+      ],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": -2.966169834136963,
+      "max": 63.0
+    },
+    {
+      "name": "warmup_loss",
+      "shape": [],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 0.5249999761581421,
+      "max": 0.5249999761581421
+    },
+    {
+      "name": "transition_loss",
+      "shape": [],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 1.045190453529358,
+      "max": 1.045190453529358
+    }
+  ]
+}

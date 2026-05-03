@@ -1,0 +1,96 @@
+{
+  "config": {
+    "batch_size": 2,
+    "num_points": 8192,
+    "down_points": 2048,
+    "landmarks": 36,
+    "seed": 7,
+    "output_dir": "validation_outputs"
+  },
+  "tensor_stats": [
+    {
+      "name": "target_hm",
+      "shape": [
+        2,
+        36,
+        8192
+      ],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 8.940696716308594e-07,
+      "max": 0.9999983906745911
+    },
+    {
+      "name": "aux_full_bnl",
+      "shape": [
+        2,
+        8192,
+        36
+      ],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 1.1920928955078125e-07,
+      "max": 0.9999979734420776
+    },
+    {
+      "name": "aux_down_bnl",
+      "shape": [
+        2,
+        2048,
+        36
+      ],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 8.881092071533203e-06,
+      "max": 0.9999832510948181
+    },
+    {
+      "name": "main_final_bln",
+      "shape": [
+        2,
+        36,
+        8192
+      ],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 1.9073486328125e-06,
+      "max": 0.9999984502792358
+    },
+    {
+      "name": "old_like_L_main_hm",
+      "shape": [],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 0.5065038204193115,
+      "max": 0.5065038204193115
+    },
+    {
+      "name": "old_like_L_aux_hm",
+      "shape": [],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    {
+      "name": "patched_L_main_hm",
+      "shape": [],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 0.5028404593467712,
+      "max": 0.5028404593467712
+    },
+    {
+      "name": "patched_L_aux_hm",
+      "shape": [],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 0.5065038204193115,
+      "max": 0.5065038204193115
+    }
+  ],
+  "old_full_resolution_predictions": 1,
+  "old_skipped_downsampled_predictions": 1,
+  "patched_full_resolution_predictions": 2,
+  "patched_skipped_downsampled_predictions": 1
+}

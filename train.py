@@ -4,6 +4,12 @@
 # ==============================================================================
 
 import os
+import sys
+import subprocess
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import time
 import torch
 import torch.nn as nn
@@ -59,6 +65,77 @@ def get_experiment_paths(args, train_len):
     for p in paths.values(): os.makedirs(p, exist_ok=True)
     return paths
 
+def _shape_file_name(in_channels, partition):
+    if in_channels == 7:
+        return f"shape_{partition}.npy"
+    if in_channels == 6:
+        return f"shape_6ch_{partition}.npy"
+    if in_channels == 3:
+        return f"shape_3ch_{partition}.npy"
+    return f"shape_{partition}.npy"
+
+def resolve_validation_dataset(args):
+    val_partition = getattr(args, 'val_partition', 'val')
+    val_dataset_name = getattr(args, 'val_dataset_name', '')
+    if val_dataset_name:
+        return val_dataset_name, val_partition
+
+    candidate_names = [args.train_dataset_name, args.test_dataset_name]
+    for candidate_name in candidate_names:
+        base_path = os.path.join(args.data_root, f"{candidate_name}-npy")
+        shape_path = os.path.join(base_path, _shape_file_name(args.in_channels, val_partition))
+        heat_path = os.path.join(base_path, f"Heat_data_{val_partition}.npy")
+        land_path = os.path.join(base_path, f"landmark_{val_partition}.npy")
+        if os.path.exists(shape_path) and os.path.exists(heat_path) and os.path.exists(land_path):
+            return candidate_name, val_partition
+
+    return args.test_dataset_name, 'test'
+
+def backup_npy_split(paths, data_root, data_name, partition, label):
+    base_path = os.path.join(data_root, f"{data_name}-npy")
+    if not os.path.isdir(base_path):
+        print(f"   [WARNING] {label.upper()} NPY backup skipped. Missing folder: {base_path}")
+        return
+
+    suffix = f"_{partition}.npy"
+    copied_count = 0
+    for file_name in os.listdir(base_path):
+        if file_name.endswith(suffix):
+            src_path = os.path.join(base_path, file_name)
+            dst_path = os.path.join(paths['npy_backup'], file_name)
+            shutil.copy2(src_path, dst_path)
+            copied_count += 1
+
+    print(f"   [{label.upper()}] Backup Saved: {paths['npy_backup']} ({copied_count} files)")
+
+def get_last_checkpoint_name(model_name):
+    m_name = model_name.lower()
+    if m_name in ['paconv', 'paconv_heat', 'paconv_struct']:
+        return 'Single_PAConv_last.t7'
+    if m_name == 'frozen_aux_fixed':
+        return 'Frozen_Aux_Fixed_last.t7'
+    if m_name == 'frozen_aux_drop':
+        return 'Frozen_Aux_Drop_last.t7'
+    if m_name == 'frozen_no_aux':
+        return 'Frozen_No_Aux_last.t7'
+    return f'{m_name}_last.t7'
+
+def save_command_txt(paths, model_name):
+    command = subprocess.list2cmdline([sys.executable] + sys.argv)
+    base_path = os.path.join(paths['root'], f'command_train_{model_name.lower()}.txt')
+    save_path = base_path
+    if os.path.exists(save_path):
+        stamp = time.strftime('%Y%m%d_%H%M%S')
+        root, ext = os.path.splitext(base_path)
+        save_path = f'{root}_{stamp}{ext}'
+
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write('[Working Directory]\n')
+        f.write(os.getcwd() + '\n\n')
+        f.write('[Command]\n')
+        f.write(command + '\n')
+    print(f"[INFO] Training command saved to: {save_path}")
+
 class UniversalPipeline(nn.Module):
     def __init__(self, args, landmark_num, mode='single_deeppa'):
         super().__init__()
@@ -111,18 +188,27 @@ class UniversalPipeline(nn.Module):
 
 def train(args):
     accum_steps = args.accumulation_steps
+    val_dataset_name, val_partition = resolve_validation_dataset(args)
 
     if args.need_resample:
         main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.train_dataset_name, args.data_root, partition='train')
-        main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.test_dataset_name, args.data_root, partition='test')
+        main_sample(args.num_points, args.seed, args.sigma, args.sample_way, val_dataset_name, args.data_root, partition=val_partition)
+        if not (val_dataset_name == args.test_dataset_name and val_partition == 'test'):
+            main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.test_dataset_name, args.data_root, partition='test')
 
-    print(f">> [INFO] Loading Separate Datasets: {args.train_dataset_name} (train) & {args.test_dataset_name} (test)")
+    print(f">> [INFO] Loading Separate Datasets: {args.train_dataset_name} (train) & {val_dataset_name} ({val_partition})")
     train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name, in_channels=args.in_channels)
-    test_dataset = FaceLandmarkData(data_root=args.data_root, partition='test', data=args.test_dataset_name, in_channels=args.in_channels)
+    val_dataset = FaceLandmarkData(data_root=args.data_root, partition=val_partition, data=val_dataset_name, in_channels=args.in_channels)
 
     paths = get_experiment_paths(args, len(train_dataset))
+    save_command_txt(paths, m_name)
+    backup_npy_split(paths, args.data_root, args.train_dataset_name, 'train', 'train')
+    backup_npy_split(paths, args.data_root, val_dataset_name, val_partition, 'val')
+    if not (val_dataset_name == args.test_dataset_name and val_partition == 'test'):
+        backup_npy_split(paths, args.data_root, args.test_dataset_name, 'test', 'test')
+
     train_loader = DataLoader(train_dataset, num_workers=0, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    test_loader = DataLoader(test_dataset, num_workers=0, batch_size=args.test_batch_size, shuffle=True, drop_last=False)
+    val_loader = DataLoader(val_dataset, num_workers=0, batch_size=args.test_batch_size, shuffle=False, drop_last=False)
     
     ScaleAndTranslate = PointcloudScaleAndTranslate()
     ApplyJitter = PointcloudJitter(std=0.001)
@@ -130,7 +216,7 @@ def train(args):
     m_name = args.model.lower()
     
     # 🌟 1. 아키텍처(파이프라인) 모드 라우팅 (예외 처리 및 완전성 강화)
-    if m_name == 'paconv': 
+    if m_name in ['paconv', 'paconv_struct']: 
         pipeline_mode = 'single_paconv'
     elif m_name == 'paconv_heat': 
         pipeline_mode = 'single_paconv_heat'
@@ -172,8 +258,11 @@ def train(args):
     loss_controller = DeepPALossController(
         patience=args.patience, 
         base_hds=getattr(args, 'hds_buffer', 0.1), # 하드코딩 제거
-        decay_step=getattr(args, 'val_decay_step', 0.05) # 유연성 확보
+        decay_step=getattr(args, 'val_decay_step', 0.05),
+        min_heatmap_warmup=getattr(args, 'min_heatmap_warmup', 30),
+        use_rlw_for_pred=getattr(args, 'use_rlw_for_pred', False)
     )
+    auto_scales = {'pa': -1.0, 'main': -1.0, 'aux': -1.0, 'coord': -1.0, 'surface': -1.0, 'struct': -1.0}
 
     for epoch in range(args.epochs):
         model.train() 
@@ -215,6 +304,26 @@ def train(args):
                 L_crd = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                 L_srf, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
                 L_str = compute_structural_loss(pred_coords, augmented_landmark)
+
+                if getattr(args, 'use_loss_norm', False):
+                    loss_items = {
+                        'pa': L_pa,
+                        'main': L_main_hm,
+                        'aux': L_aux_hm,
+                        'coord': L_crd,
+                        'surface': L_srf,
+                        'struct': L_str,
+                    }
+                    for key, loss_value in loss_items.items():
+                        if auto_scales[key] < 0:
+                            value = loss_value.detach().item()
+                            auto_scales[key] = args.target_norm / (value + 1e-6) if value > 0.0 else 1.0
+                    L_pa = L_pa * auto_scales['pa']
+                    L_main_hm = L_main_hm * auto_scales['main']
+                    L_aux_hm = L_aux_hm * auto_scales['aux']
+                    L_crd = L_crd * auto_scales['coord']
+                    L_srf = L_srf * auto_scales['surface']
+                    L_str = L_str * auto_scales['struct']
                 
                 # 🌟 4. 로스 컨트롤러에게 모델명과 개별 로스를 넘겨 최종 로스 산출
                 total_loss, weights = loss_controller.compute_loss(m_name, epoch, L_main_hm, L_aux_hm, L_crd, L_srf, L_str, L_pa)
@@ -241,7 +350,7 @@ def train(args):
         model.eval()
         val_mm_total, val_samples = 0.0, 0
         with torch.no_grad():
-            for point, landmark, seg in test_loader:
+            for point, landmark, seg in val_loader:
                 point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
                 B_val = point.size(0) 
                 point_xyz = point[:, :, :3]
@@ -257,7 +366,7 @@ def train(args):
         # ========================================================
         # 🔄 6. 컨트롤러에 Val_mm 전달하여 Patience 스케줄러 작동
         # ========================================================
-        if loss_controller.update_patience(v_mm):
+        if loss_controller.update_patience(v_mm, epoch):
             print(f"\n🔄 [Patience Trigger] {loss_controller.patience}에폭 정체! 가중치 전환 -> {loss_controller.val_decay:.2f}\n")
 
         # ----------------------------------------------------
@@ -276,7 +385,7 @@ def train(args):
         scheduler.step()
 
     print(f"\n💾 [Model Save] {m_name} 학습 완료! 최종 모델을 저장합니다.")
-    torch.save(model.state_dict(), os.path.join(paths['models'], f'{m_name}_last.t7'))
+    torch.save(model.state_dict(), os.path.join(paths['models'], get_last_checkpoint_name(m_name)))
 
 def execute_all_models(args):
     train(args)

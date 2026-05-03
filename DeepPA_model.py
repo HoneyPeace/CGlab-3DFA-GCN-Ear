@@ -20,6 +20,7 @@ current_dir = Path(__file__).resolve().parent
 sys.path.append(str(current_dir / "utils" / "pointnet2_ops_lib"))
 
 from deeppa_semseg import DeepPA_semseg, index_points
+from loss import get_differentiable_coords
 
 try:
     from paconv import PAConv
@@ -78,6 +79,7 @@ class DeepPA_Wrapper(nn.Module):
         
         # 🌟 1. 3지 선다형 옵션 연결
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
+        self.coord_from_heatmap = getattr(args, 'coord_from_heatmap', True)
         
         if not hasattr(args, 'use_cp'): args.use_cp = False
             
@@ -107,6 +109,7 @@ class DeepPA_Wrapper(nn.Module):
             nn.BatchNorm1d(512, momentum=bn_mom),
             nn.ReLU(inplace=True),
         )
+        self.main_heatmap_head = nn.Conv1d(512, self.landmark_num, 1)
         self.head_linear = nn.Sequential(
             nn.Linear(512, 256),
             nn.BatchNorm1d(256, momentum=bn_mom),
@@ -202,12 +205,19 @@ class DeepPA_Wrapper(nn.Module):
         
         # 6. 회귀 헤드 (Regression Head)
         x_fused = self.head_conv(fused_features) 
+        main_heatmap = torch.sigmoid(self.main_heatmap_head(x_fused))
         x_pool = torch.max(x_fused, dim=2)[0]    
-        coords = self.head_linear(x_pool).view(B, self.landmark_num, 3) 
+        direct_coords = self.head_linear(x_pool).view(B, self.landmark_num, 3) 
+        if self.coord_from_heatmap:
+            k_val = getattr(self.args, 'regression_point_num', 10)
+            coords = get_differentiable_coords(xyz_coords, main_heatmap, k=k_val)
+        else:
+            coords = direct_coords
         
         # 🌟 7. Train/Eval 상관없이 무조건 튜플 통일 반환
         spa_loss = out[1] if isinstance(out, tuple) else torch.tensor(0.0).to(device)
         raw_sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
         sem_list = [torch.sigmoid(s) for s in raw_sem_list] if len(raw_sem_list) > 0 else []
+        sem_list.append(main_heatmap)
         
         return coords, spa_loss, sem_list

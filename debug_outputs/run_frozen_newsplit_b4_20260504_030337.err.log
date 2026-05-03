@@ -1,0 +1,22 @@
+Traceback (most recent call last):
+  File "train.py", line 27, in <module>
+    from PAConv_model import PAConv
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv_model.py", line 13, in <module>
+    from PAConv.cuda_lib.functional import assign_score_withk as assemble_dgcnn
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv\cuda_lib\functional.py", line 1, in <module>
+    from . import functions
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv\cuda_lib\functions\__init__.py", line 1, in <module>
+    from .assignscore import *
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv\cuda_lib\functions\assignscore.py", line 4, in <module>
+    from .. import src
+  File "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN\PAConv\cuda_lib\src\__init__.py", line 26, in <module>
+    gpu = load('gpconv_cuda', [
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1080, in load
+    return _jit_compile(
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1293, in _jit_compile
+    _write_ninja_file_and_build_library(
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1374, in _write_ninja_file_and_build_library
+    verify_ninja_availability()
+  File "C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\lib\site-packages\torch\utils\cpp_extension.py", line 1430, in verify_ninja_availability
+    raise RuntimeError("Ninja is required to load C++ extensions")
+RuntimeError: Ninja is required to load C++ extensions

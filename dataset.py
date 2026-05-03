@@ -14,7 +14,7 @@ from torch.utils.data import Dataset
 def load_face_data(data_root, data_name, partition, in_channels=7):
     """
     [데이터 로드 및 채널 라우터]
-    - partition: 'train' 또는 'test'. (util.py 저장 파일명과 동기화)
+    - partition: 'train', 'test', 또는 'val'. (util.py 저장 파일명과 동기화)
     - in_channels: 3, 6, 7 중 하나를 받아 알맞은 NPY 파일을 로드합니다.
     """
     base_path = os.path.join(data_root, f"{data_name}-npy")

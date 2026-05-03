@@ -1,0 +1,60 @@
+{
+  "config": {
+    "batch_size": 2,
+    "num_points": 32,
+    "landmarks": 4,
+    "k": 1,
+    "output_dir": "validation_outputs"
+  },
+  "max_abs_diff": 0.0,
+  "tensor_stats": [
+    {
+      "name": "points",
+      "shape": [
+        2,
+        32,
+        3
+      ],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": -2.966169834136963,
+      "max": 2.298342704772949
+    },
+    {
+      "name": "heatmap",
+      "shape": [
+        2,
+        4,
+        32
+      ],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": 0.0,
+      "max": 1.0
+    },
+    {
+      "name": "pred_coords",
+      "shape": [
+        2,
+        4,
+        3
+      ],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": -1.3884038925170898,
+      "max": 0.9265429973602295
+    },
+    {
+      "name": "expected_coords",
+      "shape": [
+        2,
+        4,
+        3
+      ],
+      "nan_count": 0,
+      "inf_count": 0,
+      "min": -1.3884038925170898,
+      "max": 0.9265429973602295
+    }
+  ]
+}

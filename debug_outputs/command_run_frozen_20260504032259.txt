@@ -1,0 +1,5 @@
+[Working Directory]
+C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN
+
+[Command]
+C:\Users\CGlab\anaconda3\envs\EarLandMarking_DeepLA\python.exe run_frozen.py --user_tag valadd_fusionmlp_mainhm_warmup30 --need_resample True
