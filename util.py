@@ -101,9 +101,7 @@ def read_asc_files_from_folder(folder_path):
 # -----------------------------------------------------------------------------
 def load_shape_data(dataset, data_root, partition=None):
     target_folder_name = None
-    if partition == 'train': target_folder_name = 'train' 
-    elif partition == 'test': target_folder_name = 'test'
-    elif partition in ['val', 'validation', 'valiation']:
+    if partition in ['train', 'test', 'val', 'validation', 'valiation']:
         target_folder_name = dataset if dataset else partition
         
     if target_folder_name:
@@ -146,9 +144,7 @@ def load_shape_data(dataset, data_root, partition=None):
 # -----------------------------------------------------------------------------
 def load_landmark_position(dataset, data_root, shape_all=None, partition=None):
     target_folder_name = None
-    if partition == 'train': target_folder_name = 'train'
-    elif partition == 'test': target_folder_name = 'test'
-    elif partition in ['val', 'validation', 'valiation']:
+    if partition in ['train', 'test', 'val', 'validation', 'valiation']:
         target_folder_name = dataset if dataset else partition
 
     if target_folder_name:
@@ -414,11 +410,11 @@ def compute_geometric_features_7ch(shapes, k=15, batch_size=8):
 # -----------------------------------------------------------------------------
 # Main Sampling Function 
 # -----------------------------------------------------------------------------
-def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data', partition=None):
+def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data', partition=None, geom_batch_size=8):
     suffix = "sample" 
     if partition == 'train': suffix = "train"
     elif partition == 'test': suffix = "test"
-    elif partition in ['val', 'validation', 'valiation']: suffix = partition
+    elif partition in ['val', 'validation', 'valiation']: suffix = "val"
 
     print(f'\n--- Processing: {dataset} [Partition: {partition if partition else "ALL"}] ---')
     
@@ -442,7 +438,7 @@ def main_sample(num_points, seed, sigma, sample_way, dataset, data_root='../Data
         return
 
     print('   Baking 6-Ch & 7-Ch Geometric Features...')
-    geom_features = compute_geometric_features_7ch(shape_sample, k=15, batch_size=8)
+    geom_features = compute_geometric_features_7ch(shape_sample, k=15, batch_size=geom_batch_size)
     
     shape_3ch_sample, shape_6ch_sample, shape_7ch_sample = [], [], []
     for i in range(len(shape_sample)):

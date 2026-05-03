@@ -73,6 +73,13 @@ def save_eval_command_txt(run_root, eval_name):
         f.write(command + '\n')
     print(f"[INFO] Evaluation command saved to: {save_path}")
 
+def normalize_sample_name(raw_name):
+    if hasattr(raw_name, "item"):
+        raw_name = raw_name.item()
+    if isinstance(raw_name, bytes):
+        return raw_name.decode("utf-8", errors="replace")
+    return str(raw_name)
+
 # -----------------------------------------------------------------------------
 # 1. 경로 및 데이터 로드 
 # -----------------------------------------------------------------------------
@@ -182,13 +189,14 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     os.makedirs(current_asc_dir, exist_ok=True)
 
     me_list, per_landmark_me_list = [], []
+    sample_records = []
     cos_sim_list, iou_list, time_list = [], [], []
     
     eval_model.eval()
 
     for idx, (point, gt_landmark, heatmap) in enumerate(tqdm(test_loader, desc=f"Eval {eval_name}")):
         point, gt_landmark, gt_heatmap = point.to(device), gt_landmark.to(device), heatmap.to(device)
-        real_name = name_sample[idx]
+        real_name = normalize_sample_name(name_sample[idx])
         B, N, C = point.shape
         
         # 1. 역정규화를 위한 Centroid와 Scale 계산
@@ -251,7 +259,19 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             me_list.append(me)
             per_landmark_me_list.append(dists)
             
-            np.savetxt(os.path.join(current_asc_dir, f"{eval_name}_pred_{real_name}.asc"), pred_np, fmt="%.6f", delimiter=",")
+            pred_asc_name = f"{eval_name}_pred_{real_name}.asc"
+            pred_asc_relpath = os.path.join("Pred_Landmarks", eval_name, pred_asc_name)
+            np.savetxt(os.path.join(current_asc_dir, pred_asc_name), pred_np, fmt="%.6f", delimiter=",")
+
+            sample_record = {
+                "Index": idx,
+                "Sample_Name": real_name,
+                "Mean_Error_mm": round(float(me), 6),
+                "Pred_ASC": pred_asc_relpath,
+            }
+            for lm_idx, dist in enumerate(dists):
+                sample_record[f"LM{lm_idx + 1:02d}_Error_mm"] = round(float(dist), 6)
+            sample_records.append(sample_record)
 
     # ------------------ 지표 산출 및 리포팅 ------------------
     avg_cos_sim = np.mean(cos_sim_list) if cos_sim_list else 0.0
@@ -304,10 +324,13 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         f"{eval_name} (95%ile)": [round(lm_me_95[i], 3) for i in worst_indices]
     })
 
+    df_samples = pd.DataFrame(sample_records)
+
     with pd.ExcelWriter(result_excel_path, engine='openpyxl') as writer:
         df_summary.to_excel(writer, sheet_name='1_Summary', index=False)
         df_landmarks.to_excel(writer, sheet_name='2_Per_Landmark', index=False)
         df_top10.to_excel(writer, sheet_name='3_Top10_Hardest', index=False)
+        df_samples.to_excel(writer, sheet_name='4_Per_Sample', index=False)
 
     txt_path = result_excel_path.replace(".xlsx", ".txt")
     with open(txt_path, 'w', encoding='utf-8') as f:
@@ -333,6 +356,15 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         for r, i in enumerate(worst_indices):
             f.write(f"  {r+1}위: LM {i+1:02d} (오차: {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm)\n")
                 
+        f.write("\n[4. Per-Sample Mean Error]\n")
+        for sample_record in sample_records:
+            f.write(
+                f"  #{sample_record['Index']:03d} "
+                f"{sample_record['Sample_Name']} : "
+                f"{sample_record['Mean_Error_mm']:.4f} mm "
+                f"({sample_record['Pred_ASC']})\n"
+            )
+
     print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
     print(f"  └─ 📄 Text summary perfectly synchronized & saved to: {os.path.basename(txt_path)}")
     print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")

@@ -80,7 +80,7 @@ def resolve_validation_dataset(args):
     if val_dataset_name:
         return val_dataset_name, val_partition
 
-    candidate_names = [args.train_dataset_name, args.test_dataset_name]
+    candidate_names = ['val', 'validation', 'valiation']
     for candidate_name in candidate_names:
         base_path = os.path.join(args.data_root, f"{candidate_name}-npy")
         shape_path = os.path.join(base_path, _shape_file_name(args.in_channels, val_partition))
@@ -89,7 +89,7 @@ def resolve_validation_dataset(args):
         if os.path.exists(shape_path) and os.path.exists(heat_path) and os.path.exists(land_path):
             return candidate_name, val_partition
 
-    return args.test_dataset_name, 'test'
+    return 'valiation', val_partition
 
 def backup_npy_split(paths, data_root, data_name, partition, label):
     base_path = os.path.join(data_root, f"{data_name}-npy")
@@ -189,12 +189,13 @@ class UniversalPipeline(nn.Module):
 def train(args):
     accum_steps = args.accumulation_steps
     val_dataset_name, val_partition = resolve_validation_dataset(args)
+    m_name = args.model.lower()
 
     if args.need_resample:
-        main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.train_dataset_name, args.data_root, partition='train')
-        main_sample(args.num_points, args.seed, args.sigma, args.sample_way, val_dataset_name, args.data_root, partition=val_partition)
+        main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.train_dataset_name, args.data_root, partition='train', geom_batch_size=args.geom_batch_size)
+        main_sample(args.num_points, args.seed, args.sigma, args.sample_way, val_dataset_name, args.data_root, partition=val_partition, geom_batch_size=args.geom_batch_size)
         if not (val_dataset_name == args.test_dataset_name and val_partition == 'test'):
-            main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.test_dataset_name, args.data_root, partition='test')
+            main_sample(args.num_points, args.seed, args.sigma, args.sample_way, args.test_dataset_name, args.data_root, partition='test', geom_batch_size=args.geom_batch_size)
 
     print(f">> [INFO] Loading Separate Datasets: {args.train_dataset_name} (train) & {val_dataset_name} ({val_partition})")
     train_dataset = FaceLandmarkData(data_root=args.data_root, partition='train', data=args.train_dataset_name, in_channels=args.in_channels)

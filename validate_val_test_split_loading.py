@@ -96,10 +96,10 @@ def print_summary(summary):
 def main():
     parser = argparse.ArgumentParser(description="Validate train/val/test NPY split loading.")
     parser.add_argument("--data-root", type=str, default="../data")
-    parser.add_argument("--train-dataset-name", type=str, default="Ear296_Korean")
-    parser.add_argument("--val-dataset-name", type=str, default="")
+    parser.add_argument("--train-dataset-name", type=str, default="train")
+    parser.add_argument("--val-dataset-name", type=str, default="valiation")
     parser.add_argument("--val-partition", type=str, default="val")
-    parser.add_argument("--test-dataset-name", type=str, default="")
+    parser.add_argument("--test-dataset-name", type=str, default="test")
     parser.add_argument("--in-channels", type=int, default=7)
     parser.add_argument("--output-dir", type=Path, default=Path("validation_outputs"))
     args = parser.parse_args()
