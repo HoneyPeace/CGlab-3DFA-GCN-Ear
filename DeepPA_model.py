@@ -208,6 +208,6 @@ class DeepPA_Wrapper(nn.Module):
         # 🌟 7. Train/Eval 상관없이 무조건 튜플 통일 반환
         spa_loss = out[1] if isinstance(out, tuple) else torch.tensor(0.0).to(device)
         raw_sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
-        sem_list = [F.softmax(s, dim=1) for s in raw_sem_list] if len(raw_sem_list) > 0 else []
+        sem_list = [torch.sigmoid(s) for s in raw_sem_list] if len(raw_sem_list) > 0 else []
         
         return coords, spa_loss, sem_list
