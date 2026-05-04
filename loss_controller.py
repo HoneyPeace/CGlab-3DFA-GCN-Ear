@@ -106,7 +106,7 @@ class DeepPALossController:
             total_loss = (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
 
         elif m_name == 'frozen_aux_drop':
-            w_hds = max(0.0, 1.0 - (1.0 * (epoch / 15.0))) 
+            w_hds = max(0.0, 1.0 - (1.0 * (epoch / 30.0))) 
             total_loss = (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
 
         elif m_name in ['frozen_no_aux', 'deepla_progress', 'deeppa_frozen_no_heat']:
