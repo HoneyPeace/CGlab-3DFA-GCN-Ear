@@ -6,7 +6,7 @@ import torch
 import pandas as pd
 
 class DeepPALossController:
-    def __init__(self, patience=5, base_hds=0.1, decay_step=0.05, min_heatmap_warmup=30, use_rlw_for_pred=False, aux_drop_epochs=30): # 🌟 decay_step 수신부 추가
+    def __init__(self, patience=5, base_hds=0.1, decay_step=0.05, min_heatmap_warmup=30, use_rlw_for_pred=False, aux_drop_epochs=30, frozen_paconv_hm_weight=0.0): # 🌟 decay_step 수신부 추가
         self.patience = patience
         self.base_hds = base_hds     # Aux(HDS) 기본 가중치
         self.decay_step = decay_step # 가중치 감소 보폭
@@ -15,6 +15,7 @@ class DeepPALossController:
         if aux_drop_epochs <= 0:
             raise ValueError("aux_drop_epochs must be positive")
         self.aux_drop_epochs = aux_drop_epochs
+        self.frozen_paconv_hm_weight = frozen_paconv_hm_weight
         self.val_decay = 1.0         # Main HM 가중치. 1.0으로 시작
         self.stagnation_counter = 0
         self.best_val_mm = float('inf')
@@ -76,6 +77,7 @@ class DeepPALossController:
         w_hds = self.base_hds
         w_pa = self.weight_PA
         w_dp = self.weight_DP
+        frozen_pa_loss = self.frozen_paconv_hm_weight * L_pa if m_name.startswith('frozen_') else 0.0
 
         # =================================================================
         # 🌟 PAConv 및 기타 브랜치 완벽 대응
@@ -106,11 +108,11 @@ class DeepPALossController:
         # 🌟 DeepPA & DeepLA Ablation 그룹
         # =================================================================
         elif m_name in ['single_deeppa', 'deeppa_frozen', 'frozen_aux_fixed']:
-            total_loss = (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
+            total_loss = (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred) + frozen_pa_loss
 
         elif m_name == 'frozen_aux_drop':
             w_hds = max(0.0, 1.0 - (1.0 * (epoch / float(self.aux_drop_epochs)))) 
-            total_loss = (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
+            total_loss = (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred) + frozen_pa_loss
 
         elif m_name in ['frozen_no_aux', 'deepla_progress', 'deeppa_frozen_no_heat']:
             w_hds = 0.0 
@@ -118,7 +120,7 @@ class DeepPALossController:
                 total_loss = L_pred
                 w_main = 0.0
             else:
-                total_loss = (w_main * L_main) + (w_geom * L_pred)
+                total_loss = (w_main * L_main) + (w_geom * L_pred) + frozen_pa_loss
 
         elif m_name == 'deepla_ori':
             w_hds = self.val_decay 

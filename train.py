@@ -14,7 +14,6 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
-import torch.optim as optim
 import pandas as pd
 import numpy as np
 import shutil
@@ -35,6 +34,7 @@ from DeepPA_model import DeepPA_Wrapper
 
 # 🌟 [핵심] 외부 로스 컨트롤러 임포트
 from loss_controller import DeepPALossController
+from optimizer_utils import build_training_optimizer
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -142,10 +142,11 @@ class UniversalPipeline(nn.Module):
         self.mode = mode.lower()
         self.args = args
         self.landmark_num = landmark_num
+        self.unfreeze_paconv_in_frozen = getattr(args, 'unfreeze_paconv_in_frozen', False)
         
         if self.mode in ['frozen', 'finetune', 'e2e']:
             self.stage1_paconv = PAConv(args, landmark_num)
-            if self.mode == 'frozen':
+            if self.mode == 'frozen' and not self.unfreeze_paconv_in_frozen:
                 for param in self.stage1_paconv.parameters(): param.requires_grad = False
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
             
@@ -176,8 +177,11 @@ class UniversalPipeline(nn.Module):
         elif self.mode in ['frozen', 'finetune', 'e2e']:
             if self.mode == 'frozen':
                 self.stage1_paconv.eval()
-                with torch.no_grad(): 
+                if self.unfreeze_paconv_in_frozen:
                     multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
+                else:
+                    with torch.no_grad():
+                        multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
             else:
                 multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
                 
@@ -249,7 +253,7 @@ def train(args):
     hm_criterion = AdaptiveWingLoss().to(device) 
     hierarchical_hm_loss = DeepPA_HierarchicalHeatmapLoss(hm_criterion).to(device)
     
-    opt = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, eps=1e-08, weight_decay=args.weight_decay)
+    opt = build_training_optimizer(args, model, pipeline_mode)
     scheduler = CosineAnnealingLR(opt, T_max=args.epochs) if getattr(args, 'scheduler', 'cos') == 'cos' else StepLR(opt, step_size=40, gamma=0.9)
 
     excel_log_path = os.path.join(paths['root'], f'Training_Log_{m_name}.xlsx')
@@ -262,7 +266,8 @@ def train(args):
         decay_step=getattr(args, 'val_decay_step', 0.05),
         min_heatmap_warmup=getattr(args, 'min_heatmap_warmup', 30),
         use_rlw_for_pred=getattr(args, 'use_rlw_for_pred', False),
-        aux_drop_epochs=getattr(args, 'aux_drop_epochs', 30)
+        aux_drop_epochs=getattr(args, 'aux_drop_epochs', 30),
+        frozen_paconv_hm_weight=getattr(args, 'frozen_paconv_hm_weight', 0.0)
     )
     auto_scales = {'pa': -1.0, 'main': -1.0, 'aux': -1.0, 'coord': -1.0, 'surface': -1.0, 'struct': -1.0}
 
@@ -294,7 +299,12 @@ def train(args):
 
                 # 🌟 3. 개별(순수) 로스 계산
                 L_pa = torch.tensor(0.0).to(device)
-                if pipeline_mode in ['e2e', 'single_paconv', 'single_paconv_heat'] and paconv_hm is not None:
+                use_frozen_pa_hm = (
+                    pipeline_mode == 'frozen'
+                    and getattr(args, 'unfreeze_paconv_in_frozen', False)
+                    and getattr(args, 'frozen_paconv_hm_weight', 0.0) > 0.0
+                )
+                if (pipeline_mode in ['e2e', 'single_paconv', 'single_paconv_heat'] or use_frozen_pa_hm) and paconv_hm is not None:
                     L_pa = hm_criterion(paconv_hm, target_hm)
                 
                 L_main_hm = torch.tensor(0.0).to(device)

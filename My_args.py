@@ -85,8 +85,19 @@ parser.add_argument('--use_interaction_fusion', type=str2bool, default=True,
 parser.add_argument('--fusion_residual_base', type=str, default='deeppa',
                     choices=['deeppa', 'prior'],
                     help="'deeppa': x + fusion_mlp([x, prior]) / 'prior': prior + fusion_mlp([x, prior])")
+parser.add_argument('--unfreeze_paconv_in_frozen', type=str2bool, default=False,
+                    help='True: allow PAConv parameters to receive gradients in frozen pipeline')
+parser.add_argument('--frozen_paconv_lr_scale', type=float, default=1.0,
+                    help='Learning-rate scale for PAConv when --unfreeze_paconv_in_frozen is True')
+parser.add_argument('--frozen_paconv_hm_weight', type=float, default=0.0,
+                    help='PAConv heatmap loss weight used when PAConv is unfrozen in frozen pipeline')
 parser.add_argument('--coord_from_heatmap', type=str2bool, default=True,
                     help='True: derive final DeepPA coordinates from main heatmap by differentiable top-k')
+parser.add_argument('--ablation_only', type=str, default='all',
+                    choices=['all', 'frozen_aux_fixed', 'frozen_aux_drop', 'frozen_no_aux'],
+                    help='run_frozen.py only: run one ablation model instead of all')
+parser.add_argument('--stage1_user_tag', type=str, default='',
+                    help='run_frozen.py only: reuse a PAConv Stage1 tag different from --user_tag')
 
 parser.add_argument('--yield_factor', type=float, default=0.8)
 parser.add_argument('--lambda_anchor', type=float, default=0.1)

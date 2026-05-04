@@ -120,12 +120,13 @@ if __name__ == "__main__":
 
     no_resample_args = set_arg_value(filtered_args, "--need_resample", "False")
     tag_prefix = f"{args.user_tag}_" if getattr(args, "user_tag", "") else ""
+    stage1_tag_prefix = f"{args.stage1_user_tag}_" if getattr(args, "stage1_user_tag", "") else tag_prefix
 
     # =========================================================================
     # [PHASE 1] PAConv 사전 학습 및 평가 (Stage 1)
     # =========================================================================
     print(f">>> [PHASE 1] Checking existing PAConv Baseline (using {MAIN_SCRIPT})...")
-    p1_tag = f"{tag_prefix}Stage1_PAConv"
+    p1_tag = f"{stage1_tag_prefix}Stage1_PAConv"
     p1_model_name = "Single_PAConv_last.t7" 
     
     p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, args.exp_name, tag=p1_tag, required_model=p1_model_name)
@@ -177,6 +178,11 @@ if __name__ == "__main__":
         {"model": "frozen_aux_drop",  "name": f"Aux {aux_drop_epochs}ep linear drop", "tag": f"{tag_prefix}Stage2_{current_inj_type.upper()}_{aux_drop_tag}", "saved_name": "Frozen_Aux_Drop_last.t7"},
         {"model": "frozen_no_aux",    "name": "Aux 완전 배제", "tag": f"{tag_prefix}Stage2_{current_inj_type.upper()}_NoAux", "saved_name": "Frozen_No_Aux_last.t7"},
     ]
+    ablation_only = getattr(args, "ablation_only", "all").lower()
+    if ablation_only != "all":
+        ablation_configs = [config for config in ablation_configs if config["model"] == ablation_only]
+        if not ablation_configs:
+            raise ValueError(f"Unknown ablation_only model: {ablation_only}")
 
     for config in ablation_configs:
         print(f"\n===============================================================")
