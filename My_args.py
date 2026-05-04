@@ -82,6 +82,9 @@ parser.add_argument('--use_feature_gating', type=str2bool, default=False,
 # [4] 자율 로스 게이팅 & 스케줄링 설정
 parser.add_argument('--use_interaction_fusion', type=str2bool, default=True,
                     help='True: use fusion_mlp interaction residual for PAConv hints')
+parser.add_argument('--fusion_residual_base', type=str, default='deeppa',
+                    choices=['deeppa', 'prior'],
+                    help="'deeppa': x + fusion_mlp([x, prior]) / 'prior': prior + fusion_mlp([x, prior])")
 parser.add_argument('--coord_from_heatmap', type=str2bool, default=True,
                     help='True: derive final DeepPA coordinates from main heatmap by differentiable top-k')
 
@@ -101,6 +104,8 @@ parser.add_argument('--patience', type=int, default=5, help='에폭 정체 대�
 parser.add_argument('--val_decay_step', type=float, default=0.05, help='정체 시 깎이는 메인 가중치 비율')
 parser.add_argument('--hds_buffer', type=float, default=0.1, help='Aux(HDS) 기본 고정 가중치 (0.3에서 0.1로 하향)')
 
+parser.add_argument('--aux_drop_epochs', type=int, default=30,
+                    help='Epoch count for frozen_aux_drop linear aux heatmap decay')
 parser.add_argument('--min_heatmap_warmup', type=int, default=30,
                     help='Minimum heatmap-only warmup epochs before val-based transition')
 

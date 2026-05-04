@@ -94,6 +94,8 @@ if __name__ == "__main__":
         idx = user_args.index("--latent_injection_type")
         if idx + 1 < len(user_args):
             current_inj_type = user_args[idx+1]
+    aux_drop_epochs = getattr(args, "aux_drop_epochs", 30)
+    aux_drop_tag = f"AuxDrop{aux_drop_epochs}" if "--aux_drop_epochs" in user_args else "AuxDrop"
             
     print("===============================================================")
     print(f" 🚀 [AUX ABLATION PIPELINE] Injection Mode: {current_inj_type.upper()}")
@@ -172,7 +174,7 @@ if __name__ == "__main__":
     # 🌟 연구자님의 3가지 모델로 루프를 돕니다.
     ablation_configs = [
         {"model": "frozen_aux_fixed", "name": "Aux 0.1 고정", "tag": f"{tag_prefix}Stage2_{current_inj_type.upper()}_AuxFixed", "saved_name": "Frozen_Aux_Fixed_last.t7"},
-        {"model": "frozen_aux_drop",  "name": "Aux 15ep 점진적 감소", "tag": f"{tag_prefix}Stage2_{current_inj_type.upper()}_AuxDrop", "saved_name": "Frozen_Aux_Drop_last.t7"},
+        {"model": "frozen_aux_drop",  "name": f"Aux {aux_drop_epochs}ep linear drop", "tag": f"{tag_prefix}Stage2_{current_inj_type.upper()}_{aux_drop_tag}", "saved_name": "Frozen_Aux_Drop_last.t7"},
         {"model": "frozen_no_aux",    "name": "Aux 완전 배제", "tag": f"{tag_prefix}Stage2_{current_inj_type.upper()}_NoAux", "saved_name": "Frozen_No_Aux_last.t7"},
     ]
 

@@ -6,12 +6,15 @@ import torch
 import pandas as pd
 
 class DeepPALossController:
-    def __init__(self, patience=5, base_hds=0.1, decay_step=0.05, min_heatmap_warmup=30, use_rlw_for_pred=False): # 🌟 decay_step 수신부 추가
+    def __init__(self, patience=5, base_hds=0.1, decay_step=0.05, min_heatmap_warmup=30, use_rlw_for_pred=False, aux_drop_epochs=30): # 🌟 decay_step 수신부 추가
         self.patience = patience
         self.base_hds = base_hds     # Aux(HDS) 기본 가중치
         self.decay_step = decay_step # 가중치 감소 보폭
         self.min_heatmap_warmup = min_heatmap_warmup
         self.use_rlw_for_pred = use_rlw_for_pred
+        if aux_drop_epochs <= 0:
+            raise ValueError("aux_drop_epochs must be positive")
+        self.aux_drop_epochs = aux_drop_epochs
         self.val_decay = 1.0         # Main HM 가중치. 1.0으로 시작
         self.stagnation_counter = 0
         self.best_val_mm = float('inf')
@@ -106,7 +109,7 @@ class DeepPALossController:
             total_loss = (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
 
         elif m_name == 'frozen_aux_drop':
-            w_hds = max(0.0, 1.0 - (1.0 * (epoch / 30.0))) 
+            w_hds = max(0.0, 1.0 - (1.0 * (epoch / float(self.aux_drop_epochs)))) 
             total_loss = (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
 
         elif m_name in ['frozen_no_aux', 'deepla_progress', 'deeppa_frozen_no_heat']:

@@ -111,6 +111,7 @@ class Stage_PA(nn.Module):
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
         self.use_feature_gating = getattr(args, 'use_feature_gating', False) 
         self.use_interaction_fusion = getattr(args, 'use_interaction_fusion', True)
+        self.fusion_residual_base = getattr(args, 'fusion_residual_base', 'deeppa').lower()
         
         # 🌟 2. 주입 타입별 투영(Projection) 레이어 동적 생성
         if self.injection_type != 'none':
@@ -288,7 +289,10 @@ class Stage_PA(nn.Module):
             if self.use_interaction_fusion:
                 fused = torch.cat([x, p_feat], dim=-1)
                 mixed_residual = self.fusion_mlp(fused.view(-1, fused.shape[-1])).view(B, N, -1)
-                x = x + mixed_residual
+                if self.fusion_residual_base == 'prior':
+                    x = p_feat + mixed_residual
+                else:
+                    x = x + mixed_residual
             elif self.use_feature_gating:
                 fused_for_gate = torch.cat([x, p_feat], dim=-1) 
                 gate_matrix = self.gate_mlp(fused_for_gate.view(-1, fused_for_gate.shape[-1])).view(B, N, -1)

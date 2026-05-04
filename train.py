@@ -261,7 +261,8 @@ def train(args):
         base_hds=getattr(args, 'hds_buffer', 0.1), # 하드코딩 제거
         decay_step=getattr(args, 'val_decay_step', 0.05),
         min_heatmap_warmup=getattr(args, 'min_heatmap_warmup', 30),
-        use_rlw_for_pred=getattr(args, 'use_rlw_for_pred', False)
+        use_rlw_for_pred=getattr(args, 'use_rlw_for_pred', False),
+        aux_drop_epochs=getattr(args, 'aux_drop_epochs', 30)
     )
     auto_scales = {'pa': -1.0, 'main': -1.0, 'aux': -1.0, 'coord': -1.0, 'surface': -1.0, 'struct': -1.0}
 
