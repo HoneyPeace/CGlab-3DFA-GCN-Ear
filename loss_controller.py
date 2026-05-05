@@ -137,7 +137,7 @@ class DeepPALossController:
         else: 
             total_loss = (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
 
-        weights = {'w_main': w_main, 'w_hds': w_hds, 'w_geom': w_geom, 'w_pa': w_pa, 'w_dp': w_dp}
+        weights = {'w_main': w_main, 'w_hds': w_hds, 'w_geom': w_geom, 'w_pa': w_pa, 'w_dp': w_dp, 'w_frozen_pa': self.frozen_paconv_hm_weight}
         return total_loss, weights
 
     # 🌟 t_hm_PA 수신부 추가
@@ -165,6 +165,10 @@ class DeepPALossController:
         else:
             w_str = f"Main_W: {weights['w_main']:.2f} | Aux_W: {weights['w_hds']:.3f} | Geom_W: {weights['w_geom']:.2f}"
             l_str = f"Main_HM: {t_hm_main/num_b:.4f} | Aux_HM: {t_hm_aux/num_b:.4f} | Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}"
+
+        if m_name.startswith('frozen_') and weights.get('w_frozen_pa', 0.0) > 0.0:
+            w_str = f"{w_str} | PA_W: {weights['w_frozen_pa']:.3f}"
+            l_str = f"PA_HM: {t_hm_PA/num_b:.4f} | {l_str}"
 
         # 터미널 프린팅
         print(f" [{model_name.upper()} Ep {epoch+1:03d}] Total_L: {t_loss_n/num_b:.4f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f} ")
