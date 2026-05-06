@@ -46,6 +46,39 @@ def weight_init(m):
     elif isinstance(m, (torch.nn.Conv2d, torch.nn.Conv1d)):
         torch.nn.init.kaiming_normal_(m.weight)
 
+def normalize_stage1_paconv_state_dict(state_dict):
+    if isinstance(state_dict, dict) and 'state_dict' in state_dict:
+        state_dict = state_dict['state_dict']
+
+    keys = list(state_dict.keys())
+    prefix = ''
+    if any(key.startswith('model.') for key in keys):
+        prefix = 'model.'
+    elif any(key.startswith('stage1_paconv.') for key in keys):
+        prefix = 'stage1_paconv.'
+
+    if prefix:
+        state_dict = {
+            key.replace(prefix, '', 1) if key.startswith(prefix) else key: value
+            for key, value in state_dict.items()
+        }
+    return state_dict, prefix
+
+def load_stage1_paconv_checkpoint(stage1_paconv, checkpoint_path, map_location):
+    raw_state = torch.load(checkpoint_path, map_location=map_location)
+    state_dict, stripped_prefix = normalize_stage1_paconv_state_dict(raw_state)
+    load_result = stage1_paconv.load_state_dict(state_dict, strict=False)
+    missing_keys = list(load_result.missing_keys)
+    unexpected_keys = list(load_result.unexpected_keys)
+    if stripped_prefix:
+        print(f"[CHECK] PAConv checkpoint prefix stripped: {stripped_prefix}")
+    print(f"[CHECK] PAConv load missing={len(missing_keys)} unexpected={len(unexpected_keys)}")
+    if missing_keys:
+        print(f"[WARNING] PAConv missing keys sample: {missing_keys[:5]}")
+    if unexpected_keys:
+        print(f"[WARNING] PAConv unexpected keys sample: {unexpected_keys[:5]}")
+    return missing_keys, unexpected_keys
+
 def get_experiment_paths(args, train_len):
     project_dir = os.path.join(args.output_root, args.exp_name)
     os.makedirs(project_dir, exist_ok=True)
@@ -247,7 +280,7 @@ def train(args):
         if os.path.exists(original_paconv_path):
             shutil.copy2(original_paconv_path, backup_paconv_path)
             print(f"📦 [Pretrained] Coarse Anchor용 PAConv 로드 완료!")
-            model.stage1_paconv.load_state_dict(torch.load(backup_paconv_path, map_location=device), strict=False)
+            load_stage1_paconv_checkpoint(model.stage1_paconv, backup_paconv_path, device)
         
     surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
     hm_criterion = AdaptiveWingLoss().to(device) 
