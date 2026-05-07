@@ -121,6 +121,9 @@ if __name__ == "__main__":
     no_resample_args = set_arg_value(filtered_args, "--need_resample", "False")
     tag_prefix = f"{args.user_tag}_" if getattr(args, "user_tag", "") else ""
     stage1_tag_prefix = f"{args.stage1_user_tag}_" if getattr(args, "stage1_user_tag", "") else tag_prefix
+    stage1_exp_name = getattr(args, "stage1_exp_name", "") or args.exp_name
+    if stage1_exp_name != args.exp_name:
+        print(f">>> [INFO] run_frozen.py: Stage1 PAConv source exp = {stage1_exp_name}")
 
     # =========================================================================
     # [PHASE 1] PAConv 사전 학습 및 평가 (Stage 1)
@@ -129,11 +132,15 @@ if __name__ == "__main__":
     p1_tag = f"{stage1_tag_prefix}Stage1_PAConv"
     p1_model_name = "Single_PAConv_last.t7" 
     
-    p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, args.exp_name, tag=p1_tag, required_model=p1_model_name)
+    p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, stage1_exp_name, tag=p1_tag, required_model=p1_model_name)
 
     if p1_dir:
         print(f"  └─ 📦 [SKIP] 완료된 PAConv 발견! (Run ID: {p1_run_id})")
     else:
+        if stage1_exp_name != args.exp_name:
+            print(f"[ERROR] Requested Stage1 PAConv not found in exp: {stage1_exp_name}")
+            print(f"[ERROR] Stage1 tag: {p1_tag}")
+            sys.exit(1)
         print("  └─ 🚀 PAConv 베이스라인 학습 시작...")
         paconv_train_cmd = [sys.executable, MAIN_SCRIPT] + filtered_args + [
             "--model", "paconv_heat", "--user_tag", p1_tag
@@ -141,7 +148,7 @@ if __name__ == "__main__":
         try: subprocess.run(paconv_train_cmd, check=True)
         except subprocess.CalledProcessError as e: sys.exit(1)
         
-        p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, args.exp_name, tag=p1_tag, required_model=p1_model_name)
+        p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, stage1_exp_name, tag=p1_tag, required_model=p1_model_name)
 
     excel_exists = False
     if p1_dir:
@@ -149,12 +156,15 @@ if __name__ == "__main__":
         
     if not excel_exists:
         print(f"  └─ 🚀 PAConv 평가(eval.py) 시작...")
-        paconv_eval_cmd = [sys.executable, "eval.py"] + no_resample_args + [
+        stage1_eval_args = no_resample_args
+        if stage1_exp_name != args.exp_name:
+            stage1_eval_args = set_arg_value(no_resample_args, "--exp_name", stage1_exp_name)
+        paconv_eval_cmd = [sys.executable, "eval.py"] + stage1_eval_args + [
             "--model", "paconv_heat", "--run_id", str(p1_run_id), 
             "--model_epoch", p1_model_name, "--user_tag", p1_tag
         ]
-        if p1_train_len and "--train_len" not in no_resample_args: paconv_eval_cmd.extend(["--train_len", str(p1_train_len)])
-        if "--Eval_DataType" not in no_resample_args: paconv_eval_cmd.extend(["--Eval_DataType", "test"])
+        if p1_train_len and "--train_len" not in stage1_eval_args: paconv_eval_cmd.extend(["--train_len", str(p1_train_len)])
+        if "--Eval_DataType" not in stage1_eval_args: paconv_eval_cmd.extend(["--Eval_DataType", "test"])
         try: subprocess.run(paconv_eval_cmd, check=True)
         except subprocess.CalledProcessError as e: sys.exit(1)
 

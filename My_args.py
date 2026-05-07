@@ -98,6 +98,8 @@ parser.add_argument('--ablation_only', type=str, default='all',
                     help='run_frozen.py only: run one ablation model instead of all')
 parser.add_argument('--stage1_user_tag', type=str, default='',
                     help='run_frozen.py only: reuse a PAConv Stage1 tag different from --user_tag')
+parser.add_argument('--stage1_exp_name', type=str, default='',
+                    help='run_frozen.py only: reuse PAConv Stage1 from a different experiment folder')
 
 parser.add_argument('--yield_factor', type=float, default=0.8)
 parser.add_argument('--lambda_anchor', type=float, default=0.1)
