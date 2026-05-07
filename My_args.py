@@ -119,6 +119,8 @@ parser.add_argument('--hds_buffer', type=float, default=0.1, help='Aux(HDS) ê¸°ë
 
 parser.add_argument('--aux_drop_epochs', type=int, default=30,
                     help='Epoch count for frozen_aux_drop linear aux heatmap decay')
+parser.add_argument('--use_stagewise_aux_hm', type=str2bool, default=False,
+                    help='True: compare each auxiliary heatmap with GT heatmap gathered at the same stage point indices')
 parser.add_argument('--min_heatmap_warmup', type=int, default=30,
                     help='Minimum heatmap-only warmup epochs before val-based transition')
 

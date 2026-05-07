@@ -176,6 +176,7 @@ class UniversalPipeline(nn.Module):
         self.args = args
         self.landmark_num = landmark_num
         self.unfreeze_paconv_in_frozen = getattr(args, 'unfreeze_paconv_in_frozen', False)
+        self.stage_hm_indices = None
         
         if self.mode in ['frozen', 'finetune', 'e2e']:
             self.stage1_paconv = PAConv(args, landmark_num)
@@ -205,6 +206,7 @@ class UniversalPipeline(nn.Module):
             pred_coords = out[0]
             sem_list = out[2] if len(out) > 2 else [] 
             main_hm = sem_list[-1] if len(sem_list) > 0 else None
+            self.stage_hm_indices = getattr(self.model, 'latest_stage_hm_indices', None)
             return pred_coords, sem_list, main_hm
             
         elif self.mode in ['frozen', 'finetune', 'e2e']:
@@ -221,6 +223,7 @@ class UniversalPipeline(nn.Module):
             out = self.stage2_deeppa(x, prior_hints=multi_scale_hints)
             pred_coords = out[0]
             sem_list = out[2] if len(out) > 2 else []
+            self.stage_hm_indices = getattr(self.stage2_deeppa, 'latest_stage_hm_indices', None)
             return pred_coords, sem_list, s1_hm_raw
 
 def train(args):
@@ -344,7 +347,8 @@ def train(args):
                 L_aux_hm = torch.tensor(0.0).to(device)
                 
                 if pipeline_mode not in ['single_paconv', 'single_paconv_heat']:
-                     L_main_hm, L_aux_hm = hierarchical_hm_loss(sem_list, target_hm)
+                     stage_hm_indices = getattr(model, 'stage_hm_indices', None) if getattr(args, 'use_stagewise_aux_hm', False) else None
+                     L_main_hm, L_aux_hm = hierarchical_hm_loss(sem_list, target_hm, stage_hm_indices)
 
                 L_crd = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                 L_srf, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)

@@ -121,6 +121,7 @@ class DeepPA_Wrapper(nn.Module):
     def forward(self, x, prior_hints=None):
         B, C_in, N_in = x.shape
         device = x.device
+        self.latest_stage_hm_indices = None
 
         # ==============================================================================
         # 🌟 2. [Ablation] 3지 선다 옵션에 따른 피처 주입 전처리
@@ -150,6 +151,8 @@ class DeepPA_Wrapper(nn.Module):
         xyz_coords = x[:, :3, :].permute(0, 2, 1).contiguous() 
         cur_xyz = xyz_coords
         down_knn_list, up_idx_list = [], []
+        stage_hm_indices = [torch.arange(N_in, dtype=torch.long, device=device).view(1, N_in).repeat(B, 1)]
+        cur_hm_indices = stage_hm_indices[0]
         
         with torch.no_grad(): # VRAM 누수 원천 차단
             for i in range(len(self.args.depths)):
@@ -168,6 +171,8 @@ class DeepPA_Wrapper(nn.Module):
                     next_points = self.args.npoints[i]
                     down_idx = farthest_point_sample(cur_xyz, next_points)
                     down_knn_list.append(down_idx) 
+                    cur_hm_indices = torch.gather(cur_hm_indices, 1, down_idx)
+                    stage_hm_indices.append(cur_hm_indices)
                     
                     batch_indices = torch.arange(B, dtype=torch.long, device=device).view(-1, 1).repeat(1, next_points)
                     next_xyz = cur_xyz[batch_indices, down_idx, :]
@@ -186,6 +191,7 @@ class DeepPA_Wrapper(nn.Module):
                 
         down_knn_list = down_knn_list[::-1]
         indices = up_idx_list + down_knn_list
+        self.latest_stage_hm_indices = stage_hm_indices
         
         # 4. 백본 통과
         in_features = x.permute(0, 2, 1).contiguous()

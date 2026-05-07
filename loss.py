@@ -124,7 +124,16 @@ class DeepPA_HierarchicalHeatmapLoss(nn.Module):
         super().__init__()
         self.criterion = criterion if criterion is not None else AdaptiveWingLoss()
 
-    def forward(self, sem_list, target_hm):
+    def _as_bln(self, pred, target_hm):
+        if pred.shape[1] != target_hm.shape[1]:
+            pred = pred.permute(0, 2, 1).contiguous()
+        return pred
+
+    def _gather_target_hm(self, target_hm, point_indices):
+        gather_idx = point_indices.long().unsqueeze(1).expand(-1, target_hm.shape[1], -1)
+        return torch.gather(target_hm, 2, gather_idx)
+
+    def forward(self, sem_list, target_hm, stage_indices=None):
         device = target_hm.device
         L_main_hm = torch.tensor(0.0).to(device)
         L_aux_hm = torch.tensor(0.0).to(device)
@@ -132,11 +141,27 @@ class DeepPA_HierarchicalHeatmapLoss(nn.Module):
         if not sem_list:
             return L_main_hm, L_aux_hm
 
+        if stage_indices is not None and len(sem_list) > 1:
+            aligned_sem_list = [self._as_bln(sp, target_hm) for sp in sem_list]
+            main_pred = aligned_sem_list[-1]
+            if main_pred.shape[2] == target_hm.shape[2]:
+                L_main_hm = self.criterion(main_pred, target_hm)
+
+            aux_losses = []
+            for sp, point_indices in zip(aligned_sem_list[:-1], stage_indices):
+                stage_target_hm = self._gather_target_hm(target_hm, point_indices)
+                if sp.shape[2] == stage_target_hm.shape[2]:
+                    aux_losses.append(self.criterion(sp, stage_target_hm))
+
+            if aux_losses:
+                L_aux_hm = sum(aux_losses) / len(aux_losses)
+
+            return L_main_hm, L_aux_hm
+
         safe_sem_list = []
         for sp in sem_list:
             # 텐서 형태 (B, N, C) vs (B, C, N) 정렬
-            if sp.shape[1] != target_hm.shape[1]: 
-                sp = sp.permute(0, 2, 1).contiguous()
+            sp = self._as_bln(sp, target_hm)
             if sp.shape[2] == target_hm.shape[2]: 
                 safe_sem_list.append(sp)
 
