@@ -56,6 +56,7 @@ The agent must not:
 - Remove existing functionality while adding or fixing another feature.
 - Install new dependencies unless explicitly approved.
 - Delete, overwrite, or rename existing datasets, checkpoints, logs, or result files.
+- Touch, edit, move, delete, sync, or create files inside OneDrive-connected folders unless the user explicitly requests it.
 - Use destructive commands such as `rm -rf`, `git reset --hard`, `git clean -fd`, or database deletion commands.
 - Commit or push to GitHub unless explicitly requested by the user.
 
