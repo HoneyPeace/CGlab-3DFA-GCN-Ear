@@ -26,6 +26,12 @@ class DeepPALossController:
 
     def update_patience(self, current_val_mm, epoch=None):
         """Val 정체 여부를 확인하고 가중치를 업데이트"""
+        if getattr(self, 'loss_schedule', 'val_adaptive') == 'fixed_three_phase':
+            if current_val_mm < self.best_val_mm:
+                self.best_val_mm = current_val_mm
+            self.stagnation_counter = 0
+            return False
+
         if epoch is not None and epoch < self.min_heatmap_warmup:
             if current_val_mm < self.best_val_mm:
                 self.best_val_mm = current_val_mm
@@ -62,9 +68,15 @@ class DeepPALossController:
             'deepla_ori', 'deepla_decay', 'deepla_all', 'deepla_all_tied',
             'paconv_struct'
         ]
-        warmup_active = (m_name in warmup_modes) and (epoch < self.min_heatmap_warmup)
-        w_main = 1.0 if warmup_active else max(0.1, self.val_decay)
-        w_geom = 0.0 if warmup_active else 1.0 - w_main
+        if getattr(self, 'loss_schedule', 'val_adaptive') == 'fixed_three_phase' and m_name.startswith('frozen_'):
+            fixed_heatmap_epochs = getattr(self, 'fixed_heatmap_epochs', 60)
+            heatmap_only_active = epoch < fixed_heatmap_epochs
+            w_main = 1.0 if heatmap_only_active else getattr(self, 'fixed_main_weight', 0.9)
+            w_geom = 0.0 if heatmap_only_active else getattr(self, 'fixed_geom_weight', 0.1)
+        else:
+            warmup_active = (m_name in warmup_modes) and (epoch < self.min_heatmap_warmup)
+            w_main = 1.0 if warmup_active else max(0.1, self.val_decay)
+            w_geom = 0.0 if warmup_active else 1.0 - w_main
 
         if self.use_rlw_for_pred:
             rand_weights = torch.rand(3, device=L_crd.device)
@@ -167,8 +179,10 @@ class DeepPALossController:
             l_str = f"Main_HM: {t_hm_main/num_b:.4f} | Aux_HM: {t_hm_aux/num_b:.4f} | Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}"
 
         if m_name.startswith('frozen_') and weights.get('w_frozen_pa', 0.0) > 0.0:
+            pa_hm_raw = t_hm_PA / num_b
+            pa_hm_weighted = weights['w_frozen_pa'] * pa_hm_raw
             w_str = f"{w_str} | PA_W: {weights['w_frozen_pa']:.3f}"
-            l_str = f"PA_HM: {t_hm_PA/num_b:.4f} | {l_str}"
+            l_str = f"PA_HM: {pa_hm_raw:.4f} | PA_HM*w: {pa_hm_weighted:.4f} | {l_str}"
 
         # 터미널 프린팅
         print(f" [{model_name.upper()} Ep {epoch+1:03d}] Total_L: {t_loss_n/num_b:.4f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f} ")
@@ -181,6 +195,8 @@ class DeepPALossController:
             'W_Main': weights.get('w_main', 0), 'W_Geom': weights.get('w_geom', 0), 'W_Aux': weights.get('w_hds', 0),
             'L_main_hm': t_hm_main/num_b, 'L_aux_hm': t_hm_aux/num_b, 
             'L_coord': t_crd/num_b, 'L_surface': t_srf/num_b, 'L_struct': t_str/num_b,
-            'L_pa_hm': t_hm_PA/num_b
+            'L_pa_hm': t_hm_PA/num_b,
+            'W_Frozen_PA': weights.get('w_frozen_pa', 0),
+            'L_pa_hm_weighted': weights.get('w_frozen_pa', 0) * (t_hm_PA/num_b)
         }
         return log_record

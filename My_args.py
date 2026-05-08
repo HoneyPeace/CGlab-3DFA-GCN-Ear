@@ -82,7 +82,7 @@ parser.add_argument('--use_feature_gating', type=str2bool, default=False,
 # [4] 자율 로스 게이팅 & 스케줄링 설정
 parser.add_argument('--use_interaction_fusion', type=str2bool, default=True,
                     help='True: use fusion_mlp interaction residual for PAConv hints')
-parser.add_argument('--fusion_residual_base', type=str, default='deeppa',
+parser.add_argument('--fusion_residual_base', type=str, default='prior',
                     choices=['deeppa', 'prior'],
                     help="'deeppa': x + fusion_mlp([x, prior]) / 'prior': prior + fusion_mlp([x, prior])")
 parser.add_argument('--unfreeze_paconv_in_frozen', type=str2bool, default=False,
@@ -123,6 +123,15 @@ parser.add_argument('--use_stagewise_aux_hm', type=str2bool, default=False,
                     help='True: compare each auxiliary heatmap with GT heatmap gathered at the same stage point indices')
 parser.add_argument('--min_heatmap_warmup', type=int, default=30,
                     help='Minimum heatmap-only warmup epochs before val-based transition')
+parser.add_argument('--loss_schedule', type=str, default='val_adaptive',
+                    choices=['val_adaptive', 'fixed_three_phase'],
+                    help='val_adaptive: existing validation-based transition / fixed_three_phase: fixed heatmap then fixed geometry weights')
+parser.add_argument('--fixed_heatmap_epochs', type=int, default=60,
+                    help='Epoch count for heatmap-only phase when --loss_schedule fixed_three_phase')
+parser.add_argument('--fixed_main_weight', type=float, default=0.9,
+                    help='Fixed main heatmap weight after fixed_heatmap_epochs')
+parser.add_argument('--fixed_geom_weight', type=float, default=0.1,
+                    help='Fixed coordinate/surface/structure weight after fixed_heatmap_epochs')
 
 parser.add_argument('--regression_point_num', type=int, default=10)
 parser.add_argument('--plane_knn', type=int, default=5)

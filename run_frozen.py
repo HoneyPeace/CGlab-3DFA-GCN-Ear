@@ -12,6 +12,7 @@ import subprocess
 import re
 import shutil
 import time
+import filecmp
 from My_args import parser
 
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -176,7 +177,10 @@ if __name__ == "__main__":
     target_model_dir = os.path.join(args.output_root, "PAConv_Pretrained", "models")
     os.makedirs(target_model_dir, exist_ok=True)
     target_model_path = os.path.join(target_model_dir, p1_model_name)
-    shutil.copy(source_model_path, target_model_path)
+    if os.path.exists(target_model_path) and filecmp.cmp(source_model_path, target_model_path, shallow=False):
+        print(f"  [INFO] PAConv bridge target already matches source. Copy skipped. ({p1_model_name})")
+    else:
+        shutil.copy(source_model_path, target_model_path)
     print(f"  └─ 📦 완료! PAConv 가중치 브릿지 성공. ({p1_model_name})")
 
     # =========================================================================

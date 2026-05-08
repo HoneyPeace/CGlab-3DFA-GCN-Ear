@@ -305,6 +305,15 @@ def train(args):
         aux_drop_epochs=getattr(args, 'aux_drop_epochs', 30),
         frozen_paconv_hm_weight=getattr(args, 'frozen_paconv_hm_weight', 0.0)
     )
+    loss_controller.loss_schedule = getattr(args, 'loss_schedule', 'val_adaptive').lower()
+    loss_controller.fixed_heatmap_epochs = getattr(args, 'fixed_heatmap_epochs', 60)
+    loss_controller.fixed_main_weight = getattr(args, 'fixed_main_weight', 0.9)
+    loss_controller.fixed_geom_weight = getattr(args, 'fixed_geom_weight', 0.1)
+    if pipeline_mode == 'frozen' and getattr(args, 'unfreeze_paconv_in_frozen', False):
+        frozen_pa_w = getattr(args, 'frozen_paconv_hm_weight', 0.0)
+        print("[INFO] Finetune PAConv enabled inside frozen pipeline.")
+        print(f"[INFO] Finetune PAConv loss term: + {frozen_pa_w:.3f} * PA_HM")
+        print(f"[INFO] Finetune PAConv LR scale: {getattr(args, 'frozen_paconv_lr_scale', 1.0)}")
     auto_scales = {'pa': -1.0, 'main': -1.0, 'aux': -1.0, 'coord': -1.0, 'surface': -1.0, 'struct': -1.0}
 
     for epoch in range(args.epochs):
