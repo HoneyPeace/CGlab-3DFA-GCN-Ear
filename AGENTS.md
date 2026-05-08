@@ -1307,6 +1307,191 @@ Harness output should use clear prefixes:
 [FAIL] ...
 ```
 
+### Elevated Permission and VS2019 Native Tools Harness Rules
+
+When the user grants broad or elevated permissions, the agent must still behave conservatively.
+
+Elevated permission does not mean unrestricted action. It only allows the agent to run the specific commands needed for the approved task.
+
+Before using elevated permissions, the agent must:
+
+- State the exact command or script that will be executed.
+- State the working directory.
+- State whether the command may write files, create logs, start training, use CUDA, or run for a long time.
+- Confirm that the command does not delete, overwrite, rename, reset, clean, commit, push, install packages, or change datasets/checkpoints.
+- Prefer a reproducible command-line harness over GUI window control.
+
+For Visual Studio 2019 Native Tools on Windows, prefer loading the environment inside the same command session instead of controlling an already-open command prompt window.
+
+Preferred pattern:
+
+```bat
+call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\Tools\VsDevCmd.bat"
+call "C:\Users\CGlab\anaconda3\condabin\conda.bat" activate EarLandMarking_CGLAB
+cd /d "C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN"
+python train.py --need_resample True --sigma 5 --num_points 2048 --dataset_seed 1 --sample_way FPS --batch_size 32
+```
+
+PowerShell one-command pattern:
+
+```powershell
+cmd /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\Tools\VsDevCmd.bat"" && call ""C:\Users\CGlab\anaconda3\condabin\conda.bat"" activate EarLandMarking_CGLAB && cd /d ""C:\Users\CGlab\Desktop\Earlandmark\Ear 3DFA-GCN"" && python train.py --need_resample True --sigma 5 --num_points 2048 --dataset_seed 1 --sample_way FPS --batch_size 32"
+```
+
+The agent must not claim that it can directly control or observe an already-open GUI command prompt unless a browser/desktop automation tool with that specific capability is available and successfully used.
+
+If the task is to run a model, the agent must prefer:
+
+- A `.bat` or `.ps1` harness that loads VS2019 Native Tools and conda explicitly.
+- A dry-run command such as `python train.py --help` when available.
+- A short validation command before a full training run when the project supports it.
+- Logging to a safe new file only when the user approves or when the file name is timestamped and non-overwriting.
+
+The agent must not use elevated permissions for:
+
+- `git reset`, `git clean`, forced checkout, branch deletion, merge, rebase, commit, or push unless explicitly requested.
+- Deleting datasets, checkpoints, logs, results, or cache folders.
+- Installing packages or changing the Python/conda environment unless explicitly approved.
+- Editing Windows system settings, PATH, registry, Visual Studio installation files, CUDA installation files, or conda installation files unless explicitly approved.
+- Starting a long training run without first showing the exact command and expected side effects.
+
+After running an elevated or VS2019 harness command, the agent must report:
+
+```text
+Elevated/VS2019 harness report
+- Command executed:
+- Working directory:
+- Environment loaded:
+- Conda environment:
+- Files written:
+- Existing files overwritten: Yes/No
+- Exit status:
+- Important log lines:
+- Remaining risk:
+```
+
+### 24-Hour Unattended Experiment Loop Rules
+
+When the user explicitly approves a long unattended experiment loop, the agent may run training, evaluation, result analysis, and Notion reporting within the approved scope.
+
+This approval is not permission to make unrestricted changes. The agent must treat the 24-hour loop as an experiment harness with strict boundaries.
+
+Allowed without additional approval during an approved unattended loop:
+
+- Run existing training scripts with explicitly listed arguments.
+- Run existing evaluation or analysis scripts with explicitly listed arguments.
+- Read logs, metrics, result files, configuration files, and source files.
+- Create new timestamped run folders under safe output roots such as `results/`, `outputs/`, `validation_outputs/`, or `debug_outputs/`.
+- Write new non-overwriting logs, summaries, CSV/JSON/Markdown reports, and Notion reports.
+- Parse metrics and compare results across runs without changing metric calculation code.
+- Stop a failed run and move to analysis/reporting.
+
+Not allowed without separate explicit approval during an unattended loop:
+
+- Modify model architecture, preprocessing, dataset split, normalization, heatmap generation, FPS sampling, regression, metric logic, checkpoint loading, or training hyperparameters.
+- Edit code to "improve" results.
+- Install packages, update conda environments, change CUDA/Visual Studio/PATH/system settings, or modify environment variables permanently.
+- Delete, overwrite, rename, or move datasets, checkpoints, existing results, logs, or source files.
+- Commit, push, pull, merge, rebase, reset, clean, or switch branches.
+- Continue retrying the same failing command indefinitely.
+- Start a new experiment whose command, seed, dataset, checkpoint, output path, or expected side effects are unknown.
+
+Every unattended run must write to a unique run directory.
+
+Recommended structure:
+
+```text
+results/auto_runs/YYYYMMDD_HHMMSS_<short_experiment_name>/
+  command.txt
+  environment.txt
+  train.log
+  eval.log
+  metrics.json
+  summary.md
+  notion_report.md
+```
+
+The agent must save or report the following for every run:
+
+- Start time and end time.
+- Exact command executed.
+- Working directory.
+- Conda environment.
+- Git status if the folder is a Git repository.
+- Dataset or partition name.
+- Seed values.
+- Checkpoint path if evaluation is run.
+- Output directory.
+- Important metric values.
+- Whether the run completed, failed, timed out, or was interrupted.
+- Any error traceback or warning that may affect the result.
+
+Stop conditions:
+
+- The same command fails twice with the same error.
+- A command appears to overwrite an existing dataset, checkpoint, or result file.
+- Disk space becomes low or output grows unexpectedly large.
+- A run requests package installation or environment changes.
+- A run requires changing protected research logic.
+- A metric becomes invalid due to NaN, Inf, missing files, missing landmarks, or impossible shape.
+- The process is still running but no useful progress has appeared in logs for a long time.
+
+If a stop condition is reached, the agent must stop the loop and report instead of guessing a fix.
+
+For Notion reporting, the agent must keep reports factual and reproducible:
+
+- Do not invent metric values.
+- Do not claim a run completed unless the logs confirm completion.
+- Include failed runs and errors.
+- Include exact commands and output paths.
+- Clearly separate observed results from hypotheses or next-step suggestions.
+- Do not upload datasets, checkpoints, secrets, or large raw logs unless explicitly requested.
+
+Before starting a 24-hour unattended loop, the agent must present a loop manifest:
+
+```text
+24-hour loop manifest
+- Approved duration:
+- Working directory:
+- Environment setup command:
+- Training/evaluation commands:
+- Output root:
+- Notion destination:
+- Allowed actions:
+- Forbidden actions:
+- Stop conditions:
+- Reporting interval:
+```
+
+During the loop, the agent must periodically report progress in concise checkpoints:
+
+```text
+Loop checkpoint
+- Time:
+- Current run:
+- Command:
+- Status:
+- Latest metric/log signal:
+- Files written:
+- Next action:
+```
+
+At the end of the loop, the agent must provide:
+
+```text
+24-hour loop final report
+- Runs completed:
+- Runs failed:
+- Best observed result:
+- Output directories:
+- Notion reports created:
+- Code changes made: Yes/No
+- Protected logic changed: Yes/No
+- Files overwritten: Yes/No
+- Remaining risks:
+- Recommended next experiments:
+```
+
 ---
 
 ## Final Response Format
