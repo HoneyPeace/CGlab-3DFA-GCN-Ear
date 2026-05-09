@@ -113,6 +113,11 @@ class DeepPALossController:
             
         elif m_name == 'deeppa_e2e':
             rho = 0.9
+            e2e_aux_mode = getattr(self, 'e2e_aux_mode', 'fixed')
+            if e2e_aux_mode == 'drop':
+                w_hds = max(0.0, 1.0 - (1.0 * (epoch / float(self.aux_drop_epochs))))
+            elif e2e_aux_mode == 'none':
+                w_hds = 0.0
             w_main = 1.0 - rho * w_geom
             total_loss = w_main * (w_pa * L_pa + w_dp * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
 

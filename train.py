@@ -277,13 +277,15 @@ def train(args):
     model = UniversalPipeline(args, args.landmark_num, mode=pipeline_mode).to(device)
     model.apply(weight_init)
     
-    if pipeline_mode in ['frozen', 'finetune']:
+    if pipeline_mode in ['frozen', 'finetune'] or (pipeline_mode == 'e2e' and getattr(args, 'e2e_load_paconv_pretrained', False)):
         original_paconv_path = os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
         backup_paconv_path = os.path.join(paths['models'], "Backup_Pretrained_PAConv.t7")
         if os.path.exists(original_paconv_path):
             shutil.copy2(original_paconv_path, backup_paconv_path)
             print(f"📦 [Pretrained] Coarse Anchor용 PAConv 로드 완료!")
             load_stage1_paconv_checkpoint(model.stage1_paconv, backup_paconv_path, device)
+        elif pipeline_mode == 'e2e':
+            print(f"[WARNING] E2E PAConv pretrained load requested but file not found: {original_paconv_path}")
         
     surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
     hm_criterion = AdaptiveWingLoss().to(device) 
@@ -306,6 +308,10 @@ def train(args):
         frozen_paconv_hm_weight=getattr(args, 'frozen_paconv_hm_weight', 0.0)
     )
     loss_controller.loss_schedule = getattr(args, 'loss_schedule', 'val_adaptive').lower()
+    loss_controller.e2e_aux_mode = getattr(args, 'e2e_aux_mode', 'fixed').lower()
+    if pipeline_mode == 'e2e':
+        print(f"[INFO] E2E aux mode: {loss_controller.e2e_aux_mode}")
+        print(f"[INFO] E2E PAConv pretrained: {getattr(args, 'e2e_load_paconv_pretrained', False)}")
     loss_controller.fixed_heatmap_epochs = getattr(args, 'fixed_heatmap_epochs', 60)
     loss_controller.fixed_main_weight = getattr(args, 'fixed_main_weight', 0.9)
     loss_controller.fixed_geom_weight = getattr(args, 'fixed_geom_weight', 0.1)
