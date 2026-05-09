@@ -69,7 +69,8 @@ class DeepPALossController:
             'paconv_struct'
         ]
         loss_schedule = getattr(self, 'loss_schedule', 'val_adaptive')
-        if loss_schedule in ['fixed_three_phase', 'linear_three_phase'] and m_name.startswith('frozen_'):
+        schedule_target_models = ['deeppa_finetune', 'deeppa_e2e']
+        if loss_schedule in ['fixed_three_phase', 'linear_three_phase'] and (m_name.startswith('frozen_') or m_name in schedule_target_models):
             fixed_heatmap_epochs = getattr(self, 'fixed_heatmap_epochs', 60)
             heatmap_only_active = epoch < fixed_heatmap_epochs
             final_main_weight = getattr(self, 'fixed_main_weight', 0.9)
@@ -121,8 +122,9 @@ class DeepPALossController:
             w_main, w_hds = 0.0, 0.0
 
         elif m_name == 'deeppa_finetune':
-            w_main = 0.1 # 1.0 - 0.9 (rho)
-            total_loss = (0.1 * L_pa) + (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
+            w_pa = 0.1
+            w_dp = 1.0
+            total_loss = (w_pa * L_pa) + (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
             
         elif m_name == 'deeppa_e2e':
             rho = 0.9
@@ -131,8 +133,13 @@ class DeepPALossController:
                 w_hds = max(0.0, 1.0 - (1.0 * (epoch / float(self.aux_drop_epochs))))
             elif e2e_aux_mode == 'none':
                 w_hds = 0.0
-            w_main = 1.0 - rho * w_geom
-            total_loss = w_main * (w_pa * L_pa + w_dp * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
+            if loss_schedule in ['fixed_three_phase', 'linear_three_phase']:
+                w_pa = w_main
+                w_dp = 1.0
+                total_loss = (w_pa * L_pa) + (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
+            else:
+                w_main = 1.0 - rho * w_geom
+                total_loss = w_main * (w_pa * L_pa + w_dp * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
 
         # =================================================================
         # 🌟 DeepPA & DeepLA Ablation 그룹

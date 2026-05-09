@@ -265,6 +265,8 @@ def train(args):
         pipeline_mode = 'frozen'
     elif m_name in ['deepla_ori', 'deepla_decay', 'deepla_all_tied', 'deepla_progress']:
         pipeline_mode = 'single_deepla'
+    elif m_name == 'deeppa_finetune':
+        pipeline_mode = 'finetune'
     elif m_name == 'deeppa_e2e':
         pipeline_mode = 'e2e'
     elif m_name == 'single_deeppa':
