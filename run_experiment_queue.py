@@ -178,7 +178,7 @@ def run_experiment(queue, experiment, index, total, queue_dir, args):
 
     with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
         process = subprocess.Popen(
-            ["cmd.exe", "/d", "/s", "/c", command_text],
+            "cmd.exe /d /s /c " + command_text,
             cwd=str(REPO_DIR),
             stdout=log_file,
             stderr=subprocess.STDOUT,
