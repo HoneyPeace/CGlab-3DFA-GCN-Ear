@@ -315,6 +315,7 @@ def train(args):
     loss_controller.fixed_heatmap_epochs = getattr(args, 'fixed_heatmap_epochs', 60)
     loss_controller.fixed_main_weight = getattr(args, 'fixed_main_weight', 0.9)
     loss_controller.fixed_geom_weight = getattr(args, 'fixed_geom_weight', 0.1)
+    loss_controller.total_epochs = getattr(args, 'epochs', 500)
     if pipeline_mode == 'frozen' and getattr(args, 'unfreeze_paconv_in_frozen', False):
         frozen_pa_w = getattr(args, 'frozen_paconv_hm_weight', 0.0)
         print("[INFO] Finetune PAConv enabled inside frozen pipeline.")

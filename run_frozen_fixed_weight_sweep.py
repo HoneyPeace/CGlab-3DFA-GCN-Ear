@@ -99,8 +99,11 @@ if __name__ == "__main__":
     user_args = sys.argv[1:]
     user_args, base_tag = pop_arg_value(user_args, "--user_tag", "fixed_weight_sweep")
     user_args, weight_pairs_text = pop_arg_value(user_args, "--weight_pairs", None)
+    user_args, sweep_loss_schedule = pop_arg_value(user_args, "--sweep_loss_schedule", "fixed_three_phase")
     user_args, dry_run = pop_bool_flag(user_args, "--dry_run")
     weight_pairs = parse_weight_pairs(weight_pairs_text)
+    if sweep_loss_schedule not in ["fixed_three_phase", "linear_three_phase"]:
+        raise ValueError("--sweep_loss_schedule must be fixed_three_phase or linear_three_phase")
 
     for flag in [
         "--fusion_residual_base",
@@ -119,7 +122,7 @@ if __name__ == "__main__":
         command_args = list(user_args)
         command_args = set_arg_value(command_args, "--user_tag", tag)
         command_args = set_arg_value(command_args, "--fusion_residual_base", "prior")
-        command_args = set_arg_value(command_args, "--loss_schedule", "fixed_three_phase")
+        command_args = set_arg_value(command_args, "--loss_schedule", sweep_loss_schedule)
         command_args = set_arg_value(command_args, "--fixed_main_weight", main_weight)
         command_args = set_arg_value(command_args, "--fixed_geom_weight", geom_weight)
         commands.append([sys.executable, "run_frozen.py"] + command_args)

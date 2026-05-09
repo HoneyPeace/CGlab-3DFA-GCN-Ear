@@ -26,7 +26,7 @@ class DeepPALossController:
 
     def update_patience(self, current_val_mm, epoch=None):
         """Val 정체 여부를 확인하고 가중치를 업데이트"""
-        if getattr(self, 'loss_schedule', 'val_adaptive') == 'fixed_three_phase':
+        if getattr(self, 'loss_schedule', 'val_adaptive') in ['fixed_three_phase', 'linear_three_phase']:
             if current_val_mm < self.best_val_mm:
                 self.best_val_mm = current_val_mm
             self.stagnation_counter = 0
@@ -68,11 +68,24 @@ class DeepPALossController:
             'deepla_ori', 'deepla_decay', 'deepla_all', 'deepla_all_tied',
             'paconv_struct'
         ]
-        if getattr(self, 'loss_schedule', 'val_adaptive') == 'fixed_three_phase' and m_name.startswith('frozen_'):
+        loss_schedule = getattr(self, 'loss_schedule', 'val_adaptive')
+        if loss_schedule in ['fixed_three_phase', 'linear_three_phase'] and m_name.startswith('frozen_'):
             fixed_heatmap_epochs = getattr(self, 'fixed_heatmap_epochs', 60)
             heatmap_only_active = epoch < fixed_heatmap_epochs
-            w_main = 1.0 if heatmap_only_active else getattr(self, 'fixed_main_weight', 0.9)
-            w_geom = 0.0 if heatmap_only_active else getattr(self, 'fixed_geom_weight', 0.1)
+            final_main_weight = getattr(self, 'fixed_main_weight', 0.9)
+            final_geom_weight = getattr(self, 'fixed_geom_weight', 0.1)
+            if heatmap_only_active:
+                w_main = 1.0
+                w_geom = 0.0
+            elif loss_schedule == 'linear_three_phase':
+                total_epochs = getattr(self, 'total_epochs', 500)
+                transition_epochs = max(1, total_epochs - fixed_heatmap_epochs)
+                transition_progress = min(1.0, max(0.0, (epoch - fixed_heatmap_epochs + 1) / float(transition_epochs)))
+                w_main = 1.0 + (final_main_weight - 1.0) * transition_progress
+                w_geom = final_geom_weight * transition_progress
+            else:
+                w_main = final_main_weight
+                w_geom = final_geom_weight
         else:
             warmup_active = (m_name in warmup_modes) and (epoch < self.min_heatmap_warmup)
             w_main = 1.0 if warmup_active else max(0.1, self.val_decay)

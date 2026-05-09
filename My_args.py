@@ -129,8 +129,8 @@ parser.add_argument('--use_stagewise_aux_hm', type=str2bool, default=False,
 parser.add_argument('--min_heatmap_warmup', type=int, default=30,
                     help='Minimum heatmap-only warmup epochs before val-based transition')
 parser.add_argument('--loss_schedule', type=str, default='val_adaptive',
-                    choices=['val_adaptive', 'fixed_three_phase'],
-                    help='val_adaptive: existing validation-based transition / fixed_three_phase: fixed heatmap then fixed geometry weights')
+                    choices=['val_adaptive', 'fixed_three_phase', 'linear_three_phase'],
+                    help='val_adaptive: existing validation-based transition / fixed_three_phase: fixed heatmap then fixed geometry weights / linear_three_phase: fixed heatmap then linear transition to final weights')
 parser.add_argument('--fixed_heatmap_epochs', type=int, default=60,
                     help='Epoch count for heatmap-only phase when --loss_schedule fixed_three_phase')
 parser.add_argument('--fixed_main_weight', type=float, default=0.9,
