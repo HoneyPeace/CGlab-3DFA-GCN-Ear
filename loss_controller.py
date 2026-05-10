@@ -19,6 +19,12 @@ class DeepPALossController:
         self.val_decay = 1.0         # Main HM 가중치. 1.0으로 시작
         self.stagnation_counter = 0
         self.best_val_mm = float('inf')
+        self.train_hm_history = []
+        self.train_hm_plateau_counter = 0
+        self.train_hm_plateau_best = float('inf')
+        self.train_hm_plateau_first_epoch = None
+        self.train_hm_plateau_trigger_epoch = None
+        self.train_hm_plateau_ramp_start_epoch = None
         
         # E2E 전용 가중치 추가
         self.weight_PA = 1.0
@@ -26,7 +32,7 @@ class DeepPALossController:
 
     def update_patience(self, current_val_mm, epoch=None):
         """Val 정체 여부를 확인하고 가중치를 업데이트"""
-        if getattr(self, 'loss_schedule', 'val_adaptive') in ['fixed_three_phase', 'linear_three_phase']:
+        if getattr(self, 'loss_schedule', 'val_adaptive') in ['fixed_three_phase', 'linear_three_phase', 'train_hm_plateau']:
             if current_val_mm < self.best_val_mm:
                 self.best_val_mm = current_val_mm
             self.stagnation_counter = 0
@@ -57,6 +63,49 @@ class DeepPALossController:
         return False
 
     # 🌟 L_pa 수신부 추가 (단일 모델일 땐 None이 들어오도록 안전장치)
+    def update_train_hm_plateau(self, train_main_hm, epoch):
+        """Train Main_HM rolling loss plateau 기준으로 geometry transition 시작 시점을 정한다."""
+        if getattr(self, 'loss_schedule', 'val_adaptive') != 'train_hm_plateau':
+            return None
+        if self.train_hm_plateau_trigger_epoch is not None:
+            return None
+
+        current_epoch = epoch + 1
+        self.train_hm_history.append(float(train_main_hm))
+
+        start_epoch = getattr(self, 'plateau_start_epoch', self.aux_drop_epochs)
+        window = max(1, int(getattr(self, 'plateau_window', 20)))
+        patience = max(1, int(getattr(self, 'plateau_patience', 10)))
+        threshold = float(getattr(self, 'plateau_threshold', 0.01))
+
+        if len(self.train_hm_history) < window or current_epoch <= start_epoch:
+            return None
+
+        rolling_hm = sum(self.train_hm_history[-window:]) / float(window)
+        improved = (
+            self.train_hm_plateau_best == float('inf')
+            or rolling_hm < self.train_hm_plateau_best * (1.0 - threshold)
+        )
+        if improved:
+            self.train_hm_plateau_best = rolling_hm
+            self.train_hm_plateau_counter = 0
+            self.train_hm_plateau_first_epoch = None
+            return None
+
+        self.train_hm_plateau_counter += 1
+        if self.train_hm_plateau_first_epoch is None:
+            self.train_hm_plateau_first_epoch = current_epoch
+
+        if self.train_hm_plateau_counter >= patience:
+            self.train_hm_plateau_trigger_epoch = current_epoch
+            self.train_hm_plateau_ramp_start_epoch = epoch + 1
+            return (
+                f"[Train-HM Plateau Trigger] window={window}, patience={patience}, "
+                f"threshold={threshold:.4f}, first_plateau_ep={self.train_hm_plateau_first_epoch}, "
+                f"confirm_ep={current_epoch}, rolling_main_hm={rolling_hm:.6f}"
+            )
+        return None
+
     def compute_loss(self, model_name, epoch, L_main, L_aux, L_crd, L_srf, L_str, L_pa=None):
         """모델별 분기에 맞추어 최종 로스와 동적 가중치를 계산"""
         m_name = model_name.lower()
@@ -70,12 +119,22 @@ class DeepPALossController:
         ]
         loss_schedule = getattr(self, 'loss_schedule', 'val_adaptive')
         schedule_target_models = ['deeppa_finetune', 'deeppa_e2e']
-        if loss_schedule in ['fixed_three_phase', 'linear_three_phase'] and (m_name.startswith('frozen_') or m_name in schedule_target_models):
+        if loss_schedule in ['fixed_three_phase', 'linear_three_phase', 'train_hm_plateau'] and (m_name.startswith('frozen_') or m_name in schedule_target_models):
             fixed_heatmap_epochs = getattr(self, 'fixed_heatmap_epochs', 60)
             heatmap_only_active = epoch < fixed_heatmap_epochs
             final_main_weight = getattr(self, 'fixed_main_weight', 0.9)
             final_geom_weight = getattr(self, 'fixed_geom_weight', 0.1)
-            if heatmap_only_active:
+            if loss_schedule == 'train_hm_plateau':
+                ramp_start_epoch = getattr(self, 'train_hm_plateau_ramp_start_epoch', None)
+                if ramp_start_epoch is None or epoch < ramp_start_epoch:
+                    w_main = 1.0
+                    w_geom = 0.0
+                else:
+                    transition_epochs = max(1, int(getattr(self, 'plateau_transition_epochs', 30)))
+                    transition_progress = min(1.0, max(0.0, (epoch - ramp_start_epoch + 1) / float(transition_epochs)))
+                    w_main = 1.0 + (final_main_weight - 1.0) * transition_progress
+                    w_geom = final_geom_weight * transition_progress
+            elif heatmap_only_active:
                 w_main = 1.0
                 w_geom = 0.0
             elif loss_schedule == 'linear_three_phase':
@@ -122,22 +181,40 @@ class DeepPALossController:
             w_main, w_hds = 0.0, 0.0
 
         elif m_name == 'deeppa_finetune':
+            finetune_aux_mode = getattr(self, 'finetune_aux_mode', 'fixed')
+            if finetune_aux_mode == 'drop':
+                w_hds = max(0.0, 1.0 - (1.0 * (epoch / float(self.aux_drop_epochs))))
+            elif finetune_aux_mode == 'none':
+                w_hds = 0.0
             w_pa = 0.1
             w_dp = 1.0
             total_loss = (w_pa * L_pa) + (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
             
         elif m_name == 'deeppa_e2e':
-            rho = 0.9
             e2e_aux_mode = getattr(self, 'e2e_aux_mode', 'fixed')
             if e2e_aux_mode == 'drop':
                 w_hds = max(0.0, 1.0 - (1.0 * (epoch / float(self.aux_drop_epochs))))
             elif e2e_aux_mode == 'none':
                 w_hds = 0.0
-            if loss_schedule in ['fixed_three_phase', 'linear_three_phase']:
+
+            if getattr(self, 'e2e_staged_paconv', False):
+                warmup_epochs = max(0, int(getattr(self, 'e2e_paconv_warmup_epochs', 30)))
+                if epoch < warmup_epochs:
+                    w_pa = 1.0
+                    w_dp = 1.0
+                    w_main = 0.0
+                    w_geom = 0.0
+                    w_hds = 0.0
+                else:
+                    w_pa = float(getattr(self, 'e2e_paconv_final_weight', 0.1))
+                    w_dp = 1.0
+                total_loss = (w_pa * L_pa) + (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
+            elif loss_schedule in ['fixed_three_phase', 'linear_three_phase', 'train_hm_plateau']:
                 w_pa = w_main
                 w_dp = 1.0
                 total_loss = (w_pa * L_pa) + (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
             else:
+                rho = 0.9
                 w_main = 1.0 - rho * w_geom
                 total_loss = w_main * (w_pa * L_pa + w_dp * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
 
@@ -188,7 +265,7 @@ class DeepPALossController:
             l_str = f"Main_HM: {t_hm_main/num_b:.4f} | Crd: {t_crd/num_b:.4f} | Srf: {t_srf/num_b:.4f} | Str: {t_str/num_b:.4f}"
             
         elif m_name == 'deeppa_e2e' or m_name == 'deeppa_finetune':
-            w_str = f"PA_W: {weights['w_pa']:.2f} | DP_Main_W: {weights['w_dp'] * weights['w_main']:.2f} | Aux_W: {weights['w_hds']:.2f}"
+            w_str = f"PA_W: {weights['w_pa']:.2f} | DP_Main_W: {weights['w_dp'] * weights['w_main']:.2f} | Aux_W: {weights['w_hds']:.2f} | Geom_W: {weights['w_geom']:.2f}"
             l_str = f"PA_HM: {t_hm_PA/num_b:.4f} | Main_HM: {t_hm_main/num_b:.4f} | Aux_HM: {t_hm_aux/num_b:.4f} | Geom: {(t_crd+t_srf+t_str)/num_b:.4f}"
             
         elif m_name == 'paconv_struct':

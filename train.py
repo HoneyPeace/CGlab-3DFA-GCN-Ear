@@ -310,14 +310,30 @@ def train(args):
         frozen_paconv_hm_weight=getattr(args, 'frozen_paconv_hm_weight', 0.0)
     )
     loss_controller.loss_schedule = getattr(args, 'loss_schedule', 'val_adaptive').lower()
+    loss_controller.finetune_aux_mode = getattr(args, 'finetune_aux_mode', 'fixed').lower()
     loss_controller.e2e_aux_mode = getattr(args, 'e2e_aux_mode', 'fixed').lower()
+    loss_controller.e2e_staged_paconv = getattr(args, 'e2e_staged_paconv', False)
+    loss_controller.e2e_paconv_warmup_epochs = getattr(args, 'e2e_paconv_warmup_epochs', 30)
+    loss_controller.e2e_paconv_final_weight = getattr(args, 'e2e_paconv_final_weight', 0.1)
+    if pipeline_mode == 'finetune':
+        print(f"[INFO] Finetune aux mode: {loss_controller.finetune_aux_mode}")
+        print("[INFO] Finetune PAConv HM weight: 0.100")
     if pipeline_mode == 'e2e':
         print(f"[INFO] E2E aux mode: {loss_controller.e2e_aux_mode}")
         print(f"[INFO] E2E PAConv pretrained: {getattr(args, 'e2e_load_paconv_pretrained', False)}")
+        print(f"[INFO] E2E staged PAConv: {loss_controller.e2e_staged_paconv}")
+        if loss_controller.e2e_staged_paconv:
+            print(f"[INFO] E2E PAConv warmup epochs: {loss_controller.e2e_paconv_warmup_epochs}")
+            print(f"[INFO] E2E PAConv final HM weight: {loss_controller.e2e_paconv_final_weight:.3f}")
     loss_controller.fixed_heatmap_epochs = getattr(args, 'fixed_heatmap_epochs', 60)
     loss_controller.fixed_main_weight = getattr(args, 'fixed_main_weight', 0.9)
     loss_controller.fixed_geom_weight = getattr(args, 'fixed_geom_weight', 0.1)
     loss_controller.total_epochs = getattr(args, 'epochs', 500)
+    loss_controller.plateau_start_epoch = getattr(args, 'plateau_start_epoch', getattr(args, 'aux_drop_epochs', 30))
+    loss_controller.plateau_window = getattr(args, 'plateau_window', 20)
+    loss_controller.plateau_patience = getattr(args, 'plateau_patience', 10)
+    loss_controller.plateau_threshold = getattr(args, 'plateau_threshold', 0.01)
+    loss_controller.plateau_transition_epochs = getattr(args, 'plateau_transition_epochs', 30)
     if pipeline_mode == 'frozen' and getattr(args, 'unfreeze_paconv_in_frozen', False):
         frozen_pa_w = getattr(args, 'frozen_paconv_hm_weight', 0.0)
         print("[INFO] Finetune PAConv enabled inside frozen pipeline.")
@@ -411,6 +427,11 @@ def train(args):
                 
                 tepoch.set_postfix(Loss=f"{total_loss.item():.4f}")
 
+        num_b = len(train_loader)
+        train_hm_plateau_msg = loss_controller.update_train_hm_plateau(t_hm_main / num_b, epoch)
+        if train_hm_plateau_msg:
+            print(f"\n[INFO] {train_hm_plateau_msg}\n")
+
         # ----------------------------------------------------
         # 🌟 5. Validation 평가
         # ----------------------------------------------------
@@ -439,7 +460,6 @@ def train(args):
         # ----------------------------------------------------
         # 📊 7. 컨트롤러를 통한 스마트 프린팅 및 엑셀 로깅 (관계로스 Str 포함)
         # ----------------------------------------------------
-        num_b = len(train_loader)
         log_record = loss_controller.print_and_get_log(
             m_name, epoch, t_loss_n, t_mm/num_b, v_mm, weights, num_b, 
             t_hm_main, t_hm_aux, t_crd, t_srf, t_str, t_hm_PA

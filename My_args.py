@@ -122,21 +122,42 @@ parser.add_argument('--aux_drop_epochs', type=int, default=30,
 parser.add_argument('--e2e_aux_mode', type=str, default='fixed',
                     choices=['fixed', 'drop', 'none'],
                     help='deeppa_e2e only: fixed aux weight, linear aux drop, or no aux heatmap loss')
+parser.add_argument('--finetune_aux_mode', type=str, default='fixed',
+                    choices=['fixed', 'drop', 'none'],
+                    help='deeppa_finetune only: fixed aux weight, linear aux drop, or no aux heatmap loss')
 parser.add_argument('--e2e_load_paconv_pretrained', type=str2bool, default=False,
                     help='deeppa_e2e only: load PAConv_Pretrained/models/Single_PAConv_last.t7 into stage1 PAConv')
+parser.add_argument('--e2e_staged_paconv', type=str2bool, default=False,
+                    help='deeppa_e2e only: PAConv-only warmup, then weak PAConv anchor with DeepPA HM/Geom schedule')
+parser.add_argument('--e2e_paconv_warmup_epochs', type=int, default=30,
+                    help='deeppa_e2e staged PAConv-only warmup epochs')
+parser.add_argument('--e2e_paconv_final_weight', type=float, default=0.1,
+                    help='deeppa_e2e staged PAConv heatmap anchor weight after warmup')
+parser.add_argument('--e2e_paconv_lr_scale', type=float, default=0.1,
+                    help='deeppa_e2e PAConv learning-rate scale relative to DeepPA')
 parser.add_argument('--use_stagewise_aux_hm', type=str2bool, default=False,
                     help='True: compare each auxiliary heatmap with GT heatmap gathered at the same stage point indices')
 parser.add_argument('--min_heatmap_warmup', type=int, default=30,
                     help='Minimum heatmap-only warmup epochs before val-based transition')
 parser.add_argument('--loss_schedule', type=str, default='val_adaptive',
-                    choices=['val_adaptive', 'fixed_three_phase', 'linear_three_phase'],
-                    help='val_adaptive: existing validation-based transition / fixed_three_phase: fixed heatmap then fixed geometry weights / linear_three_phase: fixed heatmap then linear transition to final weights')
+                    choices=['val_adaptive', 'fixed_three_phase', 'linear_three_phase', 'train_hm_plateau'],
+                    help='val_adaptive: existing validation-based transition / fixed_three_phase: fixed heatmap then fixed geometry weights / linear_three_phase: fixed heatmap then linear transition to final weights / train_hm_plateau: train Main_HM plateau-triggered transition')
 parser.add_argument('--fixed_heatmap_epochs', type=int, default=60,
                     help='Epoch count for heatmap-only phase when --loss_schedule fixed_three_phase')
 parser.add_argument('--fixed_main_weight', type=float, default=0.9,
                     help='Fixed main heatmap weight after fixed_heatmap_epochs')
 parser.add_argument('--fixed_geom_weight', type=float, default=0.1,
                     help='Fixed coordinate/surface/structure weight after fixed_heatmap_epochs')
+parser.add_argument('--plateau_start_epoch', type=int, default=30,
+                    help='Start checking train Main_HM plateau after this epoch when --loss_schedule train_hm_plateau')
+parser.add_argument('--plateau_window', type=int, default=20,
+                    help='Rolling window size for train Main_HM plateau detection')
+parser.add_argument('--plateau_patience', type=int, default=10,
+                    help='Number of non-improving rolling windows before plateau-triggered transition')
+parser.add_argument('--plateau_threshold', type=float, default=0.01,
+                    help='Relative train Main_HM rolling improvement threshold for plateau detection')
+parser.add_argument('--plateau_transition_epochs', type=int, default=30,
+                    help='Epochs used to ramp from HM-only to fixed_main/fixed_geom after train HM plateau')
 
 parser.add_argument('--regression_point_num', type=int, default=10)
 parser.add_argument('--plane_knn', type=int, default=5)
