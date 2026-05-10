@@ -198,16 +198,21 @@ class DeepPALossController:
                 w_hds = 0.0
 
             if getattr(self, 'e2e_staged_paconv', False):
-                warmup_epochs = max(0, int(getattr(self, 'e2e_paconv_warmup_epochs', 30)))
-                if epoch < warmup_epochs:
-                    w_pa = 1.0
+                if loss_schedule in ['fixed_three_phase', 'linear_three_phase', 'train_hm_plateau']:
+                    w_pa = w_main
                     w_dp = 1.0
-                    w_main = 0.0
-                    w_geom = 0.0
-                    w_hds = 0.0
                 else:
-                    w_pa = float(getattr(self, 'e2e_paconv_final_weight', 0.1))
-                    w_dp = 1.0
+                    warmup_epochs = max(0, int(getattr(self, 'e2e_paconv_warmup_epochs', 30)))
+                    if epoch < warmup_epochs:
+                        w_pa = 1.0
+                        w_dp = 1.0
+                        w_main = 1.0
+                        w_geom = 0.0
+                        if e2e_aux_mode == 'none':
+                            w_hds = 0.0
+                    else:
+                        w_pa = float(getattr(self, 'e2e_paconv_final_weight', 0.1))
+                        w_dp = 1.0
                 total_loss = (w_pa * L_pa) + (w_main * L_main) + (w_hds * L_aux) + (w_geom * L_pred)
             elif loss_schedule in ['fixed_three_phase', 'linear_three_phase', 'train_hm_plateau']:
                 w_pa = w_main
