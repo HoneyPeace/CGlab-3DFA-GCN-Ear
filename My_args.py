@@ -135,8 +135,8 @@ parser.add_argument('--e2e_paconv_final_weight', type=float, default=0.1,
                     help='deeppa_e2e staged PAConv heatmap anchor weight after warmup')
 parser.add_argument('--e2e_paconv_lr_scale', type=float, default=0.1,
                     help='deeppa_e2e PAConv learning-rate scale relative to DeepPA')
-parser.add_argument('--use_stagewise_aux_hm', type=str2bool, default=False,
-                    help='True: compare each auxiliary heatmap with GT heatmap gathered at the same stage point indices')
+parser.add_argument('--use_stagewise_aux_hm', type=str2bool, default=True,
+                    help='Compare each auxiliary heatmap with GT heatmap gathered at the same stage point indices')
 parser.add_argument('--min_heatmap_warmup', type=int, default=30,
                     help='Minimum heatmap-only warmup epochs before val-based transition')
 parser.add_argument('--loss_schedule', type=str, default='val_adaptive',
@@ -158,6 +158,11 @@ parser.add_argument('--plateau_threshold', type=float, default=0.01,
                     help='Relative train Main_HM rolling improvement threshold for plateau detection')
 parser.add_argument('--plateau_transition_epochs', type=int, default=30,
                     help='Epochs used to ramp from HM-only to fixed_main/fixed_geom after train HM plateau')
+parser.add_argument('--plateau_transition_mode', type=str, default='linear',
+                    choices=['linear', 'step'],
+                    help='Transition shape after train HM plateau: linear ramp or stepwise stages')
+parser.add_argument('--plateau_step_size', type=float, default=0.1,
+                    help='Geometry weight increment per step when --plateau_transition_mode step')
 
 parser.add_argument('--regression_point_num', type=int, default=10)
 parser.add_argument('--plane_knn', type=int, default=5)

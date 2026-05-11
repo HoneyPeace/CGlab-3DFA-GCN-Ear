@@ -4,6 +4,7 @@
 
 import torch
 import pandas as pd
+import math
 
 class DeepPALossController:
     def __init__(self, patience=5, base_hds=0.1, decay_step=0.05, min_heatmap_warmup=30, use_rlw_for_pred=False, aux_drop_epochs=30, frozen_paconv_hm_weight=0.0): # 🌟 decay_step 수신부 추가
@@ -131,7 +132,15 @@ class DeepPALossController:
                     w_geom = 0.0
                 else:
                     transition_epochs = max(1, int(getattr(self, 'plateau_transition_epochs', 30)))
-                    transition_progress = min(1.0, max(0.0, (epoch - ramp_start_epoch + 1) / float(transition_epochs)))
+                    transition_mode = getattr(self, 'plateau_transition_mode', 'linear')
+                    if transition_mode == 'step':
+                        step_size = max(1e-6, float(getattr(self, 'plateau_step_size', 0.1)))
+                        step_count = max(1, int(math.ceil(final_geom_weight / step_size)))
+                        step_epochs = max(1, int(math.ceil(transition_epochs / float(step_count))))
+                        current_step = min(step_count, int(math.ceil((epoch - ramp_start_epoch + 1) / float(step_epochs))))
+                        transition_progress = current_step / float(step_count)
+                    else:
+                        transition_progress = min(1.0, max(0.0, (epoch - ramp_start_epoch + 1) / float(transition_epochs)))
                     w_main = 1.0 + (final_main_weight - 1.0) * transition_progress
                     w_geom = final_geom_weight * transition_progress
             elif heatmap_only_active:

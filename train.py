@@ -334,6 +334,8 @@ def train(args):
     loss_controller.plateau_patience = getattr(args, 'plateau_patience', 10)
     loss_controller.plateau_threshold = getattr(args, 'plateau_threshold', 0.01)
     loss_controller.plateau_transition_epochs = getattr(args, 'plateau_transition_epochs', 30)
+    loss_controller.plateau_transition_mode = getattr(args, 'plateau_transition_mode', 'linear')
+    loss_controller.plateau_step_size = getattr(args, 'plateau_step_size', 0.1)
     if pipeline_mode == 'frozen' and getattr(args, 'unfreeze_paconv_in_frozen', False):
         frozen_pa_w = getattr(args, 'frozen_paconv_hm_weight', 0.0)
         print("[INFO] Finetune PAConv enabled inside frozen pipeline.")
@@ -381,7 +383,7 @@ def train(args):
                 L_aux_hm = torch.tensor(0.0).to(device)
                 
                 if pipeline_mode not in ['single_paconv', 'single_paconv_heat']:
-                     stage_hm_indices = getattr(model, 'stage_hm_indices', None) if getattr(args, 'use_stagewise_aux_hm', False) else None
+                     stage_hm_indices = getattr(model, 'stage_hm_indices', None)
                      L_main_hm, L_aux_hm = hierarchical_hm_loss(sem_list, target_hm, stage_hm_indices)
 
                 L_crd = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
