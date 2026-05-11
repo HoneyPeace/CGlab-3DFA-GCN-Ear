@@ -79,7 +79,10 @@ class DeepPA_Wrapper(nn.Module):
         
         # 🌟 1. 3지 선다형 옵션 연결
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
-        self.coord_from_heatmap = getattr(args, 'coord_from_heatmap', True)
+        # DeepPA coordinates are forced to heatmap readout; keep this attribute
+        # only for old scripts/checkpoint metadata that may still reference it.
+        self.coord_from_heatmap = True
+        self.latest_main_heatmap_logits = None
         
         if not hasattr(args, 'use_cp'): args.use_cp = False
             
@@ -98,11 +101,12 @@ class DeepPA_Wrapper(nn.Module):
                 
         # 🟡 DeepPA 백본
         self.model = DeepPA_semseg(args)
+        decoder_out_channels = getattr(self.model, 'out_channels', 256)
         
         # 🔴 점진적 압축 회귀 헤드 (259 -> 1024 -> 512 -> 256 -> 108)
         bn_mom = getattr(args, 'bn_momentum', 0.1)
         self.head_conv = nn.Sequential(
-            nn.Conv1d(259, 1024, 1),
+            nn.Conv1d(decoder_out_channels + 3, 1024, 1),
             nn.BatchNorm1d(1024, momentum=bn_mom),
             nn.ReLU(inplace=True),
             nn.Conv1d(1024, 512, 1),
@@ -122,6 +126,7 @@ class DeepPA_Wrapper(nn.Module):
         B, C_in, N_in = x.shape
         device = x.device
         self.latest_stage_hm_indices = None
+        self.latest_main_heatmap_logits = None
 
         # ==============================================================================
         # 🌟 2. [Ablation] 3지 선다 옵션에 따른 피처 주입 전처리
@@ -198,7 +203,7 @@ class DeepPA_Wrapper(nn.Module):
         out = self.model(xyz=xyz_coords, x=in_features, indices=indices, prior_hints=prior_hints)
         
         dense_features = out[0] if isinstance(out, tuple) else out
-        if dense_features.shape[-1] == 256: 
+        if dense_features.shape[1] == N_in:
             dense_features = dense_features.permute(0, 2, 1).contiguous() 
 
         # 2,048점 -> 8,192점 복원
@@ -211,14 +216,14 @@ class DeepPA_Wrapper(nn.Module):
         
         # 6. 회귀 헤드 (Regression Head)
         x_fused = self.head_conv(fused_features) 
-        main_heatmap = torch.sigmoid(self.main_heatmap_head(x_fused))
-        x_pool = torch.max(x_fused, dim=2)[0]    
-        direct_coords = self.head_linear(x_pool).view(B, self.landmark_num, 3) 
-        if self.coord_from_heatmap:
-            k_val = getattr(self.args, 'regression_point_num', 10)
-            coords = get_differentiable_coords(xyz_coords, main_heatmap, k=k_val)
-        else:
-            coords = direct_coords
+        main_heatmap_logits = self.main_heatmap_head(x_fused)
+        self.latest_main_heatmap_logits = main_heatmap_logits
+        main_heatmap = torch.sigmoid(main_heatmap_logits)
+        # Coordinates are always derived from the main heatmap. The linear head is
+        # kept in the module for checkpoint compatibility, but it is not used for
+        # DeepPA coordinate supervision/evaluation.
+        k_val = getattr(self.args, 'regression_point_num', 10)
+        coords = get_differentiable_coords(xyz_coords, main_heatmap, k=k_val)
         
         # 🌟 7. Train/Eval 상관없이 무조건 튜플 통일 반환
         spa_loss = out[1] if isinstance(out, tuple) else torch.tensor(0.0).to(device)

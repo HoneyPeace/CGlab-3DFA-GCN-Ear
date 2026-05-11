@@ -153,26 +153,34 @@ class UniversalPipeline_Eval(nn.Module):
         elif self.mode in ['single_deeppa', 'single_deepla']:
             self.model = DeepPA_Wrapper(args, landmark_num)
 
+    def _coords_from_main_heatmap(self, points_xyz, sem_list, fallback_coords=None):
+        if sem_list:
+            k_val = getattr(self.args, 'regression_point_num', 10)
+            return get_differentiable_coords(points_xyz, sem_list[-1], k=k_val)
+        return fallback_coords
+
     def forward(self, x):   
+        points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
         if self.mode in ['single_paconv', 'single_paconv_heat']:
             multi_scale_hints, hm_raw = self.model(x)
-            points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
             k_val = getattr(self.args, 'regression_point_num', 10)
             pred_coords = get_differentiable_coords(points_xyz, hm_raw, k=k_val)
             return pred_coords, [], hm_raw
             
         elif self.mode in ['single_deeppa', 'single_deepla']:
             out = self.model(x)
-            pred_coords = out[0] if isinstance(out, tuple) else out
             sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
             main_hm = sem_list[-1] if len(sem_list) > 0 else None
+            fallback_coords = out[0] if isinstance(out, tuple) else out
+            pred_coords = self._coords_from_main_heatmap(points_xyz, sem_list, fallback_coords=fallback_coords)
             return pred_coords, sem_list, main_hm
             
         elif self.mode in ['frozen', 'finetune', 'e2e']:
             multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
             out = self.stage2_deeppa(x, prior_hints=multi_scale_hints)
-            pred_coords = out[0] if isinstance(out, tuple) else out
             sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
+            fallback_coords = out[0] if isinstance(out, tuple) else out
+            pred_coords = self._coords_from_main_heatmap(points_xyz, sem_list, fallback_coords=fallback_coords)
             return pred_coords, sem_list, s1_hm_raw
 
 # -----------------------------------------------------------------------------

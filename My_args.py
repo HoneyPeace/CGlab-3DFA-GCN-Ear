@@ -66,6 +66,9 @@ parser.add_argument('--nbr_dims', type=list, default=[64, 128, 256, 512])
 parser.add_argument('--use_gate', type=str2bool, default=True) 
 parser.add_argument('--use_cp', type=str2bool, default=False) 
 parser.add_argument('--head_dim', type=int, default=256)
+parser.add_argument('--decoder_fusion', type=str, default='add',
+                    choices=['add', 'raw_concat', 'prog_half_final320'],
+                    help='DeepPA decoder fusion: add baseline / raw stage concat / progressive half-compress with final 320ch')
 parser.add_argument('--mlp_ratio', type=float, default=2.0)
 parser.add_argument('--bn_momentum', type=float, default=0.1)
 parser.add_argument('--act', default=nn.GELU)
@@ -93,6 +96,16 @@ parser.add_argument('--frozen_paconv_hm_weight', type=float, default=0.0,
                     help='PAConv heatmap loss weight used when PAConv is unfrozen in frozen pipeline')
 parser.add_argument('--coord_from_heatmap', type=str2bool, default=True,
                     help='True: derive final DeepPA coordinates from main heatmap by differentiable top-k')
+parser.add_argument('--train_coord_readout', type=str, default='topk',
+                    choices=['topk', 'softargmax'],
+                    help='Training-only DeepPA coordinate readout for Crd/Srf/Str losses')
+parser.add_argument('--coord_loss_mode', type=str, default='focal_l1',
+                    choices=['focal_l1', 'expected_distance', 'ranking'],
+                    help='Coordinate/heatmap geometry supervision used as L_coord')
+parser.add_argument('--softargmax_temperature', type=float, default=1.0,
+                    help='Temperature for soft-argmax/expected-distance/ranking heatmap distributions')
+parser.add_argument('--ranking_margin_scale', type=float, default=1.0,
+                    help='Distance margin scale for ranking heatmap loss')
 parser.add_argument('--ablation_only', type=str, default='all',
                     choices=['all', 'frozen_aux_fixed', 'frozen_aux_drop', 'frozen_no_aux'],
                     help='run_frozen.py only: run one ablation model instead of all')
@@ -169,6 +182,13 @@ parser.add_argument('--plane_knn', type=int, default=5)
 parser.add_argument('--curv_knn', type=int, default=30)
 parser.add_argument('--curv_alpha', type=float, default=10.0)
 parser.add_argument('--dir_beta', type=float, default=1.0)
+parser.add_argument('--surface_loss_mode', type=str, default='topk',
+                    choices=['topk', 'soft_local'],
+                    help='Surface/curvature loss neighborhood mode')
+parser.add_argument('--soft_curv_sigma', type=float, default=0.0,
+                    help='Soft local curvature sigma; <=0 uses GT kNN radius as adaptive sigma')
+parser.add_argument('--soft_curv_min_sigma', type=float, default=1e-4,
+                    help='Minimum sigma clamp for soft local curvature')
 parser.add_argument('--focal_gamma', type=float, default=1.0)
 
 # [6] 데이터 전처리 및 PAConv 내부 파라미터 

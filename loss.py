@@ -61,6 +61,29 @@ def get_differentiable_coords(points, heatmaps, k=10):
     pred_coords = torch.sum(topk_coords * weights.unsqueeze(-1), dim=2) 
     return pred_coords
 
+def get_softargmax_coords(points, heatmap_scores, temperature=1.0):
+    # points: [B, N, 3], heatmap_scores: [B, L, N]
+    temperature = max(float(temperature), 1e-6)
+    weights = F.softmax(heatmap_scores / temperature, dim=2)
+    return torch.sum(points.unsqueeze(1) * weights.unsqueeze(-1), dim=2)
+
+def expected_distance_heatmap_loss(points, heatmap_scores, gt_coords, temperature=1.0):
+    # Penalize probability mass assigned to points far from each GT landmark.
+    temperature = max(float(temperature), 1e-6)
+    weights = F.softmax(heatmap_scores / temperature, dim=2)
+    distances = torch.cdist(gt_coords, points)
+    return torch.sum(weights * distances, dim=2).mean()
+
+def ranking_heatmap_loss(points, heatmap_scores, gt_coords, margin_scale=1.0, temperature=1.0):
+    # Structured logit ranking: GT-nearest point should outrank distant points.
+    temperature = max(float(temperature), 1e-6)
+    distances = torch.cdist(gt_coords, points).detach()
+    pos_idx = torch.argmin(distances, dim=2, keepdim=True)
+    pos_scores = torch.gather(heatmap_scores, 2, pos_idx)
+    margin = distances / (distances.amax(dim=2, keepdim=True) + 1e-6)
+    logits = (heatmap_scores + float(margin_scale) * margin - pos_scores) / temperature
+    return torch.logsumexp(logits, dim=2).mean()
+
 def find_knn_points(pred_coords, points, k=10):
     """
     36개의 예측 랜드마크 주변의 포인트 클라우드 표면 정보를 탐색 (메모리 부담 적음)
@@ -115,6 +138,72 @@ class CurvatureSurfaceLoss(nn.Module):
 # ---------------------------------------------------------
 # 3. 계층적 히트맵 오차 추출기
 # ---------------------------------------------------------
+def _soft_local_covariance(points, centers, sigma=0.0, k_for_auto=30, min_sigma=1e-4):
+    # points: [B, N, 3], centers: [B, L, 3]
+    dist = torch.cdist(centers, points)
+    if float(sigma) > 0.0:
+        sigma_tensor = torch.ones_like(dist[..., 0]) * float(sigma)
+    else:
+        k_for_auto = min(max(int(k_for_auto), 1), points.shape[1])
+        with torch.no_grad():
+            sigma_tensor = torch.topk(dist.detach(), k_for_auto, dim=2, largest=False).values[..., -1]
+    sigma_tensor = sigma_tensor.clamp_min(float(min_sigma))
+    logits = -(dist * dist) / (2.0 * sigma_tensor.unsqueeze(-1).pow(2))
+    weights = F.softmax(logits, dim=2)
+    mean = torch.sum(weights.unsqueeze(-1) * points.unsqueeze(1), dim=2)
+    centered = points.unsqueeze(1) - mean.unsqueeze(2)
+    cov = torch.einsum('bln,blni,blnj->blij', weights, centered, centered)
+    eye = torch.eye(3, device=points.device, dtype=points.dtype).view(1, 1, 3, 3)
+    return mean, cov + (eye * 1e-6)
+
+class SoftLocalCurvatureSurfaceLoss(nn.Module):
+    """
+    Differentiable local surface loss using soft distance weights instead of
+    hard pred-coordinate top-k neighborhood selection.
+    """
+    def __init__(self, k_p2p=5, k_curv=30, alpha=10.0, beta=1.0, sigma=0.0, min_sigma=1e-4):
+        super().__init__()
+        self.k_p2p, self.k_curv = k_p2p, k_curv
+        self.alpha, self.beta = alpha, beta
+        self.sigma = sigma
+        self.min_sigma = min_sigma
+
+    def forward(self, pred_coords, gt_coords, points, disable_norm=False):
+        center_p2p_gt, cov_p2p_gt = _soft_local_covariance(
+            points, gt_coords, self.sigma, self.k_p2p, self.min_sigma
+        )
+        _, eigvec_p2p_gt = torch.linalg.eigh(cov_p2p_gt)
+        normal_gt = eigvec_p2p_gt[..., 0]
+
+        _, cov_curv_pred = _soft_local_covariance(
+            points, pred_coords, self.sigma, self.k_curv, self.min_sigma
+        )
+        _, cov_curv_gt = _soft_local_covariance(
+            points, gt_coords, self.sigma, self.k_curv, self.min_sigma
+        )
+        eigval_pred, eigvec_pred = torch.linalg.eigh(cov_curv_pred)
+        eigval_gt, eigvec_gt = torch.linalg.eigh(cov_curv_gt)
+
+        c_pred = eigval_pred[..., 0] / (torch.sum(eigval_pred, dim=-1) + 1e-6)
+        c_gt = (eigval_gt[..., 0] / (torch.sum(eigval_gt, dim=-1) + 1e-6)).detach()
+        primary_dir_pred = eigvec_pred[..., 2]
+        primary_dir_gt = eigvec_gt[..., 2].detach()
+        cos_sim = torch.abs(torch.sum(primary_dir_pred * primary_dir_gt, dim=-1))
+
+        diff_curvature = torch.abs(c_pred - c_gt)
+        diff_direction = 1.0 - cos_sim
+        p2p_distance = torch.abs(
+            torch.sum((pred_coords - center_p2p_gt.detach()) * normal_gt.detach(), dim=-1)
+        )
+
+        if disable_norm:
+            weight_multiplier = 1.0
+        else:
+            weight_multiplier = 1.0 + (self.alpha * diff_curvature) + (self.beta * diff_direction)
+
+        loss_unified = (p2p_distance * weight_multiplier).mean()
+        return loss_unified, p2p_distance.mean(), diff_curvature.mean(), diff_direction.mean()
+
 class DeepPA_HierarchicalHeatmapLoss(nn.Module):
     """
     백본에서 출력된 여러 층의 히트맵(sem_list)을 받아,

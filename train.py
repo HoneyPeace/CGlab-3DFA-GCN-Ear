@@ -24,7 +24,17 @@ from tqdm import tqdm
 from init import _init_
 from My_args import parser
 from dataset import FaceLandmarkData
-from loss import AdaptiveWingLoss, CurvatureSurfaceLoss, compute_structural_loss, focal_l1_loss, get_differentiable_coords
+from loss import (
+    AdaptiveWingLoss,
+    CurvatureSurfaceLoss,
+    SoftLocalCurvatureSurfaceLoss,
+    compute_structural_loss,
+    expected_distance_heatmap_loss,
+    focal_l1_loss,
+    get_differentiable_coords,
+    get_softargmax_coords,
+    ranking_heatmap_loss,
+)
 from loss import DeepPA_HierarchicalHeatmapLoss 
 from util import main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate, PointcloudJitter
@@ -177,6 +187,7 @@ class UniversalPipeline(nn.Module):
         self.landmark_num = landmark_num
         self.unfreeze_paconv_in_frozen = getattr(args, 'unfreeze_paconv_in_frozen', False)
         self.stage_hm_indices = None
+        self.latest_main_hm_logits = None
         
         if self.mode in ['frozen', 'finetune', 'e2e']:
             self.stage1_paconv = PAConv(args, landmark_num)
@@ -191,9 +202,21 @@ class UniversalPipeline(nn.Module):
         else:
             self.model = DeepPA_Wrapper(args, landmark_num)
 
+    def _coords_from_main_heatmap(self, points_xyz, sem_list, fallback_coords=None, main_logits=None):
+        if sem_list:
+            readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
+            if self.training and readout_mode == 'softargmax':
+                heatmap_scores = main_logits if main_logits is not None else sem_list[-1]
+                temperature = getattr(self.args, 'softargmax_temperature', 1.0)
+                return get_softargmax_coords(points_xyz, heatmap_scores, temperature=temperature)
+            k_val = getattr(self.args, 'regression_point_num', 10)
+            return get_differentiable_coords(points_xyz, sem_list[-1], k=k_val)
+        return fallback_coords
+
     def forward(self, x):   
         points_norm_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
         k_val = getattr(self.args, 'regression_point_num', 10)
+        self.latest_main_hm_logits = None
 
         # 🌟 PAConv 단독 모드 복원
         if self.mode in ['single_paconv', 'single_paconv_heat']: 
@@ -203,9 +226,16 @@ class UniversalPipeline(nn.Module):
             
         elif self.mode in ['single_deepla', 'single_deeppa']:
             out = self.model(x) 
-            pred_coords = out[0]
             sem_list = out[2] if len(out) > 2 else [] 
             main_hm = sem_list[-1] if len(sem_list) > 0 else None
+            main_logits = getattr(self.model, 'latest_main_heatmap_logits', None)
+            self.latest_main_hm_logits = main_logits
+            pred_coords = self._coords_from_main_heatmap(
+                points_norm_xyz,
+                sem_list,
+                fallback_coords=out[0],
+                main_logits=main_logits,
+            )
             self.stage_hm_indices = getattr(self.model, 'latest_stage_hm_indices', None)
             return pred_coords, sem_list, main_hm
             
@@ -221,8 +251,15 @@ class UniversalPipeline(nn.Module):
                 multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
                 
             out = self.stage2_deeppa(x, prior_hints=multi_scale_hints)
-            pred_coords = out[0]
             sem_list = out[2] if len(out) > 2 else []
+            main_logits = getattr(self.stage2_deeppa, 'latest_main_heatmap_logits', None)
+            self.latest_main_hm_logits = main_logits
+            pred_coords = self._coords_from_main_heatmap(
+                points_norm_xyz,
+                sem_list,
+                fallback_coords=out[0],
+                main_logits=main_logits,
+            )
             self.stage_hm_indices = getattr(self.stage2_deeppa, 'latest_stage_hm_indices', None)
             return pred_coords, sem_list, s1_hm_raw
 
@@ -289,7 +326,17 @@ def train(args):
         elif pipeline_mode == 'e2e':
             print(f"[WARNING] E2E PAConv pretrained load requested but file not found: {original_paconv_path}")
         
-    surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
+    if getattr(args, 'surface_loss_mode', 'topk').lower() == 'soft_local':
+        surface_criterion = SoftLocalCurvatureSurfaceLoss(
+            k_p2p=args.plane_knn,
+            k_curv=args.curv_knn,
+            alpha=args.curv_alpha,
+            beta=args.dir_beta,
+            sigma=getattr(args, 'soft_curv_sigma', 0.0),
+            min_sigma=getattr(args, 'soft_curv_min_sigma', 1e-4),
+        ).to(device)
+    else:
+        surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
     hm_criterion = AdaptiveWingLoss().to(device) 
     hierarchical_hm_loss = DeepPA_HierarchicalHeatmapLoss(hm_criterion).to(device)
     
@@ -386,7 +433,27 @@ def train(args):
                      stage_hm_indices = getattr(model, 'stage_hm_indices', None)
                      L_main_hm, L_aux_hm = hierarchical_hm_loss(sem_list, target_hm, stage_hm_indices)
 
-                L_crd = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
+                coord_loss_mode = getattr(args, 'coord_loss_mode', 'focal_l1').lower()
+                coord_scores = getattr(model, 'latest_main_hm_logits', None)
+                if coord_scores is None and sem_list:
+                    coord_scores = sem_list[-1]
+                if coord_loss_mode == 'expected_distance' and coord_scores is not None:
+                    L_crd = expected_distance_heatmap_loss(
+                        points_for_coords,
+                        coord_scores,
+                        augmented_landmark,
+                        temperature=getattr(args, 'softargmax_temperature', 1.0),
+                    )
+                elif coord_loss_mode == 'ranking' and coord_scores is not None:
+                    L_crd = ranking_heatmap_loss(
+                        points_for_coords,
+                        coord_scores,
+                        augmented_landmark,
+                        margin_scale=getattr(args, 'ranking_margin_scale', 1.0),
+                        temperature=getattr(args, 'softargmax_temperature', 1.0),
+                    )
+                else:
+                    L_crd = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                 L_srf, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
                 L_str = compute_structural_loss(pred_coords, augmented_landmark)
 

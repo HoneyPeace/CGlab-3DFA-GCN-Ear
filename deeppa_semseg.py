@@ -40,6 +40,21 @@ def checkpoint(function, *args, **kwargs):
     except ValueError:
         return torch_checkpoint(function, *args, **kwargs)
 
+def get_decoder_out_dim(args, depth):
+    mode = getattr(args, 'decoder_fusion', 'add').lower()
+    dims = list(args.dims)
+    if mode == 'add':
+        return getattr(args, 'head_dim', 256)
+    if mode == 'raw_concat':
+        return sum(dims[depth:])
+    if mode == 'prog_half_final320':
+        out_dim = dims[-1]
+        for d in range(len(dims) - 2, depth - 1, -1):
+            merged_dim = out_dim + dims[d]
+            out_dim = merged_dim if d == 0 else merged_dim // 2
+        return out_dim
+    raise ValueError(f"Unknown decoder_fusion: {mode}")
+
 class VFR(nn.Module):
     def __init__(self, in_dim, out_dim, bn_momentum, init=0.):
         super().__init__()
@@ -112,6 +127,8 @@ class Stage_PA(nn.Module):
         self.use_feature_gating = getattr(args, 'use_feature_gating', False) 
         self.use_interaction_fusion = getattr(args, 'use_interaction_fusion', True)
         self.fusion_residual_base = getattr(args, 'fusion_residual_base', 'deeppa').lower()
+        self.decoder_fusion = getattr(args, 'decoder_fusion', 'add').lower()
+        self.decoder_out_dim = get_decoder_out_dim(args, depth)
         
         # 🌟 2. 주입 타입별 투영(Projection) 레이어 동적 생성
         if self.injection_type != 'none':
@@ -199,6 +216,19 @@ class Stage_PA(nn.Module):
             nn.Linear(dim, args.head_dim, bias=False),
         )
         nn.init.constant_(self.postproj[0].weight, (args.dims[0] / dim) ** 0.5)
+
+        if self.decoder_fusion == 'prog_half_final320' and not self.last:
+            child_out_dim = get_decoder_out_dim(args, depth + 1)
+            merge_in_dim = child_out_dim + dim
+            merge_out_dim = self.decoder_out_dim
+            if merge_in_dim == merge_out_dim:
+                self.decoder_merge_proj = nn.Identity()
+            else:
+                self.decoder_merge_proj = nn.Sequential(
+                    nn.Linear(merge_in_dim, merge_out_dim, bias=False),
+                    nn.BatchNorm1d(merge_out_dim, momentum=args.bn_momentum),
+                    args.act(),
+                )
 
         self.cor_std = 1 / args.cor_std[depth]
         self.cor_head = nn.Sequential(
@@ -332,8 +362,22 @@ class Stage_PA(nn.Module):
             sub_x = None
             self.spa, self.sem = sub_spa, sub_sem
 
-        x = self.postproj(x.view(-1, x.shape[-1])).view(B, N, -1)
-        sub_x = sub_x + x if sub_x is not None else x 
+        if self.decoder_fusion == 'add':
+            x = self.postproj(x.view(-1, x.shape[-1])).view(B, N, -1)
+            sub_x = sub_x + x if sub_x is not None else x
+        elif self.decoder_fusion == 'raw_concat':
+            sub_x = torch.cat([sub_x, x], dim=-1) if sub_x is not None else x
+        elif self.decoder_fusion == 'prog_half_final320':
+            if sub_x is not None:
+                merged_x = torch.cat([sub_x, x], dim=-1)
+                if isinstance(self.decoder_merge_proj, nn.Identity):
+                    sub_x = merged_x
+                else:
+                    sub_x = self.decoder_merge_proj(merged_x.view(-1, merged_x.shape[-1])).view(B, N, -1)
+            else:
+                sub_x = x
+        else:
+            raise ValueError(f"Unknown decoder_fusion: {self.decoder_fusion}")
         sub_x = self.drop(sub_x)
         
         if not self.first:
@@ -346,17 +390,23 @@ class DeepPA_semseg(nn.Module):
     def __init__(self, args):
         super().__init__()
         args.cp_bn_momentum = 1 - (1 - args.bn_momentum)**0.5
+        self.decoder_fusion = getattr(args, 'decoder_fusion', 'add').lower()
         self.stage = Stage_PA(args) 
-        
-        self.latent_head = nn.Sequential(
-            nn.BatchNorm1d(args.head_dim, momentum=args.bn_momentum),
-            args.act(),
-            nn.Linear(args.head_dim, 256), 
-            nn.BatchNorm1d(256, momentum=args.bn_momentum),
-            args.act(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 256) 
-        )
+
+        if self.decoder_fusion == 'add':
+            self.out_channels = 256
+            self.latent_head = nn.Sequential(
+                nn.BatchNorm1d(args.head_dim, momentum=args.bn_momentum),
+                args.act(),
+                nn.Linear(args.head_dim, 256),
+                nn.BatchNorm1d(256, momentum=args.bn_momentum),
+                args.act(),
+                nn.Dropout(0.3),
+                nn.Linear(256, 256)
+            )
+        else:
+            self.out_channels = self.stage.decoder_out_dim
+            self.latent_head = nn.Identity()
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -369,8 +419,11 @@ class DeepPA_semseg(nn.Module):
         indices = indices[:]
         x, spa, sem = self.stage(x, xyz, None, indices, pts_list, prior_hints)
         B, N, C = x.shape
-        
-        x = self.latent_head(x.view(-1, C)).view(B, N, -1)
+
+        if self.decoder_fusion == 'add':
+            x = self.latent_head(x.view(-1, C)).view(B, N, -1)
+        else:
+            x = self.latent_head(x)
         
         if self.training:
             return x, spa, sem 
