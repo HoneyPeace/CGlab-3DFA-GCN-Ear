@@ -48,6 +48,38 @@ def compute_structural_loss(pred_coords, gt_coords):
     gt_dist_matrix = torch.cdist(gt_coords, gt_coords)
     return F.l1_loss(pred_dist_matrix, gt_dist_matrix)
 
+def heatmap_distribution_structural_loss(points, heatmap_scores, gt_coords, temperature=1.0):
+    """
+    Compare landmark pairwise structure directly from heatmap distributions.
+
+    points: [B, N, 3]
+    heatmap_scores: [B, L, N], preferably logits before sigmoid
+    gt_coords: [B, L, 3]
+
+    This avoids an [N, N] point-pair matrix. For each landmark distribution p_l:
+        mu_l = E[X_l]
+        s_l = E[||X_l||^2]
+    Then:
+        E[||X_a - X_b||^2] = s_a + s_b - 2 * mu_a dot mu_b
+    """
+    temperature = max(float(temperature), 1e-6)
+    weights = F.softmax(heatmap_scores / temperature, dim=2)
+
+    pred_mean = torch.sum(points.unsqueeze(1) * weights.unsqueeze(-1), dim=2)
+    point_sq_norm = torch.sum(points * points, dim=2)
+    pred_sq_mean = torch.sum(weights * point_sq_norm.unsqueeze(1), dim=2)
+
+    pred_pair_sq = (
+        pred_sq_mean.unsqueeze(2)
+        + pred_sq_mean.unsqueeze(1)
+        - 2.0 * torch.bmm(pred_mean, pred_mean.transpose(1, 2))
+    ).clamp_min(0.0)
+    gt_pair_sq = torch.cdist(gt_coords, gt_coords).pow(2)
+
+    num_landmarks = gt_coords.size(1)
+    pair_mask = ~torch.eye(num_landmarks, device=gt_coords.device, dtype=torch.bool)
+    return F.smooth_l1_loss(pred_pair_sq[:, pair_mask], gt_pair_sq[:, pair_mask])
+
 # ---------------------------------------------------------
 # 2. 3D 좌표 및 기하학적 연산 모듈
 # ---------------------------------------------------------
@@ -65,6 +97,40 @@ def get_softargmax_coords(points, heatmap_scores, temperature=1.0):
     # points: [B, N, 3], heatmap_scores: [B, L, N]
     temperature = max(float(temperature), 1e-6)
     weights = F.softmax(heatmap_scores / temperature, dim=2)
+    return torch.sum(points.unsqueeze(1) * weights.unsqueeze(-1), dim=2)
+
+def soft_ot_topk_mask(heatmap_scores, k=10, epsilon=0.1, iters=50):
+    # Entropic OT relaxation of a top-k indicator.
+    # Row masses are 1 per point, target masses are [k selected, N-k unselected].
+    B, L, N = heatmap_scores.shape
+    k = min(max(int(k), 1), N)
+    if k >= N:
+        return torch.ones_like(heatmap_scores)
+
+    epsilon = max(float(epsilon), 1e-6)
+    iters = max(int(iters), 1)
+
+    selected_log_kernel = heatmap_scores / epsilon
+    unselected_log_kernel = torch.zeros_like(selected_log_kernel)
+    log_kernel = torch.stack([selected_log_kernel, unselected_log_kernel], dim=-1)
+
+    log_mu = torch.zeros(B, L, N, device=heatmap_scores.device, dtype=heatmap_scores.dtype)
+    log_nu_values = torch.tensor([float(k), float(N - k)], device=heatmap_scores.device, dtype=heatmap_scores.dtype)
+    log_nu = torch.log(log_nu_values).view(1, 1, 2)
+
+    log_u = torch.zeros_like(log_mu)
+    log_v = torch.zeros(B, L, 2, device=heatmap_scores.device, dtype=heatmap_scores.dtype)
+    for _ in range(iters):
+        log_u = log_mu - torch.logsumexp(log_kernel + log_v.unsqueeze(2), dim=3)
+        log_v = log_nu - torch.logsumexp(log_kernel + log_u.unsqueeze(-1), dim=2)
+
+    log_transport = log_kernel + log_u.unsqueeze(-1) + log_v.unsqueeze(2)
+    return torch.exp(log_transport[..., 0])
+
+def get_soft_ot_topk_coords(points, heatmap_scores, k=10, epsilon=0.1, iters=50):
+    # points: [B, N, 3], heatmap_scores: [B, L, N]
+    selected_mass = soft_ot_topk_mask(heatmap_scores, k=k, epsilon=epsilon, iters=iters)
+    weights = selected_mass / (selected_mass.sum(dim=2, keepdim=True) + 1e-6)
     return torch.sum(points.unsqueeze(1) * weights.unsqueeze(-1), dim=2)
 
 def expected_distance_heatmap_loss(points, heatmap_scores, gt_coords, temperature=1.0):

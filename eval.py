@@ -87,7 +87,7 @@ if not getattr(args, 'run_id', None):
     print("Error: --run_id required (e.g., '1').")
     sys.exit(1)
 
-project_dir = os.path.join(args.output_root, args.exp_name)
+project_dir = os.path.abspath(os.path.join(args.output_root, args.exp_name))
 batch_str = f"{args.batch_size}x{args.accumulation_steps}" if getattr(args, 'accumulation_steps', 1) > 1 else f"{args.batch_size}"
 base_str = f"FPS{args.num_points}_sigma{args.sigma}_batch{batch_str}_train{args.train_len}"
 setting_str = f"{base_str}_{args.user_tag}" if getattr(args, 'user_tag', None) else base_str

@@ -32,7 +32,9 @@ from loss import (
     expected_distance_heatmap_loss,
     focal_l1_loss,
     get_differentiable_coords,
+    get_soft_ot_topk_coords,
     get_softargmax_coords,
+    heatmap_distribution_structural_loss,
     ranking_heatmap_loss,
 )
 from loss import DeepPA_HierarchicalHeatmapLoss 
@@ -205,10 +207,24 @@ class UniversalPipeline(nn.Module):
     def _coords_from_main_heatmap(self, points_xyz, sem_list, fallback_coords=None, main_logits=None):
         if sem_list:
             readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
+            if readout_mode == 'heatmap_attn_residual' and fallback_coords is not None:
+                return fallback_coords
             if self.training and readout_mode == 'softargmax':
                 heatmap_scores = main_logits if main_logits is not None else sem_list[-1]
                 temperature = getattr(self.args, 'softargmax_temperature', 1.0)
                 return get_softargmax_coords(points_xyz, heatmap_scores, temperature=temperature)
+            if self.training and readout_mode == 'soft_ot_topk':
+                heatmap_scores = main_logits if main_logits is not None else sem_list[-1]
+                soft_topk_k = getattr(self.args, 'soft_topk_k', 0)
+                if int(soft_topk_k) <= 0:
+                    soft_topk_k = getattr(self.args, 'regression_point_num', 10)
+                return get_soft_ot_topk_coords(
+                    points_xyz,
+                    heatmap_scores,
+                    k=soft_topk_k,
+                    epsilon=getattr(self.args, 'soft_topk_epsilon', 0.1),
+                    iters=getattr(self.args, 'soft_topk_iters', 50),
+                )
             k_val = getattr(self.args, 'regression_point_num', 10)
             return get_differentiable_coords(points_xyz, sem_list[-1], k=k_val)
         return fallback_coords
@@ -262,6 +278,12 @@ class UniversalPipeline(nn.Module):
             )
             self.stage_hm_indices = getattr(self.stage2_deeppa, 'latest_stage_hm_indices', None)
             return pred_coords, sem_list, s1_hm_raw
+
+    def set_residual_limit_norm(self, value):
+        for module_name in ['model', 'stage2_deeppa']:
+            module = getattr(self, module_name, None)
+            if module is not None and hasattr(module, 'set_residual_limit_norm'):
+                module.set_residual_limit_norm(value)
 
 def train(args):
     accum_steps = args.accumulation_steps
@@ -412,6 +434,10 @@ def train(args):
                 
                 point_input = point_normal.permute(0, 2, 1).contiguous()
                 points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
+                if getattr(args, 'train_coord_readout', 'topk').lower() == 'heatmap_attn_residual':
+                    residual_max_mm = float(getattr(args, 'hm_attn_residual_max_mm', 0.0))
+                    if residual_max_mm > 0.0 and hasattr(model, 'set_residual_limit_norm'):
+                        model.set_residual_limit_norm(residual_max_mm / max(float(avg_m), 1e-6))
                 target_hm = seg.permute(0, 2, 1).contiguous()
                 
                 pred_coords, sem_list, paconv_hm = model(point_input)
@@ -455,7 +481,16 @@ def train(args):
                 else:
                     L_crd = focal_l1_loss(pred_coords, augmented_landmark, gamma=args.focal_gamma)
                 L_srf, _, _, _ = surface_criterion(pred_coords, augmented_landmark, points_for_coords, disable_norm=False)
-                L_str = compute_structural_loss(pred_coords, augmented_landmark)
+                struct_loss_mode = getattr(args, 'struct_loss_mode', 'coord').lower()
+                if struct_loss_mode == 'heatmap' and coord_scores is not None:
+                    L_str = heatmap_distribution_structural_loss(
+                        points_for_coords,
+                        coord_scores,
+                        augmented_landmark,
+                        temperature=getattr(args, 'hm_struct_temperature', 1.0),
+                    )
+                else:
+                    L_str = compute_structural_loss(pred_coords, augmented_landmark)
 
                 if getattr(args, 'use_loss_norm', False):
                     loss_items = {
@@ -514,6 +549,10 @@ def train(args):
                 avg_m = torch.mean(torch.max(torch.sqrt(torch.sum((point_xyz - torch.mean(point_xyz, axis=1, keepdim=True)) ** 2, axis=2)), axis=1)[0]).item()
                 point_normal, landmark_normal = normalize_data(point, landmark)
                 point_input = point_normal.permute(0, 2, 1).contiguous() 
+                if getattr(args, 'train_coord_readout', 'topk').lower() == 'heatmap_attn_residual':
+                    residual_max_mm = float(getattr(args, 'hm_attn_residual_max_mm', 0.0))
+                    if residual_max_mm > 0.0 and hasattr(model, 'set_residual_limit_norm'):
+                        model.set_residual_limit_norm(residual_max_mm / max(float(avg_m), 1e-6))
                 pred_coords = model(point_input)[0]
                 val_mm_total += F.l1_loss(pred_coords, landmark_normal.view_as(pred_coords)).item() * avg_m * B_val
                 val_samples += B_val

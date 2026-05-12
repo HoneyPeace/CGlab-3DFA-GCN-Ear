@@ -83,6 +83,7 @@ class DeepPA_Wrapper(nn.Module):
         # only for old scripts/checkpoint metadata that may still reference it.
         self.coord_from_heatmap = True
         self.latest_main_heatmap_logits = None
+        self.current_residual_limit_norm = None
         
         if not hasattr(args, 'use_cp'): args.use_cp = False
             
@@ -114,6 +115,12 @@ class DeepPA_Wrapper(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.main_heatmap_head = nn.Conv1d(512, self.landmark_num, 1)
+        self.coord_residual_mlp = nn.Sequential(
+            nn.Linear(512 + 3, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(256, 3)
+        )
         self.head_linear = nn.Sequential(
             nn.Linear(512, 256),
             nn.BatchNorm1d(256, momentum=bn_mom),
@@ -121,6 +128,28 @@ class DeepPA_Wrapper(nn.Module):
             nn.Dropout(0.3),
             nn.Linear(256, self.landmark_num * 3) 
         )
+
+    def set_residual_limit_norm(self, value):
+        self.current_residual_limit_norm = None if value is None else float(value)
+
+    def _heatmap_attention_residual_coords(self, xyz_coords, point_features, heatmap_logits):
+        temperature = max(float(getattr(self.args, 'softargmax_temperature', 1.0)), 1e-6)
+        attention = F.softmax(heatmap_logits / temperature, dim=2)
+
+        pooled_xyz = torch.bmm(attention, xyz_coords)
+        pooled_feature = torch.bmm(attention, point_features.transpose(1, 2).contiguous())
+        residual_input = torch.cat([pooled_feature, pooled_xyz], dim=2)
+
+        B, L, _ = residual_input.shape
+        residual = self.coord_residual_mlp(residual_input.view(B * L, -1)).view(B, L, 3)
+
+        limit = self.current_residual_limit_norm
+        if limit is None:
+            limit = float(getattr(self.args, 'hm_attn_residual_max_norm', 0.0))
+        if limit and limit > 0.0:
+            residual = float(limit) * torch.tanh(residual)
+
+        return pooled_xyz + residual
 
     def forward(self, x, prior_hints=None):
         B, C_in, N_in = x.shape
@@ -223,7 +252,10 @@ class DeepPA_Wrapper(nn.Module):
         # kept in the module for checkpoint compatibility, but it is not used for
         # DeepPA coordinate supervision/evaluation.
         k_val = getattr(self.args, 'regression_point_num', 10)
-        coords = get_differentiable_coords(xyz_coords, main_heatmap, k=k_val)
+        if getattr(self.args, 'train_coord_readout', 'topk').lower() == 'heatmap_attn_residual':
+            coords = self._heatmap_attention_residual_coords(xyz_coords, x_fused, main_heatmap_logits)
+        else:
+            coords = get_differentiable_coords(xyz_coords, main_heatmap, k=k_val)
         
         # 🌟 7. Train/Eval 상관없이 무조건 튜플 통일 반환
         spa_loss = out[1] if isinstance(out, tuple) else torch.tensor(0.0).to(device)

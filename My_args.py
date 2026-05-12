@@ -97,13 +97,28 @@ parser.add_argument('--frozen_paconv_hm_weight', type=float, default=0.0,
 parser.add_argument('--coord_from_heatmap', type=str2bool, default=True,
                     help='True: derive final DeepPA coordinates from main heatmap by differentiable top-k')
 parser.add_argument('--train_coord_readout', type=str, default='topk',
-                    choices=['topk', 'softargmax'],
+                    choices=['topk', 'softargmax', 'soft_ot_topk', 'heatmap_attn_residual'],
                     help='Training-only DeepPA coordinate readout for Crd/Srf/Str losses')
 parser.add_argument('--coord_loss_mode', type=str, default='focal_l1',
                     choices=['focal_l1', 'expected_distance', 'ranking'],
                     help='Coordinate/heatmap geometry supervision used as L_coord')
+parser.add_argument('--struct_loss_mode', type=str, default='coord',
+                    choices=['coord', 'heatmap'],
+                    help='Structural loss source: coordinate pairwise distance or heatmap distribution moment')
+parser.add_argument('--hm_struct_temperature', type=float, default=1.0,
+                    help='Temperature for heatmap-distribution structural loss')
 parser.add_argument('--softargmax_temperature', type=float, default=1.0,
                     help='Temperature for soft-argmax/expected-distance/ranking heatmap distributions')
+parser.add_argument('--soft_topk_k', type=int, default=0,
+                    help='Selected-point count for --train_coord_readout soft_ot_topk; <=0 uses --regression_point_num')
+parser.add_argument('--soft_topk_epsilon', type=float, default=0.1,
+                    help='Entropic regularization epsilon for OT-based soft top-k readout')
+parser.add_argument('--soft_topk_iters', type=int, default=50,
+                    help='Sinkhorn iterations for OT-based soft top-k readout')
+parser.add_argument('--hm_attn_residual_max_mm', type=float, default=0.0,
+                    help='Max heatmap-attention residual correction in mm for --train_coord_readout heatmap_attn_residual; <=0 uses --hm_attn_residual_max_norm')
+parser.add_argument('--hm_attn_residual_max_norm', type=float, default=0.0,
+                    help='Fallback max residual correction in normalized coordinates for heatmap_attn_residual; <=0 disables residual clamp')
 parser.add_argument('--ranking_margin_scale', type=float, default=1.0,
                     help='Distance margin scale for ranking heatmap loss')
 parser.add_argument('--ablation_only', type=str, default='all',
