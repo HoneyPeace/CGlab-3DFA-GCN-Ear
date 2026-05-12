@@ -34,6 +34,24 @@ class AdaptiveWingLoss(nn.Module):
         
         return (loss1.sum() + loss2.sum()) / (len(loss1) + len(loss2) + 1e-6)
 
+class SoftmaxHeatmapDistributionLoss(nn.Module):
+    """
+    Heatmap distribution loss over points.
+
+    pred_logits: [B, L, N], raw heatmap logits before sigmoid
+    target: [B, L, N], GT heatmap values normalized to a point-wise distribution
+    """
+    def __init__(self, temperature=1.0, eps=1e-8):
+        super().__init__()
+        self.temperature = temperature
+        self.eps = eps
+
+    def forward(self, pred_logits, target):
+        temperature = max(float(self.temperature), 1e-6)
+        log_probs = F.log_softmax(pred_logits / temperature, dim=2)
+        target_probs = target / target.sum(dim=2, keepdim=True).clamp_min(self.eps)
+        return -(target_probs.detach() * log_probs).sum(dim=2).mean()
+
 def focal_l1_loss(pred_coords, gt_coords, gamma=2.0):
     l1_errors = torch.norm(pred_coords - gt_coords, p=1, dim=-1)
     focal_weights = torch.pow(1.0 + l1_errors.detach(), gamma)

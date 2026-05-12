@@ -28,6 +28,7 @@ from loss import (
     AdaptiveWingLoss,
     CurvatureSurfaceLoss,
     SoftLocalCurvatureSurfaceLoss,
+    SoftmaxHeatmapDistributionLoss,
     compute_structural_loss,
     expected_distance_heatmap_loss,
     focal_l1_loss,
@@ -190,6 +191,7 @@ class UniversalPipeline(nn.Module):
         self.unfreeze_paconv_in_frozen = getattr(args, 'unfreeze_paconv_in_frozen', False)
         self.stage_hm_indices = None
         self.latest_main_hm_logits = None
+        self.latest_sem_hm_logits = None
         
         if self.mode in ['frozen', 'finetune', 'e2e']:
             self.stage1_paconv = PAConv(args, landmark_num)
@@ -233,6 +235,7 @@ class UniversalPipeline(nn.Module):
         points_norm_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
         k_val = getattr(self.args, 'regression_point_num', 10)
         self.latest_main_hm_logits = None
+        self.latest_sem_hm_logits = None
 
         # 🌟 PAConv 단독 모드 복원
         if self.mode in ['single_paconv', 'single_paconv_heat']: 
@@ -246,6 +249,7 @@ class UniversalPipeline(nn.Module):
             main_hm = sem_list[-1] if len(sem_list) > 0 else None
             main_logits = getattr(self.model, 'latest_main_heatmap_logits', None)
             self.latest_main_hm_logits = main_logits
+            self.latest_sem_hm_logits = getattr(self.model, 'latest_sem_heatmap_logits', None)
             pred_coords = self._coords_from_main_heatmap(
                 points_norm_xyz,
                 sem_list,
@@ -270,6 +274,7 @@ class UniversalPipeline(nn.Module):
             sem_list = out[2] if len(out) > 2 else []
             main_logits = getattr(self.stage2_deeppa, 'latest_main_heatmap_logits', None)
             self.latest_main_hm_logits = main_logits
+            self.latest_sem_hm_logits = getattr(self.stage2_deeppa, 'latest_sem_heatmap_logits', None)
             pred_coords = self._coords_from_main_heatmap(
                 points_norm_xyz,
                 sem_list,
@@ -359,8 +364,15 @@ def train(args):
         ).to(device)
     else:
         surface_criterion = CurvatureSurfaceLoss(k_p2p=args.plane_knn, k_curv=args.curv_knn, alpha=args.curv_alpha, beta=args.dir_beta).to(device)
-    hm_criterion = AdaptiveWingLoss().to(device) 
+    heatmap_loss_mode = getattr(args, 'heatmap_loss_mode', 'adaptive_wing').lower()
+    if heatmap_loss_mode == 'softmax_ce':
+        hm_criterion = SoftmaxHeatmapDistributionLoss(
+            temperature=getattr(args, 'heatmap_softmax_temperature', 1.0)
+        ).to(device)
+    else:
+        hm_criterion = AdaptiveWingLoss().to(device)
     hierarchical_hm_loss = DeepPA_HierarchicalHeatmapLoss(hm_criterion).to(device)
+    print(f"[INFO] Heatmap loss mode: {heatmap_loss_mode}")
     
     opt = build_training_optimizer(args, model, pipeline_mode)
     scheduler = CosineAnnealingLR(opt, T_max=args.epochs) if getattr(args, 'scheduler', 'cos') == 'cos' else StepLR(opt, step_size=40, gamma=0.9)
@@ -457,7 +469,12 @@ def train(args):
                 
                 if pipeline_mode not in ['single_paconv', 'single_paconv_heat']:
                      stage_hm_indices = getattr(model, 'stage_hm_indices', None)
-                     L_main_hm, L_aux_hm = hierarchical_hm_loss(sem_list, target_hm, stage_hm_indices)
+                     heatmap_loss_inputs = sem_list
+                     if heatmap_loss_mode == 'softmax_ce':
+                         heatmap_logits = getattr(model, 'latest_sem_hm_logits', None)
+                         if heatmap_logits:
+                             heatmap_loss_inputs = heatmap_logits
+                     L_main_hm, L_aux_hm = hierarchical_hm_loss(heatmap_loss_inputs, target_hm, stage_hm_indices)
 
                 coord_loss_mode = getattr(args, 'coord_loss_mode', 'focal_l1').lower()
                 coord_scores = getattr(model, 'latest_main_hm_logits', None)

@@ -83,6 +83,7 @@ class DeepPA_Wrapper(nn.Module):
         # only for old scripts/checkpoint metadata that may still reference it.
         self.coord_from_heatmap = True
         self.latest_main_heatmap_logits = None
+        self.latest_sem_heatmap_logits = None
         self.current_residual_limit_norm = None
         
         if not hasattr(args, 'use_cp'): args.use_cp = False
@@ -156,6 +157,7 @@ class DeepPA_Wrapper(nn.Module):
         device = x.device
         self.latest_stage_hm_indices = None
         self.latest_main_heatmap_logits = None
+        self.latest_sem_heatmap_logits = None
 
         # ==============================================================================
         # 🌟 2. [Ablation] 3지 선다 옵션에 따른 피처 주입 전처리
@@ -260,7 +262,12 @@ class DeepPA_Wrapper(nn.Module):
         # 🌟 7. Train/Eval 상관없이 무조건 튜플 통일 반환
         spa_loss = out[1] if isinstance(out, tuple) else torch.tensor(0.0).to(device)
         raw_sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
+        if torch.is_tensor(raw_sem_list):
+            raw_sem_list = [raw_sem_list]
+        else:
+            raw_sem_list = list(raw_sem_list)
         sem_list = [torch.sigmoid(s) for s in raw_sem_list] if len(raw_sem_list) > 0 else []
         sem_list.append(main_heatmap)
+        self.latest_sem_heatmap_logits = raw_sem_list + [main_heatmap_logits]
         
         return coords, spa_loss, sem_list

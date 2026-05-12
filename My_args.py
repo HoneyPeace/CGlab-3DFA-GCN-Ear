@@ -99,6 +99,11 @@ parser.add_argument('--coord_from_heatmap', type=str2bool, default=True,
 parser.add_argument('--train_coord_readout', type=str, default='topk',
                     choices=['topk', 'softargmax', 'soft_ot_topk', 'heatmap_attn_residual'],
                     help='Training-only DeepPA coordinate readout for Crd/Srf/Str losses')
+parser.add_argument('--heatmap_loss_mode', type=str, default='adaptive_wing',
+                    choices=['adaptive_wing', 'softmax_ce'],
+                    help='Heatmap supervision for main/aux heatmaps')
+parser.add_argument('--heatmap_softmax_temperature', type=float, default=1.0,
+                    help='Point-wise softmax temperature for --heatmap_loss_mode softmax_ce')
 parser.add_argument('--coord_loss_mode', type=str, default='focal_l1',
                     choices=['focal_l1', 'expected_distance', 'ranking'],
                     help='Coordinate/heatmap geometry supervision used as L_coord')
