@@ -133,6 +133,13 @@ class DeepPA_Wrapper(nn.Module):
     def set_residual_limit_norm(self, value):
         self.current_residual_limit_norm = None if value is None else float(value)
 
+    def _activate_heatmap(self, logits):
+        mode = getattr(self.args, 'heatmap_activation_mode', 'sigmoid').lower()
+        if mode == 'softmax':
+            temperature = max(float(getattr(self.args, 'heatmap_activation_temperature', 1.0)), 1e-6)
+            return F.softmax(logits / temperature, dim=2)
+        return torch.sigmoid(logits)
+
     def _heatmap_attention_residual_coords(self, xyz_coords, point_features, heatmap_logits):
         temperature = max(float(getattr(self.args, 'softargmax_temperature', 1.0)), 1e-6)
         attention = F.softmax(heatmap_logits / temperature, dim=2)
@@ -249,7 +256,7 @@ class DeepPA_Wrapper(nn.Module):
         x_fused = self.head_conv(fused_features) 
         main_heatmap_logits = self.main_heatmap_head(x_fused)
         self.latest_main_heatmap_logits = main_heatmap_logits
-        main_heatmap = torch.sigmoid(main_heatmap_logits)
+        main_heatmap = self._activate_heatmap(main_heatmap_logits)
         # Coordinates are always derived from the main heatmap. The linear head is
         # kept in the module for checkpoint compatibility, but it is not used for
         # DeepPA coordinate supervision/evaluation.
@@ -266,7 +273,7 @@ class DeepPA_Wrapper(nn.Module):
             raw_sem_list = [raw_sem_list]
         else:
             raw_sem_list = list(raw_sem_list)
-        sem_list = [torch.sigmoid(s) for s in raw_sem_list] if len(raw_sem_list) > 0 else []
+        sem_list = [self._activate_heatmap(s) for s in raw_sem_list] if len(raw_sem_list) > 0 else []
         sem_list.append(main_heatmap)
         self.latest_sem_heatmap_logits = raw_sem_list + [main_heatmap_logits]
         
