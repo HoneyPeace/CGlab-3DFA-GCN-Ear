@@ -136,6 +136,11 @@ class DeepPA_Wrapper(nn.Module):
     def _activate_heatmap(self, logits):
         return torch.sigmoid(logits)
 
+    def _heatmap_sigmoid_xyz_pool_coords(self, xyz_coords, heatmap_logits):
+        attention = torch.sigmoid(heatmap_logits)
+        attention = attention / (attention.sum(dim=2, keepdim=True) + 1e-6)
+        return torch.bmm(attention, xyz_coords)
+
     def _heatmap_attention_residual_coords(self, xyz_coords, point_features, heatmap_logits):
         attention = torch.sigmoid(heatmap_logits)
         attention = attention / (attention.sum(dim=2, keepdim=True) + 1e-6)
@@ -257,8 +262,11 @@ class DeepPA_Wrapper(nn.Module):
         # kept in the module for checkpoint compatibility, but it is not used for
         # DeepPA coordinate supervision/evaluation.
         k_val = getattr(self.args, 'regression_point_num', 10)
-        if getattr(self.args, 'train_coord_readout', 'topk').lower() == 'heatmap_attn_residual':
+        readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
+        if readout_mode == 'heatmap_attn_residual':
             coords = self._heatmap_attention_residual_coords(xyz_coords, x_fused, main_heatmap_logits)
+        elif readout_mode == 'sigmoid_xyz_pool':
+            coords = self._heatmap_sigmoid_xyz_pool_coords(xyz_coords, main_heatmap_logits)
         else:
             coords = get_differentiable_coords(xyz_coords, main_heatmap, k=k_val)
         

@@ -209,7 +209,7 @@ class UniversalPipeline(nn.Module):
     def _coords_from_main_heatmap(self, points_xyz, sem_list, fallback_coords=None, main_logits=None):
         if sem_list:
             readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
-            if readout_mode == 'heatmap_attn_residual' and fallback_coords is not None:
+            if readout_mode in ['sigmoid_xyz_pool', 'heatmap_attn_residual'] and fallback_coords is not None:
                 return fallback_coords
             if self.training and readout_mode == 'softargmax':
                 heatmap_scores = main_logits if main_logits is not None else sem_list[-1]
