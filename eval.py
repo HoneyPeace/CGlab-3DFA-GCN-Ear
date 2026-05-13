@@ -43,7 +43,14 @@ args = parser.parse_args()
 args.eval = True
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+def shorten_heatmap_name(name, max_len=24):
+    safe_name = ''.join(ch if ch.isalnum() or ch in ('_', '-') else '_' for ch in str(name))
+    if len(safe_name) <= max_len:
+        return safe_name
+    return safe_name[:max_len]
+
 def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx, prefix):
+    os.makedirs(save_dir, exist_ok=True)
     fig = plt.figure(figsize=(30, 10))
     views = [(131, 90, -100, "Front"), (132, 30, 120, "Side"), (133, 45, -45, "Downside")]
     for pos, elev, azim, title in views:
@@ -52,7 +59,8 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
         ax.view_init(elev=elev, azim=azim)
         ax.set_title(title)
         ax.axis('off')
-    filename = f"{prefix}_{sample_name}_L{landmark_idx + 1:02d}.png"
+    short_sample_name = shorten_heatmap_name(sample_name, max_len=32)
+    filename = f"{prefix}_{short_sample_name}_L{landmark_idx + 1:02d}.png"
     plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')
     plt.close()
 
@@ -102,7 +110,7 @@ if not os.path.exists(run_root):
 save_eval_command_txt(run_root, args.model)
 
 data_dir = os.path.join(run_root, 'npy_data')
-heatmap_save_dir_base = os.path.join(run_root, "Pred_Heatmaps")
+heatmap_save_dir_base = os.path.join(run_root, "HM")
 asc_save_dir_base = os.path.join(run_root, "Pred_Landmarks")
 
 try:
@@ -191,7 +199,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     print(f" 🚀 [EVALUATION START] 대상 모델: {eval_name} (Mode: {pipeline_mode})")
     print(f"==================================================")
     
-    current_hm_dir = os.path.join(heatmap_save_dir_base, eval_name)
+    current_hm_dir = os.path.join(heatmap_save_dir_base, shorten_heatmap_name(eval_name, max_len=16))
     current_asc_dir = os.path.join(asc_save_dir_base, eval_name)
     os.makedirs(current_hm_dir, exist_ok=True)
     os.makedirs(current_asc_dir, exist_ok=True)
@@ -253,7 +261,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 if idx % 40 == 0:
                     points_np, heatmap_np = point_xyz[0].cpu().numpy(), pred_heatmap[0].cpu().numpy()
                     for lm_idx in range(heatmap_np.shape[1]):
-                         save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], current_hm_dir, real_name, lm_idx, f"pred_{eval_name}")
+                         save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], current_hm_dir, real_name, lm_idx, "p")
 
             # 4. 정밀 스케일 복원 (Denormalization)
             pred_landmark = (pred_coords_norm * scale) + centroid
