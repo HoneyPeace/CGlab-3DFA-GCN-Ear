@@ -163,6 +163,9 @@ class UniversalPipeline_Eval(nn.Module):
 
     def _coords_from_main_heatmap(self, points_xyz, sem_list, fallback_coords=None):
         if sem_list:
+            readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
+            if readout_mode == 'heatmap_attn_residual' and fallback_coords is not None:
+                return fallback_coords
             k_val = getattr(self.args, 'regression_point_num', 10)
             return get_differentiable_coords(points_xyz, sem_list[-1], k=k_val)
         return fallback_coords
