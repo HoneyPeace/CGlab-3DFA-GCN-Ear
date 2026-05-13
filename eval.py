@@ -111,7 +111,7 @@ save_eval_command_txt(run_root, args.model)
 
 data_dir = os.path.join(run_root, 'npy_data')
 heatmap_save_dir_base = os.path.join(run_root, "HM")
-asc_save_dir_base = os.path.join(run_root, "Pred_Landmarks")
+asc_save_dir_base = os.path.join(run_root, "LM")
 
 try:
     in_channels = getattr(args, 'in_channels', 7)
@@ -170,6 +170,12 @@ class UniversalPipeline_Eval(nn.Module):
             return get_differentiable_coords(points_xyz, sem_list[-1], k=k_val)
         return fallback_coords
 
+    def set_residual_limit_norm(self, value):
+        for module_name in ['model', 'stage2_deeppa']:
+            module = getattr(self, module_name, None)
+            if module is not None and hasattr(module, 'set_residual_limit_norm'):
+                module.set_residual_limit_norm(value)
+
     def forward(self, x):   
         points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
         if self.mode in ['single_paconv', 'single_paconv_heat']:
@@ -202,8 +208,9 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     print(f" 🚀 [EVALUATION START] 대상 모델: {eval_name} (Mode: {pipeline_mode})")
     print(f"==================================================")
     
-    current_hm_dir = os.path.join(heatmap_save_dir_base, shorten_heatmap_name(eval_name, max_len=16))
-    current_asc_dir = os.path.join(asc_save_dir_base, eval_name)
+    short_eval_name = shorten_heatmap_name(eval_name, max_len=16)
+    current_hm_dir = os.path.join(heatmap_save_dir_base, short_eval_name)
+    current_asc_dir = os.path.join(asc_save_dir_base, short_eval_name)
     os.makedirs(current_hm_dir, exist_ok=True)
     os.makedirs(current_asc_dir, exist_ok=True)
 
@@ -231,6 +238,11 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 
             point_normal, _ = normalize_data(point, gt_landmark)
             point_input = point_normal.permute(0, 2, 1).contiguous()
+            if getattr(args, 'train_coord_readout', 'topk').lower() == 'heatmap_attn_residual':
+                residual_max_mm = float(getattr(args, 'hm_attn_residual_max_mm', 0.0))
+                if residual_max_mm > 0.0 and hasattr(eval_model, 'set_residual_limit_norm'):
+                    avg_m = torch.mean(m).item()
+                    eval_model.set_residual_limit_norm(residual_max_mm / max(float(avg_m), 1e-6))
             
             # 모델 추론
             pred_coords_norm, sem_list, paconv_or_main_hm = eval_model(point_input)
@@ -278,8 +290,8 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             me_list.append(me)
             per_landmark_me_list.append(dists)
             
-            pred_asc_name = f"{eval_name}_pred_{real_name}.asc"
-            pred_asc_relpath = os.path.join("Pred_Landmarks", eval_name, pred_asc_name)
+            pred_asc_name = f"p_{shorten_heatmap_name(real_name, max_len=32)}.asc"
+            pred_asc_relpath = os.path.join("LM", short_eval_name, pred_asc_name)
             np.savetxt(os.path.join(current_asc_dir, pred_asc_name), pred_np, fmt="%.6f", delimiter=",")
 
             sample_record = {
