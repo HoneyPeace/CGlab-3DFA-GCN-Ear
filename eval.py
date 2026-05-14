@@ -33,7 +33,11 @@ if hasattr(sys.stderr, "reconfigure"):
 # 🌟 아키텍처 및 학습과 동일한 정규화 로직 임포트
 from DeepPA_model import DeepPA_Wrapper  
 from PAConv_model import PAConv          
-from loss import get_differentiable_coords 
+from loss import (
+    get_differentiable_coords,
+    CurvatureSurfaceLoss,
+    SoftLocalCurvatureSurfaceLoss,
+)
 from augmentations import normalize_data  # [핵심] 학습 코드와 정규화 동기화
 
 matplotlib.use('Agg')
@@ -218,6 +222,26 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     me_list, per_landmark_me_list = [], []
     sample_records = []
     cos_sim_list, iou_list, time_list = [], [], []
+
+    surface_loss_mode = getattr(args, 'surface_loss_mode', 'topk').lower()
+    if surface_loss_mode == 'soft_local':
+        surface_criterion = SoftLocalCurvatureSurfaceLoss(
+            k_p2p=args.plane_knn,
+            k_curv=args.curv_knn,
+            alpha=args.curv_alpha,
+            beta=args.dir_beta,
+            sigma=getattr(args, 'soft_curv_sigma', 0.0),
+            min_sigma=getattr(args, 'soft_curv_min_sigma', 1e-4),
+        ).to(device)
+    else:
+        surface_criterion = CurvatureSurfaceLoss(
+            k_p2p=args.plane_knn,
+            k_curv=args.curv_knn,
+            alpha=args.curv_alpha,
+            beta=args.dir_beta,
+        ).to(device)
+    surface_loss_list, surface_p2p_mm_list = [], []
+    surface_curv_diff_list, surface_dir_diff_list = [], []
     
     eval_model.eval()
 
@@ -237,7 +261,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             if device.type == 'cuda': torch.cuda.synchronize()
             start_time = time.time()  
 
-            point_normal, _ = normalize_data(point, gt_landmark)
+            point_normal, gt_landmark_norm = normalize_data(point, gt_landmark)
             point_input = point_normal.permute(0, 2, 1).contiguous()
             if getattr(args, 'train_coord_readout', 'topk').lower() in [
                 'heatmap_attn_residual', 'heatmap_attn_residual_feature_only'
@@ -252,6 +276,19 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             
             if device.type == 'cuda': torch.cuda.synchronize()
             time_list.append(time.time() - start_time)  
+
+            points_for_surface = point_input[:, :3, :].permute(0, 2, 1).contiguous()
+            L_srf, p2p_norm, curv_diff, dir_diff = surface_criterion(
+                pred_coords_norm,
+                gt_landmark_norm.view_as(pred_coords_norm),
+                points_for_surface,
+                disable_norm=False,
+            )
+            surface_p2p_mm = float(p2p_norm.item()) * float(torch.mean(m).item())
+            surface_loss_list.append(float(L_srf.item()))
+            surface_p2p_mm_list.append(surface_p2p_mm)
+            surface_curv_diff_list.append(float(curv_diff.item()))
+            surface_dir_diff_list.append(float(dir_diff.item()))
             
             # [히트맵 품질 추출]
             if pipeline_mode in ['single_paconv', 'single_paconv_heat']:
@@ -301,6 +338,10 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 "Index": idx,
                 "Sample_Name": real_name,
                 "Mean_Error_mm": round(float(me), 6),
+                "Surface_Normal_Distance_mm": round(float(surface_p2p_mm), 6),
+                "Surface_Loss_Norm": round(float(L_srf.item()), 6),
+                "Surface_Curvature_Diff": round(float(curv_diff.item()), 6),
+                "Surface_Direction_Diff": round(float(dir_diff.item()), 6),
                 "Pred_ASC": pred_asc_relpath,
             }
             for lm_idx, dist in enumerate(dists):
@@ -313,6 +354,10 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     avg_iou = np.mean(iou_list) if iou_list else 0.0
     iou_5_global = np.percentile(iou_list, 5) if iou_list else 0.0
     avg_time = np.mean(time_list) * 1000.0
+    avg_surface_loss = np.mean(surface_loss_list) if surface_loss_list else 0.0
+    avg_surface_p2p_mm = np.mean(surface_p2p_mm_list) if surface_p2p_mm_list else 0.0
+    avg_surface_curv_diff = np.mean(surface_curv_diff_list) if surface_curv_diff_list else 0.0
+    avg_surface_dir_diff = np.mean(surface_dir_diff_list) if surface_dir_diff_list else 0.0
 
     if len(per_landmark_me_list) > 0:
         per_landmark_me_array = np.stack(per_landmark_me_list, axis=0)
@@ -334,13 +379,18 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             "[Metadata]", "Experiment", "Run ID", "Model", 
             "[Metrics]", "Average ME (mm)", "Average Std (mm)", "Avg Time (ms)", 
             "Cosine Sim (%), ", "95%ile Cosine (%)", "mIoU (@0.1, %)", 
-            "95%ile mIoU (%)", "Success Rate (<10mm, %)", "Success Rate (<5mm, %)"
+            "95%ile mIoU (%)", "Success Rate (<10mm, %)", "Success Rate (<5mm, %)",
+            "[Surface Diagnostics]", "Surface Loss Mode", "Surface Loss (norm)",
+            "Surface Normal Distance (mm)", "Surface Curvature Diff", "Surface Direction Diff"
         ],
         eval_name: [
             "", args.exp_name, target_folder_name, eval_name,
             "", round(average_me, 4), round(std_me, 4), round(avg_time, 2), 
             round(avg_cos_sim, 2), round(cos_sim_5_global, 2), round(avg_iou, 2), 
-            round(iou_5_global, 2), round(sr_10, 2), round(sr_5, 2)
+            round(iou_5_global, 2), round(sr_10, 2), round(sr_5, 2),
+            "", surface_loss_mode, round(avg_surface_loss, 6),
+            round(avg_surface_p2p_mm, 4), round(avg_surface_curv_diff, 6),
+            round(avg_surface_dir_diff, 6)
         ]
     }
     df_summary = pd.DataFrame(summary_data)
@@ -381,6 +431,13 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         f.write(f"- 95%ile ME              : {me_95_global:.4f} mm\n")
         f.write(f"- Success Rate (<10mm)   : {sr_10:.2f} %\n")
         f.write(f"- Success Rate (<5mm)    : {sr_5:.2f} %\n")
+
+        f.write("\n[1-1. Surface Diagnostics]\n")
+        f.write(f"- Surface Loss Mode          : {surface_loss_mode}\n")
+        f.write(f"- Surface Loss (norm)        : {avg_surface_loss:.6f}\n")
+        f.write(f"- Surface Normal Distance    : {avg_surface_p2p_mm:.4f} mm\n")
+        f.write(f"- Surface Curvature Diff     : {avg_surface_curv_diff:.6f}\n")
+        f.write(f"- Surface Direction Diff     : {avg_surface_dir_diff:.6f}\n")
         
         f.write("\n[2. Per-Landmark Errors (All 36)]\n")
         for i in range(lm_means.shape[0]):
