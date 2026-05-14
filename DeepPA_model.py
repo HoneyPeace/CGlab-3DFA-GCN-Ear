@@ -122,6 +122,12 @@ class DeepPA_Wrapper(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(256, 3)
         )
+        self.coord_feature_residual_mlp = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(256, 3)
+        )
         self.head_linear = nn.Sequential(
             nn.Linear(512, 256),
             nn.BatchNorm1d(256, momentum=bn_mom),
@@ -151,6 +157,24 @@ class DeepPA_Wrapper(nn.Module):
 
         B, L, _ = residual_input.shape
         residual = self.coord_residual_mlp(residual_input.view(B * L, -1)).view(B, L, 3)
+
+        limit = self.current_residual_limit_norm
+        if limit is None:
+            limit = float(getattr(self.args, 'hm_attn_residual_max_norm', 0.0))
+        if limit and limit > 0.0:
+            residual = float(limit) * torch.tanh(residual)
+
+        return pooled_xyz + residual
+
+    def _heatmap_attention_feature_residual_coords(self, xyz_coords, point_features, heatmap_logits):
+        attention = torch.sigmoid(heatmap_logits)
+        attention = attention / (attention.sum(dim=2, keepdim=True) + 1e-6)
+
+        pooled_xyz = torch.bmm(attention, xyz_coords)
+        pooled_feature = torch.bmm(attention, point_features.transpose(1, 2).contiguous())
+
+        B, L, _ = pooled_feature.shape
+        residual = self.coord_feature_residual_mlp(pooled_feature.view(B * L, -1)).view(B, L, 3)
 
         limit = self.current_residual_limit_norm
         if limit is None:
@@ -265,6 +289,8 @@ class DeepPA_Wrapper(nn.Module):
         readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
         if readout_mode == 'heatmap_attn_residual':
             coords = self._heatmap_attention_residual_coords(xyz_coords, x_fused, main_heatmap_logits)
+        elif readout_mode == 'heatmap_attn_residual_feature_only':
+            coords = self._heatmap_attention_feature_residual_coords(xyz_coords, x_fused, main_heatmap_logits)
         elif readout_mode == 'sigmoid_xyz_pool':
             coords = self._heatmap_sigmoid_xyz_pool_coords(xyz_coords, main_heatmap_logits)
         else:
