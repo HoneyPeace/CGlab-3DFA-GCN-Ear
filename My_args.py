@@ -98,7 +98,8 @@ parser.add_argument('--coord_from_heatmap', type=str2bool, default=True,
                     help='True: derive final DeepPA coordinates from main heatmap by differentiable top-k')
 parser.add_argument('--train_coord_readout', type=str, default='topk',
                     choices=['topk', 'softargmax', 'soft_ot_topk', 'sigmoid_xyz_pool',
-                             'heatmap_attn_residual', 'heatmap_attn_residual_feature_only'],
+                             'heatmap_attn_residual', 'heatmap_attn_residual_feature_only',
+                             'heatmap_attn_residual_xyz_only'],
                     help='Training-only DeepPA coordinate readout for Crd/Srf/Str losses')
 parser.add_argument('--heatmap_activation_mode', type=str, default='sigmoid',
                     choices=['sigmoid', 'softmax'],

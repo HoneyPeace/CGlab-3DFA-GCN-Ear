@@ -210,7 +210,8 @@ class UniversalPipeline(nn.Module):
         if sem_list:
             readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
             if readout_mode in ['sigmoid_xyz_pool', 'heatmap_attn_residual',
-                                'heatmap_attn_residual_feature_only'] and fallback_coords is not None:
+                                'heatmap_attn_residual_feature_only',
+                                'heatmap_attn_residual_xyz_only'] and fallback_coords is not None:
                 return fallback_coords
             if self.training and readout_mode == 'softargmax':
                 heatmap_scores = main_logits if main_logits is not None else sem_list[-1]
@@ -448,7 +449,8 @@ def train(args):
                 point_input = point_normal.permute(0, 2, 1).contiguous()
                 points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                 if getattr(args, 'train_coord_readout', 'topk').lower() in [
-                    'heatmap_attn_residual', 'heatmap_attn_residual_feature_only'
+                    'heatmap_attn_residual', 'heatmap_attn_residual_feature_only',
+                    'heatmap_attn_residual_xyz_only'
                 ]:
                     residual_max_mm = float(getattr(args, 'hm_attn_residual_max_mm', 0.0))
                     if residual_max_mm > 0.0 and hasattr(model, 'set_residual_limit_norm'):
@@ -570,7 +572,8 @@ def train(args):
                 point_normal, landmark_normal = normalize_data(point, landmark)
                 point_input = point_normal.permute(0, 2, 1).contiguous() 
                 if getattr(args, 'train_coord_readout', 'topk').lower() in [
-                    'heatmap_attn_residual', 'heatmap_attn_residual_feature_only'
+                    'heatmap_attn_residual', 'heatmap_attn_residual_feature_only',
+                    'heatmap_attn_residual_xyz_only'
                 ]:
                     residual_max_mm = float(getattr(args, 'hm_attn_residual_max_mm', 0.0))
                     if residual_max_mm > 0.0 and hasattr(model, 'set_residual_limit_norm'):
