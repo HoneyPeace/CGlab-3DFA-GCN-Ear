@@ -11,6 +11,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import time
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F 
@@ -51,6 +52,18 @@ from optimizer_utils import build_training_optimizer
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def set_train_seed(seed):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    print(f"[INFO] Fixed train seed: {seed}")
 
 def weight_init(m):
     if isinstance(m, torch.nn.Linear):
@@ -293,6 +306,9 @@ class UniversalPipeline(nn.Module):
                 module.set_residual_limit_norm(value)
 
 def train(args):
+    if getattr(args, 'fix_train_seed', False):
+        set_train_seed(args.seed)
+
     accum_steps = args.accumulation_steps
     val_dataset_name, val_partition = resolve_validation_dataset(args)
     m_name = args.model.lower()

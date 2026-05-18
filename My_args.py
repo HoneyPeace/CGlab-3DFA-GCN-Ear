@@ -42,6 +42,8 @@ parser.add_argument('--model_epoch', type=str, default="deeppa_frozen_last.t7")
 
 parser.add_argument('--no_cuda', type=str2bool, default=False) 
 parser.add_argument('--seed', type=int, default=1)
+parser.add_argument('--fix_train_seed', type=str2bool, default=False,
+                    help='True: fix Python/NumPy/PyTorch/CUDA seeds for training reproducibility')
 parser.add_argument('--in_channels', type=int, default=7)
 parser.add_argument('--num_points', type=int, default=8192)
 parser.add_argument('--landmark_num', type=int, default=36)

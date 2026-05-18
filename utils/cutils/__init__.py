@@ -1,4 +1,6 @@
+import importlib
 import os
+import sys
 # [PATCH] Disable Ninja for Windows MSVC compatibility
 os.environ['USE_NINJA'] = '0'
 
@@ -14,14 +16,19 @@ build_dir = path / "build"
 build_dir.mkdir(exist_ok=True)
 sources = [str(p) for p in path.glob("srcs/*.*") if p.suffix in [".cpp", ".cu"]]
 
-# [PATCH] Use Windows-friendly compiler flags (/O2 for optimization, /wd4624 to suppress warnings)
-cutils = load(
-    "cutils_", 
-    sources=sources, 
-    extra_cflags=['/O2', '/wd4624'], 
-    extra_cuda_cflags=['-O3'], 
-    verbose=False
-)
+prebuilt_dir = os.environ.get("DEEPLA_CUTILS_PREBUILT_DIR", "").strip()
+if prebuilt_dir and (Path(prebuilt_dir) / "cutils_.pyd").exists():
+    sys.path.insert(0, prebuilt_dir)
+    cutils = importlib.import_module("cutils_")
+else:
+    # [PATCH] Use Windows-friendly compiler flags (/O2 for optimization, /wd4624 to suppress warnings)
+    cutils = load(
+        "cutils_",
+        sources=sources,
+        extra_cflags=['/O2', '/wd4624'],
+        extra_cuda_cflags=['-O3'],
+        verbose=False
+    )
 
 def next_prime(x) -> int:
     r"""
