@@ -27,6 +27,9 @@ def normalize_data(batch_data, landmark=None):
     if C == 7:
         geom = batch_data[:, :, 3:]
         batch_data_out = torch.cat([xyz, geom], dim=-1)
+    elif C == 10:
+        extra = batch_data[:, :, 3:]
+        batch_data_out = torch.cat([xyz, extra], dim=-1)
     else:
         batch_data_out = xyz
     
@@ -62,6 +65,8 @@ class PointcloudScaleAndTranslate(object):
             v = torch.mul(v, scale)
             v = F.normalize(v, p=2, dim=-1)
             pc_out = torch.cat([xyz, v, curv], dim=-1)
+        elif C == 10:
+            pc_out = torch.cat([xyz, pc[:, :, 3:]], dim=-1)
         else:
             pc_out = xyz
         
@@ -91,6 +96,8 @@ class PointcloudJitter(object):
         
         # 🌟 7채널/3채널 직관적 분기 (C>=6 삭제)
         if C == 7:
+            pc_out = torch.cat([xyz_jittered, pc[:, :, 3:]], dim=-1)
+        elif C == 10:
             pc_out = torch.cat([xyz_jittered, pc[:, :, 3:]], dim=-1)
         else:
             pc_out = xyz_jittered

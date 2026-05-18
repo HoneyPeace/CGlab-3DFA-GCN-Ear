@@ -28,7 +28,7 @@ class PAConv(nn.Module):
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
         
         in_channels = getattr(args, 'in_channels', 3)
-        self.edge_channels = in_channels * 2 
+        self.edge_channels = 10 if in_channels == 10 else in_channels * 2
         
         self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
         self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])

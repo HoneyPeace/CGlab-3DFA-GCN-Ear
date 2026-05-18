@@ -34,6 +34,9 @@ def load_face_data(data_root, data_name, partition, in_channels=7):
     elif in_channels == 3:
         shape_path = os.path.join(base_path, f'shape_3ch_{suffix}.npy')
         print(f"   [INFO] 🧊 3-Channel Mode: Loading Standard XYZ from {shape_path}")
+    elif in_channels == 10:
+        shape_path = os.path.join(base_path, f'shape_3ch_{suffix}.npy')
+        print(f"   [INFO] XYZ->10-Channel Mode: Loading XYZ from {shape_path} and zero-padding to 10ch")
     else:
         raise ValueError(f"❌ [Error] 지원하지 않는 in_channels 값입니다: {in_channels}. (허용값: 3, 6, 7)")
 
@@ -51,6 +54,12 @@ def load_face_data(data_root, data_name, partition, in_channels=7):
     # 데이터 로드 및 float32 변환
     Heat_data = np.load(heat_path, allow_pickle=True).astype(np.float32)
     Shape_data = np.load(shape_path, allow_pickle=True).astype(np.float32)
+    if in_channels == 10:
+        if Shape_data.ndim != 3 or Shape_data.shape[-1] != 3:
+            raise ValueError(f"[ERROR] XYZ->10 mode expects shape_3ch data with last dim 3, got {Shape_data.shape}")
+        pad_channels = in_channels - Shape_data.shape[-1]
+        zero_pad = np.zeros((*Shape_data.shape[:-1], pad_channels), dtype=Shape_data.dtype)
+        Shape_data = np.concatenate([Shape_data, zero_pad], axis=-1)
     landmark_all = np.load(land_path, allow_pickle=True).astype(np.float32)
     
     if os.path.exists(name_path):

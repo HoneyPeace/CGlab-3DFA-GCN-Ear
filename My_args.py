@@ -204,6 +204,9 @@ parser.add_argument('--plateau_step_size', type=float, default=0.1,
                     help='Geometry weight increment per step when --plateau_transition_mode step')
 
 parser.add_argument('--regression_point_num', type=int, default=10)
+parser.add_argument('--eval_heatmap_coord_method', type=str, default='topk',
+                    choices=['topk', 'mds'],
+                    help='Evaluation heatmap-to-coordinate method for single PAConv heatmap models')
 parser.add_argument('--plane_knn', type=int, default=5)
 parser.add_argument('--curv_knn', type=int, default=30)
 parser.add_argument('--curv_alpha', type=float, default=10.0)

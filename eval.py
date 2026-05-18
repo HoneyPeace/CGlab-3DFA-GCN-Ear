@@ -38,10 +38,12 @@ from loss import (
     CurvatureSurfaceLoss,
     SoftLocalCurvatureSurfaceLoss,
 )
+from util import landmark_regression
 from augmentations import normalize_data  # [핵심] 학습 코드와 정규화 동기화
 
 matplotlib.use('Agg')
 warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn.manifold._mds")
 
 args = parser.parse_args()
 args.eval = True
@@ -127,11 +129,23 @@ try:
     elif in_channels == 6:
         shape_filename = f"shape_6ch_{eval_datatype}.npy"
         print(f"   [INFO] 🎯 6-Channel Mode: Loading {shape_filename}")
+    elif in_channels == 3:
+        shape_filename = f"shape_3ch_{eval_datatype}.npy"
+        print(f"   [INFO] 3-Channel Mode: Loading {shape_filename}")
+    elif in_channels == 10:
+        shape_filename = f"shape_3ch_{eval_datatype}.npy"
+        print(f"   [INFO] XYZ->10-Channel Mode: Loading {shape_filename} and zero-padding to 10ch")
     else:
         shape_filename = f"shape_{eval_datatype}.npy"
         print(f"   [INFO] 🧊 3-Channel Mode: Loading {shape_filename}")
 
     shape_sample = np.load(os.path.join(data_dir, shape_filename), allow_pickle=True)
+    if in_channels == 10:
+        if shape_sample.ndim != 3 or shape_sample.shape[-1] != 3:
+            raise ValueError(f"[ERROR] XYZ->10 eval expects shape_3ch data with last dim 3, got {shape_sample.shape}")
+        pad_channels = in_channels - shape_sample.shape[-1]
+        zero_pad = np.zeros((*shape_sample.shape[:-1], pad_channels), dtype=shape_sample.dtype)
+        shape_sample = np.concatenate([shape_sample, zero_pad], axis=-1)
     landmark_all = np.load(os.path.join(data_dir, f"landmark_{eval_datatype}.npy"), allow_pickle=True)
     heatmap_sample = np.load(os.path.join(data_dir, f"Heat_data_{eval_datatype}.npy"), allow_pickle=True)
     name_path = os.path.join(data_dir, f"name_{eval_datatype}.npy")
@@ -186,7 +200,18 @@ class UniversalPipeline_Eval(nn.Module):
         if self.mode in ['single_paconv', 'single_paconv_heat']:
             multi_scale_hints, hm_raw = self.model(x)
             k_val = getattr(self.args, 'regression_point_num', 10)
-            pred_coords = get_differentiable_coords(points_xyz, hm_raw, k=k_val)
+            coord_method = getattr(self.args, 'eval_heatmap_coord_method', 'topk').lower()
+            if coord_method == 'mds':
+                pred_coords = torch.cat([
+                    landmark_regression(
+                        points_xyz[sample_idx],
+                        hm_raw[sample_idx].permute(1, 0).contiguous(),
+                        k_val,
+                    ).to(points_xyz.device, dtype=points_xyz.dtype)
+                    for sample_idx in range(points_xyz.size(0))
+                ], dim=0)
+            else:
+                pred_coords = get_differentiable_coords(points_xyz, hm_raw, k=k_val)
             return pred_coords, [], hm_raw
             
         elif self.mode in ['single_deeppa', 'single_deepla']:

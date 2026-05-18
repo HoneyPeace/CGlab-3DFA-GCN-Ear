@@ -6,6 +6,7 @@
 import os
 import sys
 import subprocess
+import random
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 if hasattr(sys.stderr, "reconfigure"):
@@ -51,6 +52,18 @@ from optimizer_utils import build_training_optimizer
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def set_reproducible_seed(seed):
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    print(f"[INFO] Training seed fixed: {seed}")
 
 def weight_init(m):
     if isinstance(m, torch.nn.Linear):
@@ -117,6 +130,8 @@ def _shape_file_name(in_channels, partition):
     if in_channels == 6:
         return f"shape_6ch_{partition}.npy"
     if in_channels == 3:
+        return f"shape_3ch_{partition}.npy"
+    if in_channels == 10:
         return f"shape_3ch_{partition}.npy"
     return f"shape_{partition}.npy"
 
@@ -610,5 +625,6 @@ def execute_all_models(args):
 
 if __name__ == "__main__":
     args = parser.parse_args()
+    set_reproducible_seed(getattr(args, 'seed', 1))
     _init_(args)
     execute_all_models(args)
