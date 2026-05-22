@@ -13,9 +13,9 @@
 - DeepPA 입력 채널 구조는 일단 바꾸지 않는다.
 - DeepPA/PAConv validation은 eval과 같은 방식으로 원좌표 복원 후 Euclidean ME를 쓴다.
 - PAConv checkpoint 선택/비교 기준은 MDS로 두고, 최종 eval에서는 MDS와 TopK를 둘 다 기록한다.
-- PAConv 7ch feature mode는 두 갈래로 비교한다.
-  - 메인컴: `center_geometry`
-  - 여기/서브컴: `full_extension`
+- PAConv와 DeepPA의 내부 geometry 처리는 기본적으로 서로 맞춘다.
+  - 기본/본선: `center_geometry` PAConv + 기존 DeepPA center-geometry 14ch 처리.
+  - 후순위 ablation: `full_extension` PAConv. DeepPA까지 22ch full-extension으로 바꾸는 실험은 별도 검토한다.
 
 ## PAConv 입력 구조
 
@@ -125,10 +125,10 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_mainpaconv_raw7
 
 PAConv 단독 결과 확인 후 DeepPA를 따로 실행할 수도 있지만, 비교 속도를 위해 PAConv Stage1과 frozen DeepPA Stage2를 이어서 실행하는 스크립트도 준비했다.
 
-### 여기/서브컴: full-extension 7ch PAConv + DeepPA
+### 여기/서브컴: center-geometry 7ch PAConv + DeepPA
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_here_fullext7_paconv_deeppa_seed1.ps1
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_here_centergeom7_paconv_deeppa_seed1.ps1
 ```
 
 ### 메인컴: center-geometry 7ch PAConv + DeepPA
@@ -136,6 +136,14 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_here_fullext7_p
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main_centergeom7_paconv_deeppa_seed1.ps1
 ```
+
+### 후순위 ablation: full-extension 7ch PAConv + 기존 DeepPA
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_here_fullext7_paconv_deeppa_seed1.ps1
+```
+
+주의: 이 ablation은 PAConv Stage1만 22ch full-extension이고, DeepPA Stage2는 기존 center-geometry 14ch 처리를 유지한다. PAConv와 DeepPA를 모두 22ch full-extension으로 맞추는 실험은 DeepPA backbone 입력 구조 변경이 필요하므로 별도 실험으로 분리한다.
 
 공통 DeepPA 조건:
 
@@ -157,8 +165,8 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main_centergeom
 주의: PAConv+DeepPA 연속 스크립트는 `run_frozen.py`의 `PAConv_Pretrained` bridge가 서로 덮이지 않도록 feature mode별 output root를 분리한다.
 
 ```text
-full-extension: ..\results\MainPAConv_DeepPAReady\FullExtension7
 center-geometry: ..\results\MainPAConv_DeepPAReady\CenterGeometry7
+full-extension ablation: ..\results\MainPAConv_DeepPAReady\FullExtension7
 ```
 
 두 스크립트는 공통 runner `experiment_queues\run_mainpaconv_seed1.ps1`을 사용한다. 로그는 `debug_outputs\run_mainpaconv_*.out.log`, `.err.log`, `.summary.log`에 남는다.

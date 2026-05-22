@@ -23,8 +23,6 @@ if (-not (Test-Path -LiteralPath $VsDevCmd)) {
     throw "VsDevCmd.bat not found. Install VS2019 Build Tools or edit `$VsDevCmd in this script."
 }
 
-New-Item -ItemType Directory -Force -Path $DebugDir, $OutputRoot | Out-Null
-
 if ($FeatureMode -eq "full_extension") {
     $RunTag = "fullext7_hmr2_seed1"
     $ExpName = "S2G_Frozen_HMR_PAConvFullExt7_Seed1"
@@ -34,6 +32,8 @@ if ($FeatureMode -eq "full_extension") {
     $ExpName = "S2G_Frozen_HMR_PAConvCenterGeom7_Seed1"
     $OutputRoot = Join-Path $OutputRootBase "CenterGeometry7"
 }
+
+New-Item -ItemType Directory -Force -Path $DebugDir, $OutputRoot | Out-Null
 
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $Summary = Join-Path $DebugDir ("run_" + $RunTag + "_" + $Stamp + ".summary.log")
