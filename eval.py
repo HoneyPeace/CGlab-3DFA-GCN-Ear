@@ -33,6 +33,11 @@ if hasattr(sys.stderr, "reconfigure"):
 # 🌟 아키텍처 및 학습과 동일한 정규화 로직 임포트
 from DeepPA_model import DeepPA_Wrapper  
 from PAConv_model import PAConv          
+from stage1_paconv_bridge import (
+    build_original_github_stage1,
+    get_stage1_input,
+    is_original_github_stage1,
+)
 from loss import (
     get_differentiable_coords,
     CurvatureSurfaceLoss,
@@ -172,7 +177,11 @@ class UniversalPipeline_Eval(nn.Module):
         self.landmark_num = landmark_num
         
         if self.mode in ['frozen', 'finetune', 'e2e']:
-            self.stage1_paconv = PAConv(args, landmark_num)
+            if is_original_github_stage1(args):
+                self.stage1_paconv = build_original_github_stage1(args, landmark_num)
+                print("[INFO] Stage1 PAConv source: original_github (xyz-only latent)")
+            else:
+                self.stage1_paconv = PAConv(args, landmark_num)
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
         elif self.mode in ['single_paconv', 'single_paconv_heat']:
             self.model = PAConv(args, landmark_num)
@@ -223,7 +232,8 @@ class UniversalPipeline_Eval(nn.Module):
             return pred_coords, sem_list, main_hm
             
         elif self.mode in ['frozen', 'finetune', 'e2e']:
-            multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
+            stage1_input = get_stage1_input(self.args, x)
+            multi_scale_hints, s1_hm_raw = self.stage1_paconv(stage1_input)
             out = self.stage2_deeppa(x, prior_hints=multi_scale_hints)
             sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
             fallback_coords = out[0] if isinstance(out, tuple) else out

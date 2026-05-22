@@ -56,11 +56,7 @@ def grid_subsampling(xyz: torch.Tensor, grid_size: float, hash_size: float=1.) -
     table = torch.zeros((size,), dtype=torch.int64)
     storage = torch.empty((size * 3,), dtype=torch.int64)
     
-    # Call C++ extension
-    cutils.grid_subsampling(xyz, grid_size, table, storage) 
-    
-    # Extract valid indices from hash table
-    indices = table[table > 0] - 1 
+    indices = cutils.grid_subsampling(xyz, grid_size, table, storage)
     return indices
 
 def grid_subsampling_test(xyz: torch.Tensor, grid_size: float, hash_size: float=1., pick=0) -> torch.Tensor:
@@ -82,10 +78,7 @@ def grid_subsampling_test(xyz: torch.Tensor, grid_size: float, hash_size: float=
     table = torch.zeros((size,), dtype=torch.int64)
     storage = torch.empty((size * 4,), dtype=torch.int64)
     
-    # Call C++ extension
-    cutils.grid_subsampling_test(xyz, grid_size, table, storage, pick)
-    
-    indices = table[table > 0] - 1
+    indices = cutils.grid_subsampling_test(xyz, grid_size, table, storage, pick)
     return indices
 
 class KDTree():

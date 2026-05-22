@@ -40,11 +40,16 @@ from loss import (
     ranking_heatmap_loss,
 )
 from loss import DeepPA_HierarchicalHeatmapLoss 
-from util import main_sample
+from util import landmark_regression, main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate, PointcloudJitter
 
 from PAConv_model import PAConv
 from DeepPA_model import DeepPA_Wrapper  
+from stage1_paconv_bridge import (
+    build_original_github_stage1,
+    get_stage1_input,
+    is_original_github_stage1,
+)
 
 # 🌟 [핵심] 외부 로스 컨트롤러 임포트
 from loss_controller import DeepPALossController
@@ -55,6 +60,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def set_reproducible_seed(seed):
     seed = int(seed)
+    if seed < 0:
+        print("[INFO] Training seed free: skip random/torch/cudnn seed fix")
+        return
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -207,9 +215,14 @@ class UniversalPipeline(nn.Module):
         self.stage_hm_indices = None
         self.latest_main_hm_logits = None
         self.latest_sem_hm_logits = None
+        self.stage1_paconv_source = getattr(args, 'stage1_paconv_source', 'default').lower()
         
         if self.mode in ['frozen', 'finetune', 'e2e']:
-            self.stage1_paconv = PAConv(args, landmark_num)
+            if is_original_github_stage1(args):
+                self.stage1_paconv = build_original_github_stage1(args, landmark_num)
+                print("[INFO] Stage1 PAConv source: original_github (xyz-only latent)")
+            else:
+                self.stage1_paconv = PAConv(args, landmark_num)
             if self.mode == 'frozen' and not self.unfreeze_paconv_in_frozen:
                 for param in self.stage1_paconv.parameters(): param.requires_grad = False
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
@@ -276,15 +289,16 @@ class UniversalPipeline(nn.Module):
             return pred_coords, sem_list, main_hm
             
         elif self.mode in ['frozen', 'finetune', 'e2e']:
+            stage1_input = get_stage1_input(self.args, x)
             if self.mode == 'frozen':
                 self.stage1_paconv.eval()
                 if self.unfreeze_paconv_in_frozen:
-                    multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
+                    multi_scale_hints, s1_hm_raw = self.stage1_paconv(stage1_input)
                 else:
                     with torch.no_grad():
-                        multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
+                        multi_scale_hints, s1_hm_raw = self.stage1_paconv(stage1_input)
             else:
-                multi_scale_hints, s1_hm_raw = self.stage1_paconv(x)
+                multi_scale_hints, s1_hm_raw = self.stage1_paconv(stage1_input)
                 
             out = self.stage2_deeppa(x, prior_hints=multi_scale_hints)
             sem_list = out[2] if len(out) > 2 else []
@@ -360,11 +374,14 @@ def train(args):
     model.apply(weight_init)
     
     if pipeline_mode in ['frozen', 'finetune'] or (pipeline_mode == 'e2e' and getattr(args, 'e2e_load_paconv_pretrained', False)):
-        original_paconv_path = os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
+        explicit_stage1_path = getattr(args, 'stage1_checkpoint_path', '').strip()
+        original_paconv_path = explicit_stage1_path or os.path.join(args.output_root, "PAConv_Pretrained", "models", "Single_PAConv_last.t7")
         backup_paconv_path = os.path.join(paths['models'], "Backup_Pretrained_PAConv.t7")
         if os.path.exists(original_paconv_path):
             shutil.copy2(original_paconv_path, backup_paconv_path)
             print(f"📦 [Pretrained] Coarse Anchor용 PAConv 로드 완료!")
+            if explicit_stage1_path:
+                print(f"[INFO] Stage1 checkpoint path: {explicit_stage1_path}")
             load_stage1_paconv_checkpoint(model.stage1_paconv, backup_paconv_path, device)
         elif pipeline_mode == 'e2e':
             print(f"[WARNING] E2E PAConv pretrained load requested but file not found: {original_paconv_path}")
@@ -590,7 +607,21 @@ def train(args):
                     residual_max_mm = float(getattr(args, 'hm_attn_residual_max_mm', 0.0))
                     if residual_max_mm > 0.0 and hasattr(model, 'set_residual_limit_norm'):
                         model.set_residual_limit_norm(residual_max_mm / max(float(avg_m), 1e-6))
-                pred_coords = model(point_input)[0]
+                pred_coords, _, val_hm = model(point_input)
+                if (
+                    pipeline_mode in ['single_paconv', 'single_paconv_heat']
+                    and getattr(args, 'eval_heatmap_coord_method', 'topk').lower() == 'mds'
+                    and val_hm is not None
+                ):
+                    points_norm_xyz = point_input[:, :3, :].permute(0, 2, 1).contiguous()
+                    pred_coords = torch.cat([
+                        landmark_regression(
+                            points_norm_xyz[sample_idx],
+                            val_hm[sample_idx].permute(1, 0).contiguous(),
+                            getattr(args, 'regression_point_num', 10),
+                        ).to(points_norm_xyz.device, dtype=points_norm_xyz.dtype)
+                        for sample_idx in range(points_norm_xyz.size(0))
+                    ], dim=0)
                 val_mm_total += F.l1_loss(pred_coords, landmark_normal.view_as(pred_coords)).item() * avg_m * B_val
                 val_samples += B_val
         

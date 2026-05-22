@@ -10,6 +10,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ sys.path.append(str(current_dir / "utils" / "pointnet2_ops_lib"))
 
 from deeppa_semseg import DeepPA_semseg, index_points
 from loss import get_differentiable_coords
+from utils.cutils import grid_subsampling
 
 try:
     from paconv import PAConv
@@ -48,7 +50,7 @@ except ImportError:
     print(">>> [WARNING] ⚠️ DeepPA 모드: PyTorch3D가 없어 기존 PyTorch KNN을 사용합니다.")
 
 def farthest_point_sample(xyz, npoint):
-    if USE_CPP_FPS:
+    if USE_CPP_FPS and xyz.is_cuda:
         xyz = xyz.contiguous() 
         idx = fps_cpp(xyz, npoint)
         return idx.long()
@@ -67,6 +69,85 @@ def farthest_point_sample(xyz, npoint):
             distance[mask] = dist[mask]
             farthest = torch.max(distance, -1)[1]
         return centroids
+
+def _parse_float_list(value):
+    if value is None or value == "":
+        return []
+    if isinstance(value, (list, tuple)):
+        return [float(v) for v in value]
+    text = str(value).strip().strip("[]")
+    if not text:
+        return []
+    return [float(v.strip()) for v in text.split(",") if v.strip()]
+
+def _fit_indices_to_npoint(xyz, indices, npoint):
+    device = xyz.device
+    total_points = xyz.shape[0]
+    indices = indices.to(device=device, dtype=torch.long).view(-1)
+    valid = (indices >= 0) & (indices < total_points)
+    indices = torch.unique(indices[valid], sorted=False)
+
+    if indices.numel() >= npoint:
+        if indices.numel() == npoint:
+            return indices
+        candidate_xyz = xyz[indices].unsqueeze(0).contiguous()
+        keep = farthest_point_sample(candidate_xyz, npoint).squeeze(0)
+        return indices[keep]
+
+    fps_idx = farthest_point_sample(xyz.unsqueeze(0).contiguous(), npoint).squeeze(0)
+    if indices.numel() == 0:
+        return fps_idx
+
+    combined = torch.unique(torch.cat([indices, fps_idx], dim=0), sorted=False)
+    if combined.numel() >= npoint:
+        return combined[:npoint]
+
+    remaining_mask = torch.ones(total_points, dtype=torch.bool, device=device)
+    remaining_mask[combined] = False
+    fill = fps_idx[remaining_mask[fps_idx]]
+    if fill.numel() >= npoint - combined.numel():
+        pad = fill[:npoint - combined.numel()]
+    else:
+        pad = fps_idx[:npoint - combined.numel()]
+    return torch.cat([combined, pad], dim=0)
+
+def _grid_subsample_single_fixed_count(xyz, npoint, grid_size, search_iters):
+    shifted = xyz.detach().float()
+    shifted = (shifted - shifted.min(dim=0, keepdim=True)[0]).cpu().contiguous()
+
+    if grid_size > 0:
+        indices = grid_subsampling(shifted, float(grid_size)).long()
+        return _fit_indices_to_npoint(xyz, indices, npoint)
+
+    span = shifted.max(dim=0)[0].clamp_min(1e-6)
+    base = float((span.prod().item() / max(npoint, 1)) ** (1.0 / 3.0))
+    if not math.isfinite(base) or base <= 0:
+        base = 1e-3
+
+    low = base / 16.0
+    high = base * 16.0
+    best_indices = None
+    last_indices = None
+
+    for _ in range(max(int(search_iters), 1)):
+        mid = (low + high) * 0.5
+        last_indices = grid_subsampling(shifted, float(mid)).long()
+        if last_indices.numel() >= npoint:
+            best_indices = last_indices
+            low = mid
+        else:
+            high = mid
+
+    if best_indices is None:
+        best_indices = last_indices if last_indices is not None else torch.empty(0, dtype=torch.long)
+    return _fit_indices_to_npoint(xyz, best_indices, npoint)
+
+def grid_subsample_fixed_count(xyz, npoint, grid_size=0.0, search_iters=8):
+    indices = [
+        _grid_subsample_single_fixed_count(xyz[b], npoint, grid_size, search_iters)
+        for b in range(xyz.shape[0])
+    ]
+    return torch.stack(indices, dim=0)
 
 # ==============================================================================
 # 👑 최상위 마스터 융합 모델
@@ -221,6 +302,9 @@ class DeepPA_Wrapper(nn.Module):
         down_knn_list, up_idx_list = [], []
         stage_hm_indices = [torch.arange(N_in, dtype=torch.long, device=device).view(1, N_in).repeat(B, 1)]
         cur_hm_indices = stage_hm_indices[0]
+        downsample_method = getattr(self.args, 'stage_downsample_method', 'fps').lower()
+        stage_grid_sizes = _parse_float_list(getattr(self.args, 'stage_grid_sizes', ''))
+        stage_grid_search_iters = getattr(self.args, 'stage_grid_search_iters', 8)
         
         with torch.no_grad(): # VRAM 누수 원천 차단
             for i in range(len(self.args.depths)):
@@ -237,7 +321,18 @@ class DeepPA_Wrapper(nn.Module):
                 # 다음 층(Downsampling)으로 넘어갈 준비
                 if i < len(self.args.depths) - 1:
                     next_points = self.args.npoints[i]
-                    down_idx = farthest_point_sample(cur_xyz, next_points)
+                    if downsample_method == 'grid':
+                        grid_size = stage_grid_sizes[i] if i < len(stage_grid_sizes) else 0.0
+                        down_idx = grid_subsample_fixed_count(
+                            cur_xyz,
+                            next_points,
+                            grid_size=grid_size,
+                            search_iters=stage_grid_search_iters,
+                        )
+                    elif downsample_method == 'fps':
+                        down_idx = farthest_point_sample(cur_xyz, next_points)
+                    else:
+                        raise ValueError(f"Unknown stage_downsample_method: {downsample_method}")
                     down_knn_list.append(down_idx) 
                     cur_hm_indices = torch.gather(cur_hm_indices, 1, down_idx)
                     stage_hm_indices.append(cur_hm_indices)

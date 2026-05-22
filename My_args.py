@@ -62,6 +62,13 @@ parser.add_argument('--dims', type=list, default=[64, 128, 256, 512])
 parser.add_argument('--npoints', type=list, default=[2048, 512, 128, 32])
 parser.add_argument('--ks', type=list, default=[20, 20, 20, 20])
 parser.add_argument('--nbr_dims', type=list, default=[64, 128, 256, 512])
+parser.add_argument('--stage_downsample_method', type=str, default='fps',
+                    choices=['fps', 'grid'],
+                    help='DeepPA stage downsampling method. Default fps preserves previous behavior.')
+parser.add_argument('--stage_grid_sizes', type=str, default='',
+                    help='Comma-separated grid sizes for DeepPA grid downsampling. Empty enables adaptive search.')
+parser.add_argument('--stage_grid_search_iters', type=int, default=8,
+                    help='Adaptive grid-size search iterations when --stage_downsample_method grid and no grid size is provided.')
 
 parser.add_argument('--use_gate', type=str2bool, default=True) 
 parser.add_argument('--use_cp', type=str2bool, default=False) 
@@ -139,6 +146,15 @@ parser.add_argument('--stage1_user_tag', type=str, default='',
                     help='run_frozen.py only: reuse a PAConv Stage1 tag different from --user_tag')
 parser.add_argument('--stage1_exp_name', type=str, default='',
                     help='run_frozen.py only: reuse PAConv Stage1 from a different experiment folder')
+parser.add_argument('--stage1_paconv_source', type=str, default='default',
+                    choices=['default', 'original_github'],
+                    help='frozen/eval only: use default PAConv or original GitHub PAConv as Stage1')
+parser.add_argument('--stage1_checkpoint_path', type=str, default='',
+                    help='Optional explicit Stage1 PAConv checkpoint path for frozen/finetune/e2e modes')
+parser.add_argument('--stage1_use_cuda_extension', type=str2bool, default=False,
+                    help='original_github Stage1 only: use PAConv CUDA assemble extension if available')
+parser.add_argument('--stage1_in_channels', type=int, choices=[3, 7], default=3,
+                    help='original_github Stage1 only: number of input channels to feed/load')
 
 parser.add_argument('--yield_factor', type=float, default=0.8)
 parser.add_argument('--lambda_anchor', type=float, default=0.1)
