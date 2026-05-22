@@ -12,23 +12,22 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main_14ch_cente
 
 ## PAConv 이후 DeepPA 후속 예약 큐
 
-PAConv stage1을 14ch center-geometry로 맞춘 뒤 DeepPA에서 볼 후속 실험 6개도 예약 파일로 준비해 두었다.
+PAConv stage1을 14ch center-geometry로 맞춘 뒤 DeepPA에서 볼 후속 실험 5개도 예약 파일로 준비해 두었다.
 첫 번째 variant가 `main14_center_stage1_seed1_Stage1_PAConv`를 학습하거나 기존 결과를 재사용하고, 뒤 variant들은 같은 PAConv stage1을 공유한다.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_followup_queue_seed1.ps1
 ```
 
-큐에 들어간 DeepPA 후속 실험은 아래 6개다.
+큐에 들어간 DeepPA 후속 실험은 아래 5개다.
 
 | 순서 | variant | 확인하려는 것 |
 |---:|---|---|
 | 1 | `base_auxdrop_plateau_fps_hmr2_seed1` | 기본값: aux 30epoch drop + plateau + FPS + 2mm HMR |
 | 2 | `auxfixed_plateau_fps_hmr2_seed1` | aux를 0.1 고정으로 유지하면 안정성이 좋아지는지 |
 | 3 | `noaux_plateau_fps_hmr2_seed1` | aux heatmap을 빼도 prior/residual만으로 충분한지 |
-| 4 | `auxdrop_fixed60_fps_hmr2_seed1` | plateau 대신 고정 60epoch heatmap phase가 나은지 |
-| 5 | `auxdrop_plateau_grid_hmr2_seed1` | DeepPA stage downsampling을 FPS 대신 grid로 바꾸면 좋아지는지 |
-| 6 | `auxdrop_plateau_fps_hmr1p5_seed1` | HMR boundary를 2.0mm에서 1.5mm로 줄이면 좋아지는지 |
+| 4 | `auxdrop_plateau_grid_hmr2_seed1` | DeepPA stage downsampling을 FPS 대신 grid로 바꾸면 좋아지는지 |
+| 5 | `auxdrop_plateau_fps_hmr1p5_seed1` | HMR boundary를 2.0mm에서 1.5mm로 줄이면 좋아지는지 |
 
 주의: 이 큐는 14ch center-geometry 전용이다. full-extension 22ch 교차 실험은 본컴 기본 지시에서 제외한다.
 

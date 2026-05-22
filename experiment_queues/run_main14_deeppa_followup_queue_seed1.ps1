@@ -32,13 +32,6 @@ $Runs = @(
         HmResidualMm = 2.0
     },
     @{
-        Name = "auxdrop_fixed60_fps_hmr2_seed1"
-        AblationOnly = "frozen_aux_drop"
-        StageDownsampleMethod = "fps"
-        LossSchedule = "fixed_three_phase"
-        HmResidualMm = 2.0
-    },
-    @{
         Name = "auxdrop_plateau_grid_hmr2_seed1"
         AblationOnly = "frozen_aux_drop"
         StageDownsampleMethod = "grid"
