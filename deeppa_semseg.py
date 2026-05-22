@@ -165,7 +165,13 @@ class Stage_PA(nn.Module):
         if self.first:
             nbr_hid_dim = args.nbr_dims[0]
             in_channels = getattr(args, 'in_channels', 3)
-            in_feat_dim = 14 if in_channels == 7 else (13 if in_channels == 6 else 10)
+            self.deeppa_feature_mode = getattr(args, 'deeppa_feature_mode', 'center_geometry').lower()
+            if self.deeppa_feature_mode not in ('center_geometry', 'full_extension'):
+                raise ValueError(f"Unknown deeppa_feature_mode: {self.deeppa_feature_mode}")
+            if in_channels == 7 and self.deeppa_feature_mode == 'full_extension':
+                in_feat_dim = 22
+            else:
+                in_feat_dim = 14 if in_channels == 7 else (13 if in_channels == 6 else 10)
             
             self.nbr_embed = nn.Sequential(
                 nn.Linear(in_feat_dim, nbr_hid_dim // 2, bias=False),  
@@ -292,9 +298,13 @@ class Stage_PA(nn.Module):
             vector = nbr_rel / (dist + 1e-8)
             
             if C_in == 7:
-                center_xyz = xyz.unsqueeze(2).expand(-1, -1, self.k, -1)
-                center_geom = x[:, :, 3:].unsqueeze(2).expand(-1, -1, self.k, -1)
-                nbr = torch.cat([nbr_rel, x_knn[..., :3], center_xyz, dist, center_geom], dim=-1).view(-1, 14)
+                center = x.unsqueeze(2).expand(-1, -1, self.k, -1)
+                if self.deeppa_feature_mode == 'full_extension':
+                    nbr = torch.cat([x_knn - center, x_knn, center, dist], dim=-1).view(-1, 22)
+                else:
+                    center_xyz = xyz.unsqueeze(2).expand(-1, -1, self.k, -1)
+                    center_geom = x[:, :, 3:].unsqueeze(2).expand(-1, -1, self.k, -1)
+                    nbr = torch.cat([nbr_rel, x_knn[..., :3], center_xyz, dist, center_geom], dim=-1).view(-1, 14)
             elif C_in == 6: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 13) 
             else: nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 10) 
             

@@ -1,6 +1,10 @@
 param(
-    [ValidateSet("center_geometry", "full_extension")]
-    [string]$FeatureMode = "center_geometry"
+    [ValidateSet("", "center_geometry", "full_extension")]
+    [string]$FeatureMode = "",
+    [ValidateSet("", "center_geometry", "full_extension")]
+    [string]$PaconvFeatureMode = "",
+    [ValidateSet("", "center_geometry", "full_extension")]
+    [string]$DeepPAFeatureMode = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,15 +27,18 @@ if (-not (Test-Path -LiteralPath $VsDevCmd)) {
     throw "VsDevCmd.bat not found. Install VS2019 Build Tools or edit `$VsDevCmd in this script."
 }
 
-if ($FeatureMode -eq "full_extension") {
-    $RunTag = "fullext7_hmr2_seed1"
-    $ExpName = "S2G_Frozen_HMR_PAConvFullExt7_Seed1"
-    $OutputRoot = Join-Path $OutputRootBase "FullExtension7"
-} else {
-    $RunTag = "centergeom7_hmr2_seed1"
-    $ExpName = "S2G_Frozen_HMR_PAConvCenterGeom7_Seed1"
-    $OutputRoot = Join-Path $OutputRootBase "CenterGeometry7"
+if (-not $PaconvFeatureMode) {
+    $PaconvFeatureMode = if ($FeatureMode) { $FeatureMode } else { "center_geometry" }
 }
+if (-not $DeepPAFeatureMode) {
+    $DeepPAFeatureMode = "center_geometry"
+}
+
+$PaShort = if ($PaconvFeatureMode -eq "full_extension") { "pafull" } else { "pacenter" }
+$DpShort = if ($DeepPAFeatureMode -eq "full_extension") { "dpfull" } else { "dpcenter" }
+$RunTag = $PaShort + "_" + $DpShort + "_hmr2_seed1"
+$ExpName = "S2G_Frozen_HMR_" + $PaShort + "_" + $DpShort + "_Seed1"
+$OutputRoot = Join-Path $OutputRootBase ($PaShort + "_" + $DpShort)
 
 New-Item -ItemType Directory -Force -Path $DebugDir, $OutputRoot | Out-Null
 
@@ -76,7 +83,8 @@ $PyArgs = @(
     "--k", "30",
     "--regression_point_num", "10",
     "--in_channels", "7",
-    "--paconv_feature_mode", $FeatureMode,
+    "--paconv_feature_mode", $PaconvFeatureMode,
+    "--deeppa_feature_mode", $DeepPAFeatureMode,
     "--paconv_heatmap_activation_mode", "raw",
     "--eval_heatmap_coord_method", "mds",
     "--heatmap_loss_mode", "adaptive_wing",
@@ -110,6 +118,8 @@ $Cmd = "call `"$CondaBat`" activate $CondaEnv && call `"$VsDevCmd`" -arch=amd64 
 "[START] $RunTag $(Get-Date -Format s)" | Out-File -LiteralPath $Summary -Encoding UTF8
 "[REPO] $RepoDir" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[OUTPUT_ROOT] $OutputRoot" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
+"[PACONV_FEATURE_MODE] $PaconvFeatureMode" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
+"[DEEPPA_FEATURE_MODE] $DeepPAFeatureMode" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[COMMAND] python $ArgText" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 
 Write-Output "[QUEUE] Starting $RunTag"

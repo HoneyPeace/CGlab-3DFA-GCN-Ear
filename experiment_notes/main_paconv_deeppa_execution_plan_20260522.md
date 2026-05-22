@@ -10,12 +10,12 @@
 - ScoreNet 내부 softmax는 PAConv 원래 동적 커널 가중치용이므로 유지한다: `--calc_scores softmax`.
 - PAConv head는 재현 편의를 위해 `1344 -> 256 -> 256 -> 128 -> 36`으로 간다.
 - PAConv가 DeepPA prior로 줄 latent는 `prior_hints = 1344ch x_concat` 그대로 둔다.
-- DeepPA 입력 채널 구조는 일단 바꾸지 않는다.
+- DeepPA NPY 입력 채널은 `3/7` 그대로 유지하고, 첫 stage 내부 local feature만 `center_geometry=14ch`, `full_extension=22ch`로 선택 가능하게 둔다.
 - DeepPA/PAConv validation은 eval과 같은 방식으로 원좌표 복원 후 Euclidean ME를 쓴다.
 - PAConv checkpoint 선택/비교 기준은 MDS로 두고, 최종 eval에서는 MDS와 TopK를 둘 다 기록한다.
-- PAConv와 DeepPA의 내부 geometry 처리는 기본적으로 서로 맞춘다.
-  - 기본/본선: `center_geometry` PAConv + 기존 DeepPA center-geometry 14ch 처리.
-  - 후순위 ablation: `full_extension` PAConv. DeepPA까지 22ch full-extension으로 바꾸는 실험은 별도 검토한다.
+- PAConv와 DeepPA의 내부 geometry 처리는 서로 독립 선택 가능하게 둔다.
+  - 기본/본선: `center_geometry` PAConv + `center_geometry` DeepPA.
+  - 교차 ablation: PAConv/DeepPA 각각 `center_geometry` 또는 `full_extension`으로 4조합 실행 가능.
 
 ## PAConv 입력 구조
 
@@ -125,7 +125,7 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_mainpaconv_raw7
 
 PAConv 단독 결과 확인 후 DeepPA를 따로 실행할 수도 있지만, 비교 속도를 위해 PAConv Stage1과 frozen DeepPA Stage2를 이어서 실행하는 스크립트도 준비했다.
 
-### 여기/서브컴: center-geometry 7ch PAConv + DeepPA
+### 기본/본선: PAConv center + DeepPA center
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_here_centergeom7_paconv_deeppa_seed1.ps1
@@ -137,13 +137,37 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_here_centergeom
 powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main_centergeom7_paconv_deeppa_seed1.ps1
 ```
 
-### 후순위 ablation: full-extension 7ch PAConv + 기존 DeepPA
+같은 조합을 명시형 이름으로도 실행할 수 있다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_paconvcenter_deeppacenter_seed1.ps1
+```
+
+### 교차 ablation: PAConv full + DeepPA center
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_here_fullext7_paconv_deeppa_seed1.ps1
 ```
 
-주의: 이 ablation은 PAConv Stage1만 22ch full-extension이고, DeepPA Stage2는 기존 center-geometry 14ch 처리를 유지한다. PAConv와 DeepPA를 모두 22ch full-extension으로 맞추는 실험은 DeepPA backbone 입력 구조 변경이 필요하므로 별도 실험으로 분리한다.
+명시형 이름:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_paconvfull_deeppacenter_seed1.ps1
+```
+
+### 교차 ablation: PAConv center + DeepPA full
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_paconvcenter_deeppafull_seed1.ps1
+```
+
+### full-extension 정렬: PAConv full + DeepPA full
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_paconvfull_deeppafull_seed1.ps1
+```
+
+주의: `in_channels=7`은 NPY raw 입력 채널을 뜻한다. 내부 edge/local feature 채널은 feature mode에 따라 `center_geometry=14ch`, `full_extension=22ch`로 갈린다.
 
 공통 DeepPA 조건:
 
@@ -166,7 +190,7 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_here_fullext7_p
 
 ```text
 center-geometry: ..\results\MainPAConv_DeepPAReady\CenterGeometry7
-full-extension ablation: ..\results\MainPAConv_DeepPAReady\FullExtension7
+PAConv/DeepPA 조합별: ..\results\MainPAConv_DeepPAReady\pacenter_dpcenter 또는 pafull_dpfull 등
 ```
 
 두 스크립트는 공통 runner `experiment_queues\run_mainpaconv_seed1.ps1`을 사용한다. 로그는 `debug_outputs\run_mainpaconv_*.out.log`, `.err.log`, `.summary.log`에 남는다.
@@ -190,6 +214,8 @@ full-extension ablation: ..\results\MainPAConv_DeepPAReady\FullExtension7
 --regression_point_num 10
 --latent_injection_type raw
 --paconv_heatmap_activation_mode raw
+--paconv_feature_mode center_geometry 또는 full_extension
+--deeppa_feature_mode center_geometry 또는 full_extension
 --eval_heatmap_coord_method mds
 --heatmap_loss_mode adaptive_wing
 --calc_scores softmax
@@ -199,6 +225,7 @@ full-extension ablation: ..\results\MainPAConv_DeepPAReady\FullExtension7
 
 - `My_args.py`
   - PAConv heatmap activation 기본값을 `raw`로 둔다.
+  - `--deeppa_feature_mode`를 추가해 DeepPA 첫 stage local feature를 14ch/22ch 중 선택할 수 있게 한다.
 - `PAConv_model.py`
   - PAConv head를 `1344 -> 256 -> 256 -> 128 -> 36`으로 정리한다.
   - PAConv 최종 heatmap softmax를 사용할 경우 포인트 축(`dim=2`)으로 적용한다.
@@ -207,6 +234,9 @@ full-extension ablation: ..\results\MainPAConv_DeepPAReady\FullExtension7
   - 3ch는 10ch edge feature를 만든다.
   - 7ch는 XYZ relation + center principal direction/curvature 구조의 14ch edge feature를 만든다.
   - `--paconv_feature_mode full_extension`일 때는 7ch 전체의 delta/neighbor/center와 XYZ distance를 묶은 22ch edge feature를 만든다.
+- `deeppa_semseg.py`
+  - 기본 DeepPA 7ch는 기존처럼 `center_geometry` 14ch를 쓴다.
+  - `--deeppa_feature_mode full_extension`일 때는 첫 stage에서 7ch 전체의 delta/neighbor/center와 XYZ distance를 묶은 22ch local feature를 쓴다.
 - `train.py`
   - validation ME를 eval과 동일하게 원좌표 복원 후 Euclidean distance 평균으로 계산한다.
 

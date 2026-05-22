@@ -118,6 +118,9 @@ parser.add_argument('--paconv_heatmap_activation_mode', type=str, default='raw',
 parser.add_argument('--paconv_feature_mode', type=str, default='center_geometry',
                     choices=['center_geometry', 'full_extension'],
                     help='PAConv 7ch edge feature mode: center_geometry uses XYZ relation plus center geometry; full_extension uses center/neighbor/delta for all input channels')
+parser.add_argument('--deeppa_feature_mode', type=str, default='center_geometry',
+                    choices=['center_geometry', 'full_extension'],
+                    help='DeepPA 7ch local feature mode: center_geometry uses XYZ relation plus center geometry; full_extension uses center/neighbor/delta for all input channels')
 parser.add_argument('--heatmap_loss_mode', type=str, default='adaptive_wing',
                     choices=['adaptive_wing', 'softmax_ce'],
                     help='Heatmap supervision for main/aux heatmaps')
