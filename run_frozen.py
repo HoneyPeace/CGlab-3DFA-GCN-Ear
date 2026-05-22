@@ -69,6 +69,17 @@ def set_arg_value(args_list, flag, value):
     updated_args.extend([flag, value])
     return updated_args
 
+def infer_run_info_from_dir(run_dir):
+    folder_name = os.path.basename(run_dir.rstrip(os.sep))
+    try:
+        run_id = folder_name.split('_')[-1]
+    except:
+        run_id = None
+
+    match = re.search(r'_train(\d+)', folder_name)
+    train_len = match.group(1) if match else None
+    return run_id, train_len
+
 def save_pipeline_command_txt():
     output_dir = os.path.join(os.getcwd(), "debug_outputs")
     os.makedirs(output_dir, exist_ok=True)
@@ -123,6 +134,13 @@ if __name__ == "__main__":
     tag_prefix = f"{args.user_tag}_" if getattr(args, "user_tag", "") else ""
     stage1_tag_prefix = f"{args.stage1_user_tag}_" if getattr(args, "stage1_user_tag", "") else tag_prefix
     stage1_exp_name = getattr(args, "stage1_exp_name", "") or args.exp_name
+    explicit_stage1_checkpoint_path = getattr(args, "stage1_checkpoint_path", "").strip()
+    if explicit_stage1_checkpoint_path:
+        explicit_stage1_checkpoint_path = os.path.abspath(explicit_stage1_checkpoint_path)
+        if not os.path.exists(explicit_stage1_checkpoint_path):
+            print(f"[ERROR] Explicit Stage1 PAConv checkpoint not found: {explicit_stage1_checkpoint_path}")
+            sys.exit(1)
+        print(f">>> [INFO] run_frozen.py: explicit Stage1 checkpoint = {explicit_stage1_checkpoint_path}")
     if stage1_exp_name != args.exp_name:
         print(f">>> [INFO] run_frozen.py: Stage1 PAConv source exp = {stage1_exp_name}")
 
@@ -132,30 +150,38 @@ if __name__ == "__main__":
     print(f">>> [PHASE 1] Checking existing PAConv Baseline (using {MAIN_SCRIPT})...")
     p1_tag = f"{stage1_tag_prefix}Stage1_PAConv"
     p1_model_name = "Single_PAConv_last.t7" 
-    
-    p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, stage1_exp_name, tag=p1_tag, required_model=p1_model_name)
 
-    if p1_dir:
-        print(f"  └─ 📦 [SKIP] 완료된 PAConv 발견! (Run ID: {p1_run_id})")
+    if explicit_stage1_checkpoint_path:
+        p1_dir = os.path.dirname(os.path.dirname(explicit_stage1_checkpoint_path))
+        p1_run_id, p1_train_len = infer_run_info_from_dir(p1_dir)
+        print(f"  └─ 📦 [SKIP] 명시 Stage1 PAConv last checkpoint 사용! (Run ID: {p1_run_id})")
     else:
-        if stage1_exp_name != args.exp_name:
-            print(f"[ERROR] Requested Stage1 PAConv not found in exp: {stage1_exp_name}")
-            print(f"[ERROR] Stage1 tag: {p1_tag}")
-            sys.exit(1)
-        print("  └─ 🚀 PAConv 베이스라인 학습 시작...")
-        paconv_train_cmd = [sys.executable, MAIN_SCRIPT] + filtered_args + [
-            "--model", "paconv_heat", "--user_tag", p1_tag
-        ]
-        try: subprocess.run(paconv_train_cmd, check=True)
-        except subprocess.CalledProcessError as e: sys.exit(1)
-        
         p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, stage1_exp_name, tag=p1_tag, required_model=p1_model_name)
+
+        if p1_dir:
+            print(f"  └─ 📦 [SKIP] 완료된 PAConv 발견! (Run ID: {p1_run_id})")
+        else:
+            if stage1_exp_name != args.exp_name:
+                print(f"[ERROR] Requested Stage1 PAConv not found in exp: {stage1_exp_name}")
+                print(f"[ERROR] Stage1 tag: {p1_tag}")
+                sys.exit(1)
+            print("  └─ 🚀 PAConv 베이스라인 학습 시작...")
+            paconv_train_cmd = [sys.executable, MAIN_SCRIPT] + filtered_args + [
+                "--model", "paconv_heat", "--user_tag", p1_tag
+            ]
+            try: subprocess.run(paconv_train_cmd, check=True)
+            except subprocess.CalledProcessError as e: sys.exit(1)
+        
+            p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, stage1_exp_name, tag=p1_tag, required_model=p1_model_name)
 
     excel_exists = False
     if p1_dir:
         excel_exists = any(f.endswith('.xlsx') and 'Results' in f for f in os.listdir(p1_dir))
         
-    if not excel_exists:
+    if not excel_exists and explicit_stage1_checkpoint_path:
+        print("[WARNING] Explicit Stage1 checkpoint has no Results Excel in its run folder.")
+        print("[WARNING] Run the PAConv-only command/eval first, or confirm this checkpoint was already evaluated.")
+    elif not excel_exists:
         print(f"  └─ 🚀 PAConv 평가(eval.py) 시작...")
         stage1_eval_args = no_resample_args
         if stage1_exp_name != args.exp_name:
@@ -173,7 +199,7 @@ if __name__ == "__main__":
     # [BRIDGE] 가중치 파일 자동 복사
     # =========================================================================
     print("\n>>> [BRIDGE] Preparing Pretrained Weights for DeepPA...")
-    source_model_path = os.path.join(p1_dir, "models", p1_model_name)
+    source_model_path = explicit_stage1_checkpoint_path or os.path.join(p1_dir, "models", p1_model_name)
     target_model_dir = os.path.join(args.output_root, "PAConv_Pretrained", "models")
     os.makedirs(target_model_dir, exist_ok=True)
     target_model_path = os.path.join(target_model_dir, p1_model_name)

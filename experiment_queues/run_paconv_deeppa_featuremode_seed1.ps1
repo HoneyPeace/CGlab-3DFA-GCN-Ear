@@ -19,7 +19,8 @@ param(
     [int]$DatasetSeed = 1,
     [double]$HmResidualMm = 2.0,
     [int]$AuxDropEpochs = 30,
-    [int]$FixedHeatmapEpochs = 60
+    [int]$FixedHeatmapEpochs = 60,
+    [string]$Stage1CheckpointPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -134,6 +135,12 @@ $PyArgs = @(
 if ($Stage1UserTag) {
     $PyArgs += @("--stage1_user_tag", $Stage1UserTag)
 }
+if ($Stage1CheckpointPath) {
+    if (-not (Test-Path -LiteralPath $Stage1CheckpointPath)) {
+        throw "Stage1CheckpointPath not found: $Stage1CheckpointPath"
+    }
+    $PyArgs += @("--stage1_checkpoint_path", $Stage1CheckpointPath)
+}
 if ($StageGridSizes) {
     $PyArgs += @("--stage_grid_sizes", $StageGridSizes)
 }
@@ -148,6 +155,7 @@ $Cmd = "call `"$CondaBat`" activate $CondaEnv && call `"$VsDevCmd`" -arch=amd64 
 "[DEEPPA_FEATURE_MODE] $DeepPAFeatureMode" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[RUN_SUFFIX] $RunSuffix" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[STAGE1_USER_TAG] $Stage1UserTag" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
+"[STAGE1_CHECKPOINT_PATH] $Stage1CheckpointPath" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[ABLATION_ONLY] $AblationOnly" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[STAGE_DOWNSAMPLE_METHOD] $StageDownsampleMethod" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[LOSS_SCHEDULE] $LossSchedule" | Out-File -LiteralPath $Summary -Append -Encoding UTF8

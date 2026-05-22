@@ -130,10 +130,16 @@ PAConv 단독 결과 확인 후 DeepPA를 따로 실행할 수도 있지만, 비
 
 ### 본컴 실행: 14ch center-geometry only
 
-본컴에서는 아래 파일 하나만 실행한다. 이 조합은 7ch raw NPY를 읽되, PAConv와 DeepPA 내부 local feature를 모두 `center_geometry=14ch`로 맞춘다.
+본컴에서는 먼저 PAConv-only를 학습/평가한 뒤, 그 run의 최신 `Single_PAConv_last.t7`를 DeepPA Stage1 prior로 불러온다.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main_14ch_centergeom_only_seed1.ps1
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_mainpaconv_raw7_centergeom_seed1.ps1
+```
+
+그 다음 아래 DeepPA 큐를 실행한다. 이 조합은 7ch raw NPY를 읽되, PAConv와 DeepPA 내부 local feature를 모두 `center_geometry=14ch`로 맞춘다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_followup_queue_seed1.ps1
 ```
 
 ### 기본/본선: PAConv center + DeepPA center
@@ -282,7 +288,7 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_f
 ```text
 --paconv_feature_mode center_geometry
 --deeppa_feature_mode center_geometry
---stage1_user_tag main14_center_stage1_seed1
+--stage1_checkpoint_path <PAConv-only 최신 Single_PAConv_last.t7>
 --paconv_heatmap_activation_mode raw
 --eval_heatmap_coord_method mds
 --need_resample False
@@ -300,7 +306,7 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_f
 | 4 | `auxdrop_plateau_grid_hmr2_seed1` | `stage_downsample_method=grid` | DeepPA 내부 stage sampling을 FPS에서 grid로 바꿨을 때 영향 확인 |
 | 5 | `auxdrop_plateau_fps_hmr1p5_seed1` | `hm_attn_residual_max_mm=1.5` | HMR boundary 2.0mm 대비 1.5mm가 더 좋은지 확인 |
 
-이 큐는 "PAConv 학습 후 DeepPA에서 볼 거리"를 한 파일에 묶은 것이다. 첫 variant가 PAConv Stage1을 학습하거나 기존 `main14_center_stage1_seed1_Stage1_PAConv`를 재사용하고, 뒤 variant들은 같은 Stage1을 공유한다.
+이 큐는 "PAConv 학습 후 DeepPA에서 볼 거리"를 한 파일에 묶은 것이다. PAConv를 다시 학습하지 않고 `S2G_MainPAConv_Raw7_CenterGeom_MDS_Seed1` 아래의 최신 `mainpaconv_raw7_centergeom_mds_seed1*/models/Single_PAConv_last.t7`를 찾아 모든 variant의 Stage1 checkpoint로 공유한다.
 
 ### 학습 후 평가 원칙
 

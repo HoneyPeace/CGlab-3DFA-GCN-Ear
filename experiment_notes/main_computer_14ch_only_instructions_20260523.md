@@ -2,22 +2,24 @@
 
 본컴에서는 22ch/full-extension 교차 실험을 돌리지 않고, 14ch center-geometry 조합만 실행한다.
 
-## 실행 명령
+## 실행 순서
 
-`Ear_3DFA-GCN` 폴더에서 아래 명령만 실행한다.
+`Ear_3DFA-GCN` 폴더에서 먼저 PAConv-only를 학습/평가한다.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main_14ch_centergeom_only_seed1.ps1
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_mainpaconv_raw7_centergeom_seed1.ps1
+```
+
+이 명령이 끝나면 최신 `Single_PAConv_last.t7`를 DeepPA Stage1 prior로 불러와서 후속 DeepPA 큐를 실행한다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_followup_queue_seed1.ps1
 ```
 
 ## PAConv 이후 DeepPA 후속 예약 큐
 
 PAConv stage1을 14ch center-geometry로 맞춘 뒤 DeepPA에서 볼 후속 실험 5개도 예약 파일로 준비해 두었다.
-첫 번째 variant가 `main14_center_stage1_seed1_Stage1_PAConv`를 학습하거나 기존 결과를 재사용하고, 뒤 variant들은 같은 PAConv stage1을 공유한다.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_followup_queue_seed1.ps1
-```
+이 큐는 PAConv를 새로 학습하지 않고, 방금 PAConv-only 명령이 만든 최신 `Single_PAConv_last.t7`를 모든 variant의 Stage1 checkpoint로 공유한다.
 
 큐에 들어간 DeepPA 후속 실험은 아래 5개다.
 
@@ -49,7 +51,7 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_f
 - DeepPA 내부 local feature: `--deeppa_feature_mode center_geometry`
 - 내부 feature 채널: PAConv 14ch, DeepPA 14ch
 - PAConv heatmap output: raw logits
-- PAConv checkpoint/readout 기준: MDS
+- PAConv checkpoint/readout 기준: MDS, DeepPA Stage1은 PAConv-only 최신 `Single_PAConv_last.t7`
 - DeepPA validation/eval ME: 원좌표 복원 후 Euclidean distance
 - `Train_mm`: 증강된 학습 좌표계 기준 Euclidean distance
 - NPY cache: `--need_resample False`
