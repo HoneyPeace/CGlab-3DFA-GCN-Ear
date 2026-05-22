@@ -180,7 +180,7 @@ def get_original_scorenet_input(x, idx):
     neighbor, center = gather_neighbors(x, idx)
     relative = neighbor - center
     dist = torch.linalg.vector_norm(relative, dim=3, keepdim=True)
-    feature = torch.cat((relative, neighbor, center, dist), dim=3)
+    feature = torch.cat((center, neighbor, relative, dist), dim=3)
     return feature.permute(0, 3, 1, 2).contiguous()
 
 
