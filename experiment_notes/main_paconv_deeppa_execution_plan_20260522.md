@@ -302,6 +302,16 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_f
 
 이 큐는 "PAConv 학습 후 DeepPA에서 볼 거리"를 한 파일에 묶은 것이다. 첫 variant가 PAConv Stage1을 학습하거나 기존 `main14_center_stage1_seed1_Stage1_PAConv`를 재사용하고, 뒤 variant들은 같은 Stage1을 공유한다.
 
+### 학습 후 평가 원칙
+
+학습 하나가 끝날 때마다 그 학습 설정 그대로 평가까지 실행한다.
+
+- PAConv 단독 큐는 `run.py`가 학습 후 `eval.py`를 자동 실행한다.
+- PAConv+DeepPA 큐는 `run_frozen.py`가 Stage1 PAConv를 평가하고, 각 DeepPA variant 학습 직후에도 `eval.py`를 자동 실행한다.
+- 평가에는 해당 학습의 `exp_name`, `user_tag`, `feature_mode`, `eval_heatmap_coord_method`, `need_resample=False`, seed 설정을 그대로 넘긴다.
+- 평가 결과 Excel이 이미 있으면 skip하고, 없으면 새로 평가한다.
+- 평가 실패 시 다른 설정으로 재시도하지 말고, 먼저 해당 `.err.log`를 확인한 뒤 같은 설정으로 재평가한다.
+
 ## Notion 정리 지시
 
 각 실험이 끝나면 `논문 정리 모음`의 original PAConv 재현/후속 페이지에 표로 정리한다.

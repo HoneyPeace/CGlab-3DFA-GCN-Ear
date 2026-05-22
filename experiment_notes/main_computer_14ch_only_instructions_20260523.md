@@ -31,6 +31,16 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_f
 
 주의: 이 큐는 14ch center-geometry 전용이다. full-extension 22ch 교차 실험은 본컴 기본 지시에서 제외한다.
 
+## 평가 실행 원칙
+
+학습 하나가 끝날 때마다 같은 설정으로 평가까지 이어서 실행한다.
+
+- PAConv 단독 실행 파일은 `run.py`를 통해 학습 후 `eval.py`를 자동 실행한다.
+- PAConv+DeepPA 실행 파일은 `run_frozen.py`를 통해 Stage1 PAConv 평가 후, 각 DeepPA variant 학습이 끝날 때마다 `eval.py`를 자동 실행한다.
+- 각 평가에는 학습 때 쓴 `exp_name`, `user_tag`, `feature_mode`, `eval_heatmap_coord_method`, `need_resample=False`, seed 설정이 그대로 전달된다.
+- 평가 산출물이 이미 있으면 기존 결과를 재사용하고, 없으면 새로 평가한다.
+- 평가 실패 시 해당 variant의 `.err.log`를 먼저 확인하고 같은 설정으로만 재평가한다.
+
 ## 이 명령의 의미
 
 - NPY raw input: `--in_channels 7`
