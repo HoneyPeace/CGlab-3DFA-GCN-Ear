@@ -13,6 +13,9 @@
 - DeepPA 입력 채널 구조는 일단 바꾸지 않는다.
 - DeepPA/PAConv validation은 eval과 같은 방식으로 원좌표 복원 후 Euclidean ME를 쓴다.
 - PAConv checkpoint 선택/비교 기준은 MDS로 두고, 최종 eval에서는 MDS와 TopK를 둘 다 기록한다.
+- PAConv 7ch feature mode는 두 갈래로 비교한다.
+  - 메인컴: `center_geometry`
+  - 여기/서브컴: `full_extension`
 
 ## PAConv 입력 구조
 
@@ -43,6 +46,23 @@ KNN과 distance는 XYZ 기준이다. 현재 main PAConv edge feature는 아래 1
 ```
 
 즉 7ch 입력이지만 "PAConv식 full 7ch 확장"이 아니라 "XYZ relation + center geometry" 설계이다.
+
+### 7ch full-extension PAConv
+
+입력 NPY는 동일하게 7채널이다.
+
+```text
+[x, y, z, principal_dir_x, principal_dir_y, principal_dir_z, curvature]
+```
+
+full-extension은 7채널 전체에 대해 center/neighbor/delta를 만든다. 단 KNN과 distance는 현재 main PAConv forward 구조를 따라 XYZ 기준으로 둔다.
+
+```text
+[neighbor_7ch - center_7ch, neighbor_7ch, center_7ch, xyz_distance]
+= 22ch
+```
+
+이 방식은 주변 principal direction/curvature와 그 차이까지 edge feature에 넣는 비교군이다. center-geometry보다 더 원본식 full 확장에 가까운 ablation이다.
 
 ## 이미 확인된 original-clone PAConv 결과
 
@@ -87,6 +107,60 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_mainpaconv_raw7
 ..\results\MainPAConv_DeepPAReady\S2G_MainPAConv_Raw7_CenterGeom_MDS_Seed1
 ```
 
+### 3. 7ch full-extension raw PAConv
+
+여기/서브컴 비교군으로 실행한다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_mainpaconv_raw7_fullext_seed1.ps1
+```
+
+결과 root:
+
+```text
+..\results\MainPAConv_DeepPAReady\S2G_MainPAConv_Raw7_FullExtension_MDS_Seed1
+```
+
+## PAConv + DeepPA 연속 실행 스크립트
+
+PAConv 단독 결과 확인 후 DeepPA를 따로 실행할 수도 있지만, 비교 속도를 위해 PAConv Stage1과 frozen DeepPA Stage2를 이어서 실행하는 스크립트도 준비했다.
+
+### 여기/서브컴: full-extension 7ch PAConv + DeepPA
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_here_fullext7_paconv_deeppa_seed1.ps1
+```
+
+### 메인컴: center-geometry 7ch PAConv + DeepPA
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main_centergeom7_paconv_deeppa_seed1.ps1
+```
+
+공통 DeepPA 조건:
+
+```text
+--ablation_only frozen_aux_drop
+--latent_injection_type raw
+--fusion_residual_base prior
+--aux_drop_epochs 30
+--use_stagewise_aux_hm True
+--decoder_fusion prog_half_final320
+--train_coord_readout heatmap_attn_residual
+--hm_attn_residual_max_mm 2.0
+--loss_schedule train_hm_plateau
+--need_resample False
+--seed 1
+--dataset_seed 1
+```
+
+주의: PAConv+DeepPA 연속 스크립트는 `run_frozen.py`의 `PAConv_Pretrained` bridge가 서로 덮이지 않도록 feature mode별 output root를 분리한다.
+
+```text
+full-extension: ..\results\MainPAConv_DeepPAReady\FullExtension7
+center-geometry: ..\results\MainPAConv_DeepPAReady\CenterGeometry7
+```
+
 두 스크립트는 공통 runner `experiment_queues\run_mainpaconv_seed1.ps1`을 사용한다. 로그는 `debug_outputs\run_mainpaconv_*.out.log`, `.err.log`, `.summary.log`에 남는다.
 
 ## 실행 기본 옵션
@@ -124,6 +198,7 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_mainpaconv_raw7
 - `PAConv/util/PAConv_util.py`
   - 3ch는 10ch edge feature를 만든다.
   - 7ch는 XYZ relation + center principal direction/curvature 구조의 14ch edge feature를 만든다.
+  - `--paconv_feature_mode full_extension`일 때는 7ch 전체의 delta/neighbor/center와 XYZ distance를 묶은 22ch edge feature를 만든다.
 - `train.py`
   - validation ME를 eval과 동일하게 원좌표 복원 후 Euclidean distance 평균으로 계산한다.
 
@@ -172,6 +247,9 @@ interpretation
 - original-clone PAConv 7ch PAConv-style full extension TopK
 - main PAConv raw 3ch XYZ relation MDS
 - main PAConv raw 7ch center-geometry MDS
+- main PAConv raw 7ch full-extension MDS
+- full-extension PAConv 기반 frozen DeepPA 결과
+- center-geometry PAConv 기반 frozen DeepPA 결과
 - 이후 선택된 PAConv checkpoint 기반 frozen DeepPA 결과
 
 해석에는 다음을 꼭 적는다.
@@ -183,8 +261,9 @@ interpretation
 
 ## 다음 의사결정
 
-1. main PAConv raw 3ch vs raw 7ch 결과 비교
-2. 더 좋은 PAConv checkpoint로 frozen DeepPA 실행
+1. center-geometry 7ch vs full-extension 7ch 결과 비교
+2. 각 PAConv checkpoint로 frozen DeepPA 실행
 3. raw가 애매하면 sigmoid PAConv ablation 추가
-4. DeepPA grid sampling 복구와 HDS/aux 대체성 비교는 그 다음 단계
-5. 가장 좋은 후보에서 seed 1/2/3 반복으로 안정성 확인
+4. 3ch PAConv는 필요할 때 baseline으로 추가
+5. DeepPA grid sampling 복구와 HDS/aux 대체성 비교는 그 다음 단계
+6. 가장 좋은 후보에서 seed 1/2/3 반복으로 안정성 확인

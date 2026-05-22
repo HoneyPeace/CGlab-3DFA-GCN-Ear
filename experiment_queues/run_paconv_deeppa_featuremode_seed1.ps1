@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("raw3", "raw7", "raw7_full")]
-    [string]$Variant = "raw7"
+    [ValidateSet("center_geometry", "full_extension")]
+    [string]$FeatureMode = "center_geometry"
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $RepoDir = Split-Path -Parent $PSScriptRoot
 $WorkspaceRoot = Split-Path -Parent $RepoDir
 $DebugDir = Join-Path $RepoDir "debug_outputs"
-$OutputRoot = Join-Path $WorkspaceRoot "results\MainPAConv_DeepPAReady"
+$OutputRootBase = Join-Path $WorkspaceRoot "results\MainPAConv_DeepPAReady"
 $CondaEnv = "EarLandMarking_CGLAB"
 $CondaBat = Join-Path $env:USERPROFILE "anaconda3\condabin\conda.bat"
 $VsDevCmd = "C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\Tools\VsDevCmd.bat"
@@ -25,21 +25,14 @@ if (-not (Test-Path -LiteralPath $VsDevCmd)) {
 
 New-Item -ItemType Directory -Force -Path $DebugDir, $OutputRoot | Out-Null
 
-if ($Variant -eq "raw3") {
-    $InChannels = "3"
-    $FeatureMode = "center_geometry"
-    $RunTag = "mainpaconv_raw3_xyzrel_mds_seed1"
-    $ExpName = "S2G_MainPAConv_Raw3_XYZRel_MDS_Seed1"
-} elseif ($Variant -eq "raw7_full") {
-    $InChannels = "7"
-    $FeatureMode = "full_extension"
-    $RunTag = "mainpaconv_raw7_fullext_mds_seed1"
-    $ExpName = "S2G_MainPAConv_Raw7_FullExtension_MDS_Seed1"
+if ($FeatureMode -eq "full_extension") {
+    $RunTag = "fullext7_hmr2_seed1"
+    $ExpName = "S2G_Frozen_HMR_PAConvFullExt7_Seed1"
+    $OutputRoot = Join-Path $OutputRootBase "FullExtension7"
 } else {
-    $InChannels = "7"
-    $FeatureMode = "center_geometry"
-    $RunTag = "mainpaconv_raw7_centergeom_mds_seed1"
-    $ExpName = "S2G_MainPAConv_Raw7_CenterGeom_MDS_Seed1"
+    $RunTag = "centergeom7_hmr2_seed1"
+    $ExpName = "S2G_Frozen_HMR_PAConvCenterGeom7_Seed1"
+    $OutputRoot = Join-Path $OutputRootBase "CenterGeometry7"
 }
 
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -61,8 +54,7 @@ function Join-CmdArgs {
 }
 
 $PyArgs = @(
-    "run.py",
-    "--model", "paconv_heat",
+    "run_frozen.py",
     "--exp_name", $ExpName,
     "--user_tag", $RunTag,
     "--output_root", $OutputRoot,
@@ -83,13 +75,33 @@ $PyArgs = @(
     "--sigma", "2.5",
     "--k", "30",
     "--regression_point_num", "10",
-    "--in_channels", $InChannels,
+    "--in_channels", "7",
     "--paconv_feature_mode", $FeatureMode,
-    "--latent_injection_type", "raw",
     "--paconv_heatmap_activation_mode", "raw",
     "--eval_heatmap_coord_method", "mds",
     "--heatmap_loss_mode", "adaptive_wing",
-    "--calc_scores", "softmax"
+    "--calc_scores", "softmax",
+    "--ablation_only", "frozen_aux_drop",
+    "--latent_injection_type", "raw",
+    "--fusion_residual_base", "prior",
+    "--aux_drop_epochs", "30",
+    "--use_stagewise_aux_hm", "True",
+    "--decoder_fusion", "prog_half_final320",
+    "--train_coord_readout", "heatmap_attn_residual",
+    "--hm_attn_residual_max_mm", "2.0",
+    "--heatmap_activation_mode", "sigmoid",
+    "--coord_loss_mode", "focal_l1",
+    "--struct_loss_mode", "coord",
+    "--surface_loss_mode", "topk",
+    "--loss_schedule", "train_hm_plateau",
+    "--plateau_start_epoch", "30",
+    "--plateau_window", "20",
+    "--plateau_patience", "10",
+    "--plateau_threshold", "0.01",
+    "--plateau_transition_epochs", "1",
+    "--plateau_transition_mode", "linear",
+    "--fixed_main_weight", "1.0",
+    "--fixed_geom_weight", "1.0"
 )
 
 $ArgText = Join-CmdArgs $PyArgs

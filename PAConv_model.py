@@ -34,9 +34,10 @@ class PAConv(nn.Module):
         
         # 🌟 파라미터 단일화 반영
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
+        self.paconv_feature_mode = getattr(args, 'paconv_feature_mode', 'center_geometry').lower()
         
         in_channels = getattr(args, 'in_channels', 3)
-        self.edge_channels = get_edge_feature_channels(in_channels)
+        self.edge_channels = get_edge_feature_channels(in_channels, self.paconv_feature_mode)
         
         self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
         self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])
@@ -100,7 +101,7 @@ class PAConv(nn.Module):
         xyz_coords = xyz[:, :3, :].contiguous() 
         idx, _ = knn(xyz_coords, self.k)
 
-        x_edge_feat = get_graph_feature(xyz, k=self.k, idx=idx)
+        x_edge_feat = get_graph_feature(xyz, k=self.k, idx=idx, feature_mode=self.paconv_feature_mode)
         scorenet_input = get_scorenet_input(x_edge_feat, idx=idx, k=self.k)
 
         x1 = self.conv1(x_edge_feat).max(dim=-1, keepdim=False)[0]

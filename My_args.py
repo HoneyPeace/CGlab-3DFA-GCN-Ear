@@ -115,6 +115,9 @@ parser.add_argument('--heatmap_activation_temperature', type=float, default=1.0,
 parser.add_argument('--paconv_heatmap_activation_mode', type=str, default='raw',
                     choices=['softmax', 'sigmoid', 'raw'],
                     help='Activation used for PAConv heatmap output; default keeps final PAConv heatmap logits raw')
+parser.add_argument('--paconv_feature_mode', type=str, default='center_geometry',
+                    choices=['center_geometry', 'full_extension'],
+                    help='PAConv 7ch edge feature mode: center_geometry uses XYZ relation plus center geometry; full_extension uses center/neighbor/delta for all input channels')
 parser.add_argument('--heatmap_loss_mode', type=str, default='adaptive_wing',
                     choices=['adaptive_wing', 'softmax_ce'],
                     help='Heatmap supervision for main/aux heatmaps')

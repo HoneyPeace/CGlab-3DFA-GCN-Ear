@@ -41,14 +41,16 @@ def knn(x, k):
         _, idx = pairwise_distance.topk(k=k, dim=-1)         
         return idx, pairwise_distance                 
 
-def get_edge_feature_channels(raw_channels):
+def get_edge_feature_channels(raw_channels, feature_mode='center_geometry'):
+    if feature_mode == 'full_extension' and raw_channels > 3:
+        return raw_channels * 3 + 1
     if raw_channels == 7:
         return 14
     if raw_channels == 6:
         return 13
     return 10
 
-def get_graph_feature(x, k=20, idx=None):
+def get_graph_feature(x, k=20, idx=None, feature_mode='center_geometry'):
     # C_in 대신 raw_channels로 명칭 변경 (실제 입력되는 3, 6, 7)
     batch_size, raw_channels, num_points = x.size()             
     
@@ -76,9 +78,13 @@ def get_graph_feature(x, k=20, idx=None):
     # =====================================================================
     # 🌟 14채널 / 13채널 / 10채널 완벽 분기 처리
     # =====================================================================
-    target_edge_channels = get_edge_feature_channels(raw_channels)
+    target_edge_channels = get_edge_feature_channels(raw_channels, feature_mode)
 
-    if target_edge_channels == 14:
+    if feature_mode == 'full_extension' and raw_channels > 3:
+        relative_all = neighbor - center
+        feature = torch.cat((relative_all, neighbor, center, dist), dim=3)
+
+    elif target_edge_channels == 14:
         # 곡률 및 방향(4채널) 차이 계산 -> 엣지 피처 14채널
         # 7ch input uses XYZ for the relation and center dir/curvature as geometry hints.
         center_geom = center[..., 3:]
