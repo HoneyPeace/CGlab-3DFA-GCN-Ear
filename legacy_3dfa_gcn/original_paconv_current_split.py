@@ -172,7 +172,7 @@ def gather_neighbors(x, idx):
 
 def get_original_edge_feature(x, idx):
     neighbor, center = gather_neighbors(x, idx)
-    feature = torch.cat((neighbor - center, center), dim=3)
+    feature = torch.cat((neighbor - center, neighbor), dim=3)
     return feature.permute(0, 3, 1, 2).contiguous()
 
 
