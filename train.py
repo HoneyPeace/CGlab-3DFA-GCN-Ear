@@ -592,13 +592,16 @@ def train(args):
         # 🌟 5. Validation 평가
         # ----------------------------------------------------
         model.eval()
-        val_mm_total, val_samples = 0.0, 0
+        val_mm_total, val_landmarks = 0.0, 0
         with torch.no_grad():
             for point, landmark, seg in val_loader:
                 point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
                 B_val = point.size(0) 
                 point_xyz = point[:, :, :3]
-                avg_m = torch.mean(torch.max(torch.sqrt(torch.sum((point_xyz - torch.mean(point_xyz, axis=1, keepdim=True)) ** 2, axis=2)), axis=1)[0]).item()
+                centroid = torch.mean(point_xyz, axis=1, keepdim=True)
+                point_centered = point_xyz - centroid
+                scale = torch.max(torch.sqrt(torch.sum(point_centered ** 2, axis=2)), axis=1)[0]
+                avg_m = torch.mean(scale).item()
                 point_normal, landmark_normal = normalize_data(point, landmark)
                 point_input = point_normal.permute(0, 2, 1).contiguous() 
                 if getattr(args, 'train_coord_readout', 'topk').lower() in [
@@ -622,10 +625,12 @@ def train(args):
                         ).to(points_norm_xyz.device, dtype=points_norm_xyz.dtype)
                         for sample_idx in range(points_norm_xyz.size(0))
                     ], dim=0)
-                val_mm_total += F.l1_loss(pred_coords, landmark_normal.view_as(pred_coords)).item() * avg_m * B_val
-                val_samples += B_val
+                pred_landmark = pred_coords * scale.view(B_val, 1, 1) + centroid
+                val_dists = torch.linalg.vector_norm(pred_landmark - landmark.view_as(pred_landmark), dim=2)
+                val_mm_total += val_dists.sum().item()
+                val_landmarks += val_dists.numel()
         
-        v_mm = val_mm_total / val_samples if val_samples > 0 else 0.0                     
+        v_mm = val_mm_total / val_landmarks if val_landmarks > 0 else 0.0
 
         # ========================================================
         # 🔄 6. 컨트롤러에 Val_mm 전달하여 Patience 스케줄러 작동

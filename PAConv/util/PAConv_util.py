@@ -41,6 +41,13 @@ def knn(x, k):
         _, idx = pairwise_distance.topk(k=k, dim=-1)         
         return idx, pairwise_distance                 
 
+def get_edge_feature_channels(raw_channels):
+    if raw_channels == 7:
+        return 14
+    if raw_channels == 6:
+        return 13
+    return 10
+
 def get_graph_feature(x, k=20, idx=None):
     # C_in 대신 raw_channels로 명칭 변경 (실제 입력되는 3, 6, 7)
     batch_size, raw_channels, num_points = x.size()             
@@ -67,25 +74,18 @@ def get_graph_feature(x, k=20, idx=None):
     dist = torch.linalg.vector_norm(relative_xyz, dim=3, keepdim=True)
 
     # =====================================================================
-    # 🌟 원시 입력 채널을 목표 엣지 채널(Target Edge Channels)로 직관적 매핑
+    # 🌟 14채널 / 13채널 / 10채널 완벽 분기 처리
     # =====================================================================
-    if raw_channels == 7:
-        target_edge_channels = 14 # 곡률+방향 포함
-    elif raw_channels == 6:
-        target_edge_channels = 12 # 🌟 [복구] 방향(Eigenvector)만 포함
-    else:
-        target_edge_channels = 10 # 기본 XYZ 전용
+    target_edge_channels = get_edge_feature_channels(raw_channels)
 
-    # =====================================================================
-    # 🌟 14채널 / 12채널 / 10채널 완벽 분기 처리
-    # =====================================================================
     if target_edge_channels == 14:
         # 곡률 및 방향(4채널) 차이 계산 -> 엣지 피처 14채널
+        # 7ch input uses XYZ for the relation and center dir/curvature as geometry hints.
         center_geom = center[..., 3:]
         feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, center_geom), dim=3)
         
-    elif target_edge_channels == 12:
-        # 🌟 [복구] 방향 벡터(3채널) 차이 계산 -> 엣지 피처 12채널
+    elif target_edge_channels == 13:
+        # 🌟 [복구] 방향 벡터(3채널) 차이 계산 -> 엣지 피처 13채널
         relative_geom = neighbor[..., 3:] - center[..., 3:]
         feature = torch.cat((relative_xyz, neighbor_xyz, center_xyz, dist, relative_geom), dim=3)
 

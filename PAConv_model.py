@@ -9,7 +9,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PAConv.util.PAConv_util import knn, get_graph_feature, get_scorenet_input, feat_trans_dgcnn, ScoreNet, Attention_Layer
+from PAConv.util.PAConv_util import (
+    knn,
+    get_edge_feature_channels,
+    get_graph_feature,
+    get_scorenet_input,
+    feat_trans_dgcnn,
+    ScoreNet,
+    Attention_Layer,
+)
 from PAConv.cuda_lib.functional import assign_score_withk as assemble_dgcnn
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -28,7 +36,7 @@ class PAConv(nn.Module):
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
         
         in_channels = getattr(args, 'in_channels', 3)
-        self.edge_channels = 10 if in_channels == 10 else in_channels * 2
+        self.edge_channels = get_edge_feature_channels(in_channels)
         
         self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
         self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])
@@ -80,9 +88,9 @@ class PAConv(nn.Module):
             self.proj_st3 = make_refinement_proj(1344, 256)
             self.proj_st4 = make_refinement_proj(1344, 512)
         
-        self.conv6 = nn.Sequential(nn.Conv1d(1344, 512, kernel_size=1, bias=False), nn.BatchNorm1d(512))
+        self.conv6 = nn.Sequential(nn.Conv1d(1344, 256, kernel_size=1, bias=False), nn.BatchNorm1d(256))
         self.dp1 = nn.Dropout(p=0.5)
-        self.conv7 = nn.Sequential(nn.Conv1d(512, 256, kernel_size=1, bias=False), nn.BatchNorm1d(256))
+        self.conv7 = nn.Sequential(nn.Conv1d(256, 256, kernel_size=1, bias=False), nn.BatchNorm1d(256))
         self.dp2 = nn.Dropout(p=0.5)
         self.conv8 = nn.Sequential(nn.Conv1d(256, 128, kernel_size=1, bias=False), nn.BatchNorm1d(128))
         self.conv9 = nn.Conv1d(128, self.landmark_num, kernel_size=1, bias=True) 
@@ -138,9 +146,9 @@ class PAConv(nn.Module):
         x_res = self.dp2(x_res)
         latent_hint = F.relu(self.conv8(x_res))
         heatmap_logits = self.conv9(latent_hint)
-        heatmap_activation = getattr(self.args, 'paconv_heatmap_activation_mode', 'softmax').lower()
+        heatmap_activation = getattr(self.args, 'paconv_heatmap_activation_mode', 'raw').lower()
         if heatmap_activation == 'softmax':
-            heatmap_anchor = F.softmax(heatmap_logits, dim=1)
+            heatmap_anchor = F.softmax(heatmap_logits, dim=2)
         elif heatmap_activation == 'sigmoid':
             heatmap_anchor = torch.sigmoid(heatmap_logits)
         elif heatmap_activation == 'raw':

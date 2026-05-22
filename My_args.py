@@ -112,9 +112,9 @@ parser.add_argument('--heatmap_activation_mode', type=str, default='sigmoid',
                     help='Activation used for main/aux DeepPA heatmap outputs')
 parser.add_argument('--heatmap_activation_temperature', type=float, default=1.0,
                     help='Point-wise softmax temperature for --heatmap_activation_mode softmax')
-parser.add_argument('--paconv_heatmap_activation_mode', type=str, default='softmax',
+parser.add_argument('--paconv_heatmap_activation_mode', type=str, default='raw',
                     choices=['softmax', 'sigmoid', 'raw'],
-                    help='Activation used for PAConv heatmap output; default preserves the existing PAConv softmax')
+                    help='Activation used for PAConv heatmap output; default keeps final PAConv heatmap logits raw')
 parser.add_argument('--heatmap_loss_mode', type=str, default='adaptive_wing',
                     choices=['adaptive_wing', 'softmax_ce'],
                     help='Heatmap supervision for main/aux heatmaps')
