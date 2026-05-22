@@ -269,6 +269,40 @@ PAConv 결과가 나온 뒤 final MDS/TopK가 좋은 checkpoint를 Stage1 prior�
 
 Stage2 실행 명령은 선택된 PAConv 결과 folder와 checkpoint가 확정된 뒤 별도 스크립트로 고정한다.
 
+### 14ch DeepPA 후속 6개 예약 큐
+
+본컴에서 14ch center-geometry만 밀어붙일 경우, PAConv 이후 DeepPA에서 확인할 후속 조건은 아래 예약 파일 하나로 순차 실행할 수 있다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main14_deeppa_followup_queue_seed1.ps1
+```
+
+공통 조건:
+
+```text
+--paconv_feature_mode center_geometry
+--deeppa_feature_mode center_geometry
+--stage1_user_tag main14_center_stage1_seed1
+--paconv_heatmap_activation_mode raw
+--eval_heatmap_coord_method mds
+--need_resample False
+--seed 1
+--dataset_seed 1
+```
+
+큐의 6개 variant:
+
+| 순서 | variant | 차이점 | 목적 |
+|---:|---|---|---|
+| 1 | `base_auxdrop_plateau_fps_hmr2_seed1` | aux 30epoch drop, plateau, FPS, HMR 2.0mm | 기본 기준선 |
+| 2 | `auxfixed_plateau_fps_hmr2_seed1` | `frozen_aux_fixed` | aux heatmap을 끝까지 고정 가중치로 둘 때 안정성 확인 |
+| 3 | `noaux_plateau_fps_hmr2_seed1` | `frozen_no_aux` | aux heatmap 없이 prior/residual만으로 되는지 확인 |
+| 4 | `auxdrop_fixed60_fps_hmr2_seed1` | `loss_schedule=fixed_three_phase` | plateau 판단 대신 고정 heatmap phase가 나은지 확인 |
+| 5 | `auxdrop_plateau_grid_hmr2_seed1` | `stage_downsample_method=grid` | DeepPA 내부 stage sampling을 FPS에서 grid로 바꿨을 때 영향 확인 |
+| 6 | `auxdrop_plateau_fps_hmr1p5_seed1` | `hm_attn_residual_max_mm=1.5` | HMR boundary 2.0mm 대비 1.5mm가 더 좋은지 확인 |
+
+이 큐는 "PAConv 학습 후 DeepPA에서 볼 거리"를 한 파일에 묶은 것이다. 첫 variant가 PAConv Stage1을 학습하거나 기존 `main14_center_stage1_seed1_Stage1_PAConv`를 재사용하고, 뒤 variant들은 같은 Stage1을 공유한다.
+
 ## Notion 정리 지시
 
 각 실험이 끝나면 `논문 정리 모음`의 original PAConv 재현/후속 페이지에 표로 정리한다.
@@ -300,6 +334,7 @@ interpretation
 - main PAConv raw 7ch full-extension MDS
 - full-extension PAConv 기반 frozen DeepPA 결과
 - center-geometry PAConv 기반 frozen DeepPA 결과
+- 14ch DeepPA 후속 6개 variant 각각의 결과
 - 이후 선택된 PAConv checkpoint 기반 frozen DeepPA 결과
 
 해석에는 다음을 꼭 적는다.

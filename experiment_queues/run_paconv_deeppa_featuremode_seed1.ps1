@@ -4,7 +4,22 @@ param(
     [ValidateSet("", "center_geometry", "full_extension")]
     [string]$PaconvFeatureMode = "",
     [ValidateSet("", "center_geometry", "full_extension")]
-    [string]$DeepPAFeatureMode = ""
+    [string]$DeepPAFeatureMode = "",
+    [string]$RunSuffix = "hmr2_seed1",
+    [string]$Stage1UserTag = "",
+    [ValidateSet("frozen_aux_drop", "frozen_aux_fixed", "frozen_no_aux")]
+    [string]$AblationOnly = "frozen_aux_drop",
+    [ValidateSet("fps", "grid")]
+    [string]$StageDownsampleMethod = "fps",
+    [string]$StageGridSizes = "",
+    [int]$StageGridSearchIters = 8,
+    [ValidateSet("train_hm_plateau", "fixed_three_phase", "linear_three_phase", "val_adaptive")]
+    [string]$LossSchedule = "train_hm_plateau",
+    [int]$Seed = 1,
+    [int]$DatasetSeed = 1,
+    [double]$HmResidualMm = 2.0,
+    [int]$AuxDropEpochs = 30,
+    [int]$FixedHeatmapEpochs = 60
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,9 +51,10 @@ if (-not $DeepPAFeatureMode) {
 
 $PaShort = if ($PaconvFeatureMode -eq "full_extension") { "pafull" } else { "pacenter" }
 $DpShort = if ($DeepPAFeatureMode -eq "full_extension") { "dpfull" } else { "dpcenter" }
-$RunTag = $PaShort + "_" + $DpShort + "_hmr2_seed1"
-$ExpName = "S2G_Frozen_HMR_" + $PaShort + "_" + $DpShort + "_Seed1"
+$RunTag = $PaShort + "_" + $DpShort + "_" + $RunSuffix
+$ExpName = "S2G_Frozen_HMR_" + $PaShort + "_" + $DpShort + "_Seed" + $Seed
 $OutputRoot = Join-Path $OutputRootBase ($PaShort + "_" + $DpShort)
+$HmResidualMmText = $HmResidualMm.ToString([System.Globalization.CultureInfo]::InvariantCulture)
 
 New-Item -ItemType Directory -Force -Path $DebugDir, $OutputRoot | Out-Null
 
@@ -71,8 +87,8 @@ $PyArgs = @(
     "--val_partition", "val",
     "--Eval_DataType", "test",
     "--need_resample", "False",
-    "--seed", "1",
-    "--dataset_seed", "1",
+    "--seed", "$Seed",
+    "--dataset_seed", "$DatasetSeed",
     "--epochs", "500",
     "--train_len", "200",
     "--batch_size", "4",
@@ -89,19 +105,22 @@ $PyArgs = @(
     "--eval_heatmap_coord_method", "mds",
     "--heatmap_loss_mode", "adaptive_wing",
     "--calc_scores", "softmax",
-    "--ablation_only", "frozen_aux_drop",
+    "--ablation_only", $AblationOnly,
     "--latent_injection_type", "raw",
     "--fusion_residual_base", "prior",
-    "--aux_drop_epochs", "30",
+    "--aux_drop_epochs", "$AuxDropEpochs",
     "--use_stagewise_aux_hm", "True",
+    "--stage_downsample_method", $StageDownsampleMethod,
+    "--stage_grid_search_iters", "$StageGridSearchIters",
     "--decoder_fusion", "prog_half_final320",
     "--train_coord_readout", "heatmap_attn_residual",
-    "--hm_attn_residual_max_mm", "2.0",
+    "--hm_attn_residual_max_mm", $HmResidualMmText,
     "--heatmap_activation_mode", "sigmoid",
     "--coord_loss_mode", "focal_l1",
     "--struct_loss_mode", "coord",
     "--surface_loss_mode", "topk",
-    "--loss_schedule", "train_hm_plateau",
+    "--loss_schedule", $LossSchedule,
+    "--fixed_heatmap_epochs", "$FixedHeatmapEpochs",
     "--plateau_start_epoch", "30",
     "--plateau_window", "20",
     "--plateau_patience", "10",
@@ -112,6 +131,13 @@ $PyArgs = @(
     "--fixed_geom_weight", "1.0"
 )
 
+if ($Stage1UserTag) {
+    $PyArgs += @("--stage1_user_tag", $Stage1UserTag)
+}
+if ($StageGridSizes) {
+    $PyArgs += @("--stage_grid_sizes", $StageGridSizes)
+}
+
 $ArgText = Join-CmdArgs $PyArgs
 $Cmd = "call `"$CondaBat`" activate $CondaEnv && call `"$VsDevCmd`" -arch=amd64 -host_arch=amd64 && cd /d `"$RepoDir`" && set PYTHONIOENCODING=utf-8 && set PYTHONUTF8=1 && set PYTHONHASHSEED=1 && python $ArgText"
 
@@ -120,6 +146,12 @@ $Cmd = "call `"$CondaBat`" activate $CondaEnv && call `"$VsDevCmd`" -arch=amd64 
 "[OUTPUT_ROOT] $OutputRoot" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[PACONV_FEATURE_MODE] $PaconvFeatureMode" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[DEEPPA_FEATURE_MODE] $DeepPAFeatureMode" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
+"[RUN_SUFFIX] $RunSuffix" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
+"[STAGE1_USER_TAG] $Stage1UserTag" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
+"[ABLATION_ONLY] $AblationOnly" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
+"[STAGE_DOWNSAMPLE_METHOD] $StageDownsampleMethod" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
+"[LOSS_SCHEDULE] $LossSchedule" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
+"[HMR_MAX_MM] $HmResidualMmText" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 "[COMMAND] python $ArgText" | Out-File -LiteralPath $Summary -Append -Encoding UTF8
 
 Write-Output "[QUEUE] Starting $RunTag"
