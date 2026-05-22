@@ -137,6 +137,15 @@ class PAConv(nn.Module):
         x_res = F.relu(self.conv7(x_res))   
         x_res = self.dp2(x_res)
         latent_hint = F.relu(self.conv8(x_res))
-        heatmap_anchor = F.softmax(self.conv9(latent_hint), dim=1)
+        heatmap_logits = self.conv9(latent_hint)
+        heatmap_activation = getattr(self.args, 'paconv_heatmap_activation_mode', 'softmax').lower()
+        if heatmap_activation == 'softmax':
+            heatmap_anchor = F.softmax(heatmap_logits, dim=1)
+        elif heatmap_activation == 'sigmoid':
+            heatmap_anchor = torch.sigmoid(heatmap_logits)
+        elif heatmap_activation == 'raw':
+            heatmap_anchor = heatmap_logits
+        else:
+            raise ValueError(f"Unsupported paconv_heatmap_activation_mode: {heatmap_activation}")
         
         return prior_hints, heatmap_anchor
