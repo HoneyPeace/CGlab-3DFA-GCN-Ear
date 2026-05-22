@@ -574,7 +574,10 @@ def train(args):
                     opt.step(); opt.zero_grad() 
 
                 with torch.no_grad():
-                    mm_error = F.l1_loss(pred_coords, augmented_landmark).item() * avg_m
+                    mm_error = torch.linalg.vector_norm(
+                        pred_coords - augmented_landmark.view_as(pred_coords),
+                        dim=2,
+                    ).mean().item() * avg_m
 
                 t_loss_n += total_loss.item()
                 t_hm_PA += L_pa.item(); t_hm_main += L_main_hm.item(); t_hm_aux += L_aux_hm.item()

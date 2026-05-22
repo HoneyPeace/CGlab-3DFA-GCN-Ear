@@ -16,6 +16,9 @@
 - PAConv와 DeepPA의 내부 geometry 처리는 서로 독립 선택 가능하게 둔다.
   - 기본/본선: `center_geometry` PAConv + `center_geometry` DeepPA.
   - 교차 ablation: PAConv/DeepPA 각각 `center_geometry` 또는 `full_extension`으로 4조합 실행 가능.
+- 본컴 전달/실행은 14ch center-geometry 조합만 사용한다.
+  - 실행 파일: `experiment_queues\run_main_14ch_centergeom_only_seed1.ps1`
+  - 22ch/full-extension 교차 실험은 본컴 기본 실행에서 제외한다.
 
 ## PAConv 입력 구조
 
@@ -125,6 +128,14 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_mainpaconv_raw7
 
 PAConv 단독 결과 확인 후 DeepPA를 따로 실행할 수도 있지만, 비교 속도를 위해 PAConv Stage1과 frozen DeepPA Stage2를 이어서 실행하는 스크립트도 준비했다.
 
+### 본컴 실행: 14ch center-geometry only
+
+본컴에서는 아래 파일 하나만 실행한다. 이 조합은 7ch raw NPY를 읽되, PAConv와 DeepPA 내부 local feature를 모두 `center_geometry=14ch`로 맞춘다.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_main_14ch_centergeom_only_seed1.ps1
+```
+
 ### 기본/본선: PAConv center + DeepPA center
 
 ```powershell
@@ -167,7 +178,7 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_paconvcenter_de
 powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_paconvfull_deeppafull_seed1.ps1
 ```
 
-주의: `in_channels=7`은 NPY raw 입력 채널을 뜻한다. 내부 edge/local feature 채널은 feature mode에 따라 `center_geometry=14ch`, `full_extension=22ch`로 갈린다.
+주의: `in_channels=7`은 NPY raw 입력 채널을 뜻한다. 본컴 실행은 내부 edge/local feature를 `center_geometry=14ch`로 고정한다. `full_extension=22ch` 조합은 코드상 가능하지만 본컴 기본 지시에는 포함하지 않는다.
 
 공통 DeepPA 조건:
 
@@ -191,6 +202,7 @@ powershell -ExecutionPolicy Bypass -File .\experiment_queues\run_paconvfull_deep
 ```text
 center-geometry: ..\results\MainPAConv_DeepPAReady\CenterGeometry7
 PAConv/DeepPA 조합별: ..\results\MainPAConv_DeepPAReady\pacenter_dpcenter 또는 pafull_dpfull 등
+본컴 14ch only: ..\results\MainPAConv_DeepPAReady\pacenter_dpcenter
 ```
 
 두 스크립트는 공통 runner `experiment_queues\run_mainpaconv_seed1.ps1`을 사용한다. 로그는 `debug_outputs\run_mainpaconv_*.out.log`, `.err.log`, `.summary.log`에 남는다.
