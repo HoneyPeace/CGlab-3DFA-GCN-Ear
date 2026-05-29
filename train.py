@@ -190,6 +190,9 @@ def get_last_checkpoint_name(model_name):
         return 'Frozen_No_Aux_last.t7'
     return f'{m_name}_last.t7'
 
+def get_best_checkpoint_name(model_name):
+    return get_last_checkpoint_name(model_name).replace('_last.t7', '_best.t7')
+
 def save_command_txt(paths, model_name):
     command = subprocess.list2cmdline([sys.executable] + sys.argv)
     base_path = os.path.join(paths['root'], f'command_train_{model_name.lower()}.txt')
@@ -414,6 +417,9 @@ def train(args):
     excel_log_path = os.path.join(paths['root'], f'Training_Log_{m_name}.xlsx')
     log_records = []
     excel_log_enabled = True
+    best_val_mm = float('inf')
+    best_epoch = 0
+    best_checkpoint_path = os.path.join(paths['models'], get_best_checkpoint_name(m_name))
 
     # 🌟 2. 외부 로스 컨트롤러 장착 (파라미터 연동 강화)
     loss_controller = DeepPALossController(
@@ -671,10 +677,18 @@ def train(args):
                 print(f"[ERROR] Excel training log write failed: {type(e).__name__}: {e}")
                 raise
 
+        if v_mm < best_val_mm:
+            best_val_mm = v_mm
+            best_epoch = epoch
+            torch.save(model.state_dict(), best_checkpoint_path)
+            print(f"[INFO] Best checkpoint updated: epoch={epoch}, Val_mm={v_mm:.6f}, path={best_checkpoint_path}")
+
         scheduler.step()
 
     print(f"\n💾 [Model Save] {m_name} 학습 완료! 최종 모델을 저장합니다.")
     torch.save(model.state_dict(), os.path.join(paths['models'], get_last_checkpoint_name(m_name)))
+    if best_epoch > 0:
+        print(f"[INFO] Best checkpoint kept: epoch={best_epoch}, Val_mm={best_val_mm:.6f}, path={best_checkpoint_path}")
 
 def execute_all_models(args):
     train(args)

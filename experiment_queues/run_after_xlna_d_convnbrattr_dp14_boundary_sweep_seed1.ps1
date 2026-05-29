@@ -36,13 +36,16 @@ function Quote-CmdArg {
 function Invoke-CmdLogged {
     param(
         [string]$Name,
-        [string[]]$Args
+        [string[]]$CmdArgs
     )
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $outLog = Join-Path $DebugDir "run_${Name}_${stamp}.out.log"
     $errLog = Join-Path $DebugDir "run_${Name}_${stamp}.err.log"
     $summaryLog = Join-Path $DebugDir "run_${Name}_${stamp}.summary.log"
-    $argText = ($Args | ForEach-Object { Quote-CmdArg $_ }) -join " "
+    if ($null -eq $CmdArgs -or $CmdArgs.Count -eq 0) {
+        throw "No command arguments were provided for $Name"
+    }
+    $argText = ($CmdArgs | ForEach-Object { Quote-CmdArg $_ }) -join " "
     $cmdLine = "call `"$CondaBat`" activate $CondaEnv && call `"$VsDevCmd`" -arch=amd64 -host_arch=amd64 && cd /d `"$RepoDir`" && set `"PYTHONIOENCODING=utf-8`" && set `"PYTHONUTF8=1`" && set `"PYTHONHASHSEED=1`" && set `"TORCH_CUDA_ARCH_LIST=8.6`" && set `"TORCH_EXTENSIONS_DIR=$TorchExtDir`" && python $argText"
 
     "[Working Directory]`n$RepoDir`n`n[Command]`n$cmdLine`n`n[StdOut]`n$outLog`n`n[StdErr]`n$errLog" |
@@ -65,10 +68,11 @@ function Build-CommonArgs {
         [string]$Tag,
         [string]$Bound,
         [string]$ModelEpoch = "",
-        [string]$RunId = ""
+        [string]$RunId = "",
+        [string]$EvalResultTag = ""
     )
 
-    $args = @(
+    $cmdArgs = @(
         $Entry,
         "--exp_name", $ExpName,
         "--user_tag", $Tag,
@@ -130,12 +134,15 @@ function Build-CommonArgs {
     )
 
     if ($ModelEpoch -ne "") {
-        $args += @("--model_epoch", $ModelEpoch)
+        $cmdArgs += @("--model_epoch", $ModelEpoch)
     }
     if ($RunId -ne "") {
-        $args += @("--run_id", $RunId)
+        $cmdArgs += @("--run_id", $RunId)
     }
-    return $args
+    if ($EvalResultTag -ne "") {
+        $cmdArgs += @("--eval_result_tag", $EvalResultTag)
+    }
+    return $cmdArgs
 }
 
 function Find-RunDir {
@@ -156,6 +163,43 @@ function Has-ResultArtifacts {
     }
     $txt = Get-ChildItem -Path $RunDir.FullName -Recurse -Filter "*Results*.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
     $xlsx = Get-ChildItem -Path $RunDir.FullName -Recurse -Filter "*Results*.xlsx" -ErrorAction SilentlyContinue | Select-Object -First 1
+    return ($null -ne $txt -and $null -ne $xlsx)
+}
+
+function Has-Checkpoint {
+    param(
+        [System.IO.DirectoryInfo]$RunDir,
+        [string]$FileName
+    )
+    if ($null -eq $RunDir) {
+        return $false
+    }
+    return (Test-Path (Join-Path $RunDir.FullName "models\$FileName"))
+}
+
+function Has-EvalArtifacts {
+    param(
+        [System.IO.DirectoryInfo]$RunDir,
+        [string]$EvalTag
+    )
+    if ($null -eq $RunDir) {
+        return $false
+    }
+    $txt = Get-ChildItem -Path $RunDir.FullName -Recurse -Filter "*${EvalTag}*Results*.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $xlsx = Get-ChildItem -Path $RunDir.FullName -Recurse -Filter "*${EvalTag}*Results*.xlsx" -ErrorAction SilentlyContinue | Select-Object -First 1
+    return ($null -ne $txt -and $null -ne $xlsx)
+}
+
+function Has-LastEvalArtifacts {
+    param([System.IO.DirectoryInfo]$RunDir)
+    if (Has-EvalArtifacts -RunDir $RunDir -EvalTag "frozen_aux_drop_last") {
+        return $true
+    }
+    if ($null -eq $RunDir) {
+        return $false
+    }
+    $txt = Get-ChildItem -Path $RunDir.FullName -Recurse -Filter "frozen_aux_drop_Results*.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $xlsx = Get-ChildItem -Path $RunDir.FullName -Recurse -Filter "frozen_aux_drop_Results*.xlsx" -ErrorAction SilentlyContinue | Select-Object -First 1
     return ($null -ne $txt -and $null -ne $xlsx)
 }
 
@@ -188,16 +232,42 @@ foreach ($item in $bounds) {
     $bound = $item.Bound
     $name = "D_CONVNBRATTR_DP14_" + $item.Name
 
-    Add-Status "train" $tag $bound "START" $name
-    Invoke-CmdLogged -Name $name -Args (Build-CommonArgs -Entry "run_frozen.py" -Tag $tag -Bound $bound) | Out-Null
+    $existingRunDir = Find-RunDir -Tag $tag
+    if (($null -ne $existingRunDir) -and (Has-Checkpoint -RunDir $existingRunDir -FileName "Frozen_Aux_Drop_last.t7")) {
+        Add-Status "train" $tag $bound "SKIP" "Last checkpoint already exists"
+    } else {
+        Add-Status "train" $tag $bound "START" $name
+        Invoke-CmdLogged -Name $name -CmdArgs (Build-CommonArgs -Entry "run_frozen.py" -Tag $tag -Bound $bound) | Out-Null
+    }
 
     $runDir = Find-RunDir -Tag $tag
-    Add-Status "eval" $tag $bound "START" $(if ($null -ne $runDir) { $runDir.FullName } else { "run dir pending" })
-    Invoke-CmdLogged -Name ($name + "_eval") -Args (Build-CommonArgs -Entry "eval.py" -Tag $tag -Bound $bound -ModelEpoch "Frozen_Aux_Drop_last.t7" -RunId "1") | Out-Null
+    if ($null -eq $runDir) {
+        throw "Run directory not found after training for $tag"
+    }
 
-    $runDir = Find-RunDir -Tag $tag
-    if (-not (Has-ResultArtifacts -RunDir $runDir)) {
-        throw "Missing Results txt/xlsx for $tag"
+    if (Has-LastEvalArtifacts -RunDir $runDir) {
+        Add-Status "eval" $tag $bound "SKIP_LAST" "Last Results txt/xlsx already exists"
+    } else {
+        Add-Status "eval" $tag $bound "START_LAST" $runDir.FullName
+        Invoke-CmdLogged -Name ($name + "_eval_last") -CmdArgs (Build-CommonArgs -Entry "eval.py" -Tag $tag -Bound $bound -ModelEpoch "Frozen_Aux_Drop_last.t7" -RunId "1" -EvalResultTag "last") | Out-Null
+    }
+
+    if (Has-Checkpoint -RunDir $runDir -FileName "Frozen_Aux_Drop_best.t7") {
+        if (Has-EvalArtifacts -RunDir $runDir -EvalTag "frozen_aux_drop_best") {
+            Add-Status "eval" $tag $bound "SKIP_BEST" "Best Results txt/xlsx already exists"
+        } else {
+            Add-Status "eval" $tag $bound "START_BEST" $runDir.FullName
+            Invoke-CmdLogged -Name ($name + "_eval_best") -CmdArgs (Build-CommonArgs -Entry "eval.py" -Tag $tag -Bound $bound -ModelEpoch "Frozen_Aux_Drop_best.t7" -RunId "1" -EvalResultTag "best") | Out-Null
+        }
+    } else {
+        Add-Status "eval" $tag $bound "SKIP_BEST" "Best checkpoint not found"
+    }
+
+    if (-not (Has-LastEvalArtifacts -RunDir $runDir)) {
+        throw "Missing last Results txt/xlsx for $tag"
+    }
+    if ((Has-Checkpoint -RunDir $runDir -FileName "Frozen_Aux_Drop_best.t7") -and -not (Has-EvalArtifacts -RunDir $runDir -EvalTag "frozen_aux_drop_best")) {
+        throw "Missing best Results txt/xlsx for $tag"
     }
     Add-Status "queue" $tag $bound "READY_FOR_NOTION" $runDir.FullName
 }

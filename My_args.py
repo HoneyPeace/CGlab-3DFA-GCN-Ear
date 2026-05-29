@@ -39,6 +39,8 @@ parser.add_argument('--test_dataset_name', type=str, default='test')
 parser.add_argument('--run_id', type=str, default='')
 parser.add_argument('--user_tag', type=str, default='')
 parser.add_argument('--model_epoch', type=str, default="deeppa_frozen_last.t7")
+parser.add_argument('--eval_result_tag', type=str, default='',
+                    help='Optional suffix for eval output names, e.g. last or best. Empty preserves existing names.')
 
 parser.add_argument('--no_cuda', type=str2bool, default=False) 
 parser.add_argument('--seed', type=int, default=1)

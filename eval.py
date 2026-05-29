@@ -94,8 +94,22 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
         ax.axis('off')
     short_sample_name = shorten_heatmap_name(sample_name, max_len=32)
     filename = f"{prefix}_{short_sample_name}_L{landmark_idx + 1:02d}.png"
-    plt.savefig(os.path.join(save_dir, filename), dpi=100, bbox_inches='tight')
+    plt.savefig(windows_write_path(os.path.join(save_dir, filename)), dpi=100, bbox_inches='tight')
     plt.close()
+
+def windows_write_path(path):
+    if os.name == 'nt':
+        abs_path = os.path.abspath(path)
+        if len(abs_path) >= 248 and not abs_path.startswith('\\\\?\\'):
+            return '\\\\?\\' + abs_path
+    return path
+
+def get_eval_output_name(model_name):
+    result_tag = getattr(args, 'eval_result_tag', '').strip()
+    if not result_tag:
+        return model_name
+    safe_tag = ''.join(ch if ch.isalnum() or ch in ('_', '-') else '_' for ch in result_tag)
+    return f"{model_name}_{safe_tag}"
 
 def save_eval_command_txt(run_root, eval_name):
     command = subprocess.list2cmdline([sys.executable] + sys.argv)
@@ -106,8 +120,10 @@ def save_eval_command_txt(run_root, eval_name):
         stamp = time.strftime('%Y%m%d_%H%M%S')
         root, ext = os.path.splitext(base_path)
         save_path = f'{root}_{stamp}{ext}'
+        if os.name == 'nt' and len(save_path) >= 250:
+            save_path = os.path.join(run_root, f'cmd_eval_{stamp}.txt')
 
-    with open(save_path, 'w', encoding='utf-8') as f:
+    with open(windows_write_path(save_path), 'w', encoding='utf-8') as f:
         f.write('[Working Directory]\n')
         f.write(os.getcwd() + '\n\n')
         f.write('[Command]\n')
@@ -120,6 +136,10 @@ def normalize_sample_name(raw_name):
     if isinstance(raw_name, bytes):
         return raw_name.decode("utf-8", errors="replace")
     return str(raw_name)
+
+def sample_id_digits(sample_name):
+    digits = ''.join(ch for ch in str(sample_name) if ch.isdigit())
+    return str(int(digits)) if digits else ""
 
 # -----------------------------------------------------------------------------
 # 1. 경로 및 데이터 로드 
@@ -140,7 +160,8 @@ if not os.path.exists(run_root):
     print(f"Error: Experiment folder not found: {run_root}")
     sys.exit(1)
 
-save_eval_command_txt(run_root, args.model)
+eval_output_name = get_eval_output_name(args.model)
+save_eval_command_txt(run_root, eval_output_name)
 
 data_dir = os.path.join(run_root, 'npy_data')
 heatmap_save_dir_base = os.path.join(run_root, "HM")
@@ -282,8 +303,21 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     os.makedirs(current_hm_dir, exist_ok=True)
     os.makedirs(current_asc_dir, exist_ok=True)
 
+    landmark_mapping_path = os.path.join(
+        run_root,
+        f"{short_eval_name}_landmark_mapping_LM01_LM{args.landmark_num:02d}.csv",
+    )
+    pd.DataFrame({
+        "LM": [f"LM{i + 1:02d}" for i in range(args.landmark_num)],
+        "Index_1based": list(range(1, args.landmark_num + 1)),
+        "Index_0based": list(range(args.landmark_num)),
+        "Order_Note": ["Predicted ASC row order / GT landmark order"] * args.landmark_num,
+    }).to_csv(windows_write_path(landmark_mapping_path), index=False, encoding="utf-8-sig")
+
     me_list, per_landmark_me_list = [], []
     sample_records = []
+    prediction_rows = []
+    sample_253_exports = []
     cos_sim_list, iou_list, time_list = [], [], []
 
     surface_loss_mode = getattr(args, 'surface_loss_mode', 'topk').lower()
@@ -409,12 +443,54 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             
             pred_asc_name = f"p_{shorten_heatmap_name(real_name, max_len=32)}.asc"
             pred_asc_relpath = os.path.join("LM", short_eval_name, pred_asc_name)
-            np.savetxt(os.path.join(current_asc_dir, pred_asc_name), pred_np, fmt="%.6f", delimiter=",")
+            np.savetxt(windows_write_path(os.path.join(current_asc_dir, pred_asc_name)), pred_np, fmt="%.6f", delimiter=",")
+            sample_error_95 = float(np.percentile(dists, 95))
+
+            for lm_idx, dist in enumerate(dists):
+                prediction_rows.append({
+                    "Index": idx,
+                    "Sample_Name": real_name,
+                    "LM": f"LM{lm_idx + 1:02d}",
+                    "LM_Index_1based": lm_idx + 1,
+                    "Pred_X": round(float(pred_np[lm_idx, 0]), 6),
+                    "Pred_Y": round(float(pred_np[lm_idx, 1]), 6),
+                    "Pred_Z": round(float(pred_np[lm_idx, 2]), 6),
+                    "GT_X": round(float(gt_np[lm_idx, 0]), 6),
+                    "GT_Y": round(float(gt_np[lm_idx, 1]), 6),
+                    "GT_Z": round(float(gt_np[lm_idx, 2]), 6),
+                    "Error_mm": round(float(dist), 6),
+                    "Surface_Distance_mm": round(float(surface_distance_np[lm_idx]), 6),
+                    "Pred_ASC": pred_asc_relpath,
+                })
+
+            if sample_id_digits(real_name) == "253":
+                sample_253_error_name = f"p_{shorten_heatmap_name(real_name, max_len=32)}_errors.csv"
+                sample_253_error_path = os.path.join(current_asc_dir, sample_253_error_name)
+                pd.DataFrame([
+                    {
+                        "LM": f"LM{lm_idx + 1:02d}",
+                        "Pred_X": round(float(pred_np[lm_idx, 0]), 6),
+                        "Pred_Y": round(float(pred_np[lm_idx, 1]), 6),
+                        "Pred_Z": round(float(pred_np[lm_idx, 2]), 6),
+                        "GT_X": round(float(gt_np[lm_idx, 0]), 6),
+                        "GT_Y": round(float(gt_np[lm_idx, 1]), 6),
+                        "GT_Z": round(float(gt_np[lm_idx, 2]), 6),
+                        "Error_mm": round(float(dists[lm_idx]), 6),
+                        "Surface_Distance_mm": round(float(surface_distance_np[lm_idx]), 6),
+                    }
+                    for lm_idx in range(len(dists))
+                ]).to_csv(windows_write_path(sample_253_error_path), index=False, encoding="utf-8-sig")
+                sample_253_exports.append({
+                    "Sample_Name": real_name,
+                    "Pred_ASC": pred_asc_relpath,
+                    "Error_CSV": os.path.join("LM", short_eval_name, sample_253_error_name),
+                })
 
             sample_record = {
                 "Index": idx,
                 "Sample_Name": real_name,
                 "Mean_Error_mm": round(float(me), 6),
+                "Sample_Error_95ile_mm": round(sample_error_95, 6),
                 "Surface_Normal_Distance_mm": round(float(surface_p2p_mm), 6),
                 "Surface_Distance_ME_mm": round(surface_distance_sample_me, 6),
                 "Surface_Distance_STD_mm": round(surface_distance_sample_std, 6),
@@ -472,6 +548,15 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 
     filename_excel = f"{eval_name}_Results_ME{average_me:.4f}.xlsx"
     result_excel_path = os.path.join(run_root, filename_excel)
+    prediction_csv_path = os.path.join(
+        run_root,
+        f"{short_eval_name}_pred_landmarks_all_{eval_datatype}.csv",
+    )
+    pd.DataFrame(prediction_rows).to_csv(windows_write_path(prediction_csv_path), index=False, encoding="utf-8-sig")
+    prediction_csv_relpath = os.path.basename(prediction_csv_path)
+    landmark_mapping_relpath = os.path.basename(landmark_mapping_path)
+    sample_253_asc = sample_253_exports[0]["Pred_ASC"] if sample_253_exports else "not found in this eval split"
+    sample_253_error_csv = sample_253_exports[0]["Error_CSV"] if sample_253_exports else "not found in this eval split"
     
     summary_data = {
         "지표 (Metric)": [
@@ -497,6 +582,39 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         ]
     }
     df_summary = pd.DataFrame(summary_data)
+    df_summary = pd.DataFrame({
+        "Metric": [
+            "[Metadata]", "Experiment", "Run ID", "Model", "Eval Split",
+            "[Coordinate Error]", "Average ME (mm)", "Average Std (mm)",
+            "95%ile ME (sample mean, mm)", "SR@10mm (%)", "SR@5mm (%)",
+            "Average Inference Time (ms)",
+            "[Heatmap]", "Heatmap Cosine Sim (%)", "95%ile Cosine (%)",
+            "mIoU (@0.1, %)", "95%ile mIoU (%)",
+            "[Surface Diagnostics]", "Surface Loss Mode", "Surface Loss (norm)",
+            "Surface Normal Distance (mm)", "Surface Distance ME (mm)",
+            "Surface Distance STD (mm)", "Surface Distance 95%ile (mm)",
+            "Surface Sample-ME 95%ile (mm)", "Surface Curvature Diff", "Surface Direction Diff",
+            "[Exports]", "Predicted Coordinates CSV", "Landmark Mapping CSV",
+            "LM ASC Directory", "Sample 253 Pred ASC", "Sample 253 Error CSV",
+            "Coordinate/Scale Note",
+        ],
+        eval_name: [
+            "", args.exp_name, target_folder_name, eval_name, eval_datatype,
+            "", round(average_me, 4), round(std_me, 4),
+            round(me_95_global, 4), round(sr_10, 2), round(sr_5, 2),
+            round(avg_time, 2),
+            "", round(avg_cos_sim, 2), round(cos_sim_5_global, 2),
+            round(avg_iou, 2), round(iou_5_global, 2),
+            "", surface_loss_mode, round(avg_surface_loss, 6),
+            round(avg_surface_p2p_mm, 4), round(surface_distance_me, 4),
+            round(surface_distance_std, 4), round(surface_distance_95, 4),
+            round(surface_sample_me_95, 4), round(avg_surface_curv_diff, 6),
+            round(avg_surface_dir_diff, 6),
+            "", prediction_csv_relpath, landmark_mapping_relpath,
+            os.path.join("LM", short_eval_name), sample_253_asc, sample_253_error_csv,
+            "Predicted ASC/CSV coordinates are denormalized back to the input point-cloud coordinate system.",
+        ],
+    })
 
     lm_me_combined = [f"{lm_means[i]:.3f} ± {lm_stds[i]:.3f}" for i in range(lm_means.shape[0])]
     df_landmarks = pd.DataFrame({
@@ -515,11 +633,35 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         eval_name: [f"LM {i+1:02d} ({lm_means[i]:.3f} ± {lm_stds[i]:.3f})" for i in worst_indices],
         f"{eval_name} (95%ile)": [round(lm_me_95[i], 3) for i in worst_indices]
     })
+    df_landmarks = pd.DataFrame({
+        "LM": [f"LM{i + 1:02d}" for i in range(lm_means.shape[0])],
+        "ME_mm": np.round(lm_means, 6),
+        "STD_mm": np.round(lm_stds, 6),
+        "ME +/- STD (mm)": [f"{lm_means[i]:.3f} +/- {lm_stds[i]:.3f}" for i in range(lm_means.shape[0])],
+        "Per-Landmark 95%ile (mm)": np.round(lm_me_95, 6),
+        "Surface Distance ME_mm": np.round(surface_lm_means, 6),
+        "Surface Distance STD_mm": np.round(surface_lm_stds, 6),
+        "Surface Distance ME +/- STD (mm)": [
+            f"{surface_lm_means[i]:.3f} +/- {surface_lm_stds[i]:.3f}"
+            for i in range(surface_lm_means.shape[0])
+        ],
+        "Surface Distance 95%ile (mm)": np.round(surface_lm_95, 6),
+    })
+    df_top10 = pd.DataFrame({
+        "Rank": [r + 1 for r in range(len(worst_indices))],
+        "LM": [f"LM{i + 1:02d}" for i in worst_indices],
+        "ME_mm": [round(float(lm_means[i]), 6) for i in worst_indices],
+        "STD_mm": [round(float(lm_stds[i]), 6) for i in worst_indices],
+        "ME +/- STD (mm)": [f"{lm_means[i]:.3f} +/- {lm_stds[i]:.3f}" for i in worst_indices],
+        "Per-Landmark 95%ile (mm)": [round(float(lm_me_95[i]), 6) for i in worst_indices],
+        "Surface Distance ME_mm": [round(float(surface_lm_means[i]), 6) for i in worst_indices],
+        "Surface Distance 95%ile (mm)": [round(float(surface_lm_95[i]), 6) for i in worst_indices],
+    })
 
     df_samples = pd.DataFrame(sample_records)
 
     write_dataframes_to_xlsx(
-        result_excel_path,
+        windows_write_path(result_excel_path),
         [
             ('1_Summary', df_summary),
             ('2_Per_Landmark', df_landmarks),
@@ -529,7 +671,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     )
 
     txt_path = result_excel_path.replace(".xlsx", ".txt")
-    with open(txt_path, 'w', encoding='utf-8') as f:
+    with open(windows_write_path(txt_path), 'w', encoding='utf-8') as f:
         f.write("==================================================\n")
         f.write(f" 🚀 Evaluation Summary: {eval_name} (Run ID: {target_folder_name})\n")
         f.write("==================================================\n\n")
@@ -553,6 +695,14 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         f.write(f"- Surface Sample-ME 95%ile   : {surface_sample_me_95:.4f} mm\n")
         f.write(f"- Surface Curvature Diff     : {avg_surface_curv_diff:.6f}\n")
         f.write(f"- Surface Direction Diff     : {avg_surface_dir_diff:.6f}\n")
+
+        f.write("\n[1-2. Coordinate Exports]\n")
+        f.write(f"- Predicted Coordinates CSV : {prediction_csv_relpath}\n")
+        f.write(f"- Landmark Mapping CSV      : {landmark_mapping_relpath}\n")
+        f.write(f"- LM ASC Directory          : {os.path.join('LM', short_eval_name)}\n")
+        f.write(f"- Sample 253 Pred ASC       : {sample_253_asc}\n")
+        f.write(f"- Sample 253 Error CSV      : {sample_253_error_csv}\n")
+        f.write("- Coordinate/Scale Note     : denormalized back to the input point-cloud coordinate system\n")
         
         f.write("\n[2. Per-Landmark Errors (All 36)]\n")
         for i in range(lm_means.shape[0]):
@@ -620,6 +770,6 @@ else:
     print(f"🚨 [ERROR] 가중치 파일을 찾을 수 없습니다: {target_weight_path}")
     sys.exit(1)
 
-evaluate_target_model(args.model, model, pipeline_mode)
+evaluate_target_model(eval_output_name, model, pipeline_mode)
 
 print("\n>>> [ALL EVALUATION COMPLETED]")
