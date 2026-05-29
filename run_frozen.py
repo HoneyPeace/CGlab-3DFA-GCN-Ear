@@ -80,6 +80,28 @@ def infer_run_info_from_dir(run_dir):
     train_len = match.group(1) if match else None
     return run_id, train_len
 
+def find_eval_artifacts(run_dir):
+    if not run_dir or not os.path.isdir(run_dir):
+        return [], []
+    files = os.listdir(run_dir)
+    xlsx_files = [f for f in files if f.endswith(".xlsx") and "Results" in f]
+    txt_files = [f for f in files if f.endswith(".txt") and "Results" in f]
+    return xlsx_files, txt_files
+
+def has_eval_artifacts(run_dir):
+    xlsx_files, txt_files = find_eval_artifacts(run_dir)
+    return bool(xlsx_files) and bool(txt_files)
+
+def assert_eval_artifacts(run_dir, label):
+    xlsx_files, txt_files = find_eval_artifacts(run_dir)
+    if not xlsx_files or not txt_files:
+        print(f"[ERROR] Evaluation artifacts missing after eval: {label}")
+        print(f"[ERROR] Run folder: {run_dir}")
+        print(f"[ERROR] Results Excel files: {xlsx_files}")
+        print(f"[ERROR] Results text files : {txt_files}")
+        sys.exit(1)
+    print(f"[CHECK] Evaluation artifacts found for {label}: {xlsx_files[-1]} / {txt_files[-1]}")
+
 def save_pipeline_command_txt():
     output_dir = os.path.join(os.getcwd(), "debug_outputs")
     os.makedirs(output_dir, exist_ok=True)
@@ -174,14 +196,12 @@ if __name__ == "__main__":
         
             p1_run_id, p1_train_len, p1_dir = get_latest_run(args.output_root, stage1_exp_name, tag=p1_tag, required_model=p1_model_name)
 
-    excel_exists = False
-    if p1_dir:
-        excel_exists = any(f.endswith('.xlsx') and 'Results' in f for f in os.listdir(p1_dir))
+    eval_artifacts_exist = has_eval_artifacts(p1_dir) if p1_dir else False
         
-    if not excel_exists and explicit_stage1_checkpoint_path:
-        print("[WARNING] Explicit Stage1 checkpoint has no Results Excel in its run folder.")
+    if not eval_artifacts_exist and explicit_stage1_checkpoint_path:
+        print("[WARNING] Explicit Stage1 checkpoint has no Results Excel/TXT in its run folder.")
         print("[WARNING] Run the PAConv-only command/eval first, or confirm this checkpoint was already evaluated.")
-    elif not excel_exists:
+    elif not eval_artifacts_exist:
         print(f"  └─ 🚀 PAConv 평가(eval.py) 시작...")
         stage1_eval_args = no_resample_args
         if stage1_exp_name != args.exp_name:
@@ -194,6 +214,7 @@ if __name__ == "__main__":
         if "--Eval_DataType" not in stage1_eval_args: paconv_eval_cmd.extend(["--Eval_DataType", "test"])
         try: subprocess.run(paconv_eval_cmd, check=True)
         except subprocess.CalledProcessError as e: sys.exit(1)
+        assert_eval_artifacts(p1_dir, "Stage1 PAConv")
 
     # =========================================================================
     # [BRIDGE] 가중치 파일 자동 복사
@@ -250,12 +271,12 @@ if __name__ == "__main__":
             p2_run_id, p2_train_len, p2_dir = get_latest_run(args.output_root, args.exp_name, tag=config['tag'], required_model=config['saved_name'])
 
         # 2. 평가 체크 & 실행
-        excel_exists = False
+        eval_artifacts_exist = False
         if p2_dir:
-            excel_exists = any(f.endswith('.xlsx') and 'Results' in f for f in os.listdir(p2_dir))
+            eval_artifacts_exist = has_eval_artifacts(p2_dir)
             
-        if excel_exists:
-            print(f"  └─ 📊 [SKIP] 기존 평가 결과(Excel) 발견!")
+        if eval_artifacts_exist:
+            print(f"  └─ 📊 [SKIP] 기존 평가 결과(Excel/TXT) 발견!")
         else:
             print(f"  └─ 🚀 {config['name']} 평가 시작...")
             deeppa_eval_cmd = [sys.executable, "eval.py"] + no_resample_args + [
@@ -270,6 +291,7 @@ if __name__ == "__main__":
                 
             try: subprocess.run(deeppa_eval_cmd, check=True)
             except subprocess.CalledProcessError as e: sys.exit(1)
+            assert_eval_artifacts(p2_dir, config['model'])
 
     print("\n===============================================================")
     print(f" 🎉 [PIPELINE SUCCESS] {current_inj_type.upper()} 주입 기반 3가지 Aux 모델 실험 완료!")

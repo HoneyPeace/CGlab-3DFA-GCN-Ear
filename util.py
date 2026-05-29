@@ -338,6 +338,55 @@ def landmark_regression(shape, Heatmap, regression_point_num, idx=None):
 
     return torch.from_numpy(landmark3D).unsqueeze(0).to(device)
 
+def get_rigid_original(src, dst):
+    src_mean = src.mean(0)
+    dst_mean = dst.mean(0)
+    H = reduce(lambda s, p: s + np.outer(p[0], p[1]), zip(src - src_mean, dst - dst_mean), np.zeros((3,3)))
+    u, s, v = np.linalg.svd(H)
+    R = v.T.dot(u.T)
+    T = - R.dot(src_mean) + dst_mean
+    return np.hstack((R, T[:, np.newaxis]))
+
+def landmark_regression_original(shape, Heatmap, regression_point_num):
+    """
+    Original 3DFA-GCN MDS landmark regression, kept separate from the stabilized
+    landmark_regression() path so previous experiment numbers remain comparable.
+    """
+    shape = shape.cpu().numpy()
+    Heatmap = Heatmap.cpu().numpy()
+    Heatmap_sort = np.sort(Heatmap, 0)
+    sortIdx = np.argsort(Heatmap, 0)
+    shape_sort_select = np.array([shape[sortIdx[-regression_point_num:, ld]] for ld in range(Heatmap.shape[1])])
+    Heatmap_sort_select = np.array([Heatmap[sortIdx[-regression_point_num:, ld], ld] for ld in range(Heatmap.shape[1])]).reshape(-1, regression_point_num, 1)
+
+    shape_sort_select_rep = np.expand_dims(shape_sort_select, axis=-1).repeat(regression_point_num, axis=-1)
+    shape2_exp_eer = shape_sort_select_rep.transpose(0, 1, 3, 2) - shape_sort_select_rep.transpose(0, 3, 1, 2)
+    D_Matrix = np.linalg.norm(shape2_exp_eer, axis=3)
+    Heatmap_weight = Heatmap_sort_select.repeat(regression_point_num, axis=-1)
+    Distance_matrix = D_Matrix
+    mds = MDS(n_components=2, dissimilarity='precomputed')
+    shape_MDS = np.array([mds.fit_transform(Distance_matrix[i]) for i in range(Heatmap.shape[1])])
+    shape_MDS = np.concatenate((shape_MDS, np.zeros((Heatmap.shape[1], regression_point_num, 1))), axis=2)
+    landmark2D = np.sum(Heatmap_sort_select.repeat(3, axis=2) * shape_MDS, axis=1) / Heatmap_sort_select.sum(1)
+    N = 6
+    neigh = NearestNeighbors(n_neighbors=N)
+    IDX = []
+    for i in range(Heatmap.shape[1]):
+        neigh.fit(shape_MDS[i])
+        IDX_ = neigh.kneighbors(landmark2D[i].reshape(1,-1))[1]
+        IDX.append(IDX_)
+    IDX = np.array(IDX)
+
+    shape_ext = np.array([shape_MDS[i, IDX[i], :].reshape(-1,3) - landmark2D[i].reshape(1,-1).repeat(N, axis=0) for i in range(Heatmap.shape[1])])
+    shape_ext_T = np.array([shape_sort_select[i, IDX[i], :] for i in range(Heatmap.shape[1])]).reshape(-1,N,3)
+    w1 = shape_ext - np.repeat(shape_ext.mean(1, keepdims=True), N, axis=1)
+    w2 = shape_ext_T - np.repeat(shape_ext_T.mean(1, keepdims=True), N, axis=1)
+    w1 = np.linalg.norm(w1.reshape(Heatmap.shape[1], -1), axis=1).reshape(-1, 1, 1)
+    w2 = np.linalg.norm(w2.reshape(Heatmap.shape[1], -1), axis=1).reshape(-1, 1, 1)
+    shape_ext = shape_ext * w2 / w1
+    landmark3D = np.array([get_rigid_original(shape_ext[i], shape_ext_T[i])[:, 3] for i in range(Heatmap.shape[1])])
+    return torch.from_numpy(landmark3D).unsqueeze(0).to(device)
+
 def get_3D_FAN_NME(pred_landmark, gt_landmark):
     NME_single = torch.sum(torch.norm(pred_landmark - gt_landmark, dim=2), 0)
     NME = torch.mean(NME_single)

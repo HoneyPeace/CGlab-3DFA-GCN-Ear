@@ -43,7 +43,8 @@ from loss import (
     CurvatureSurfaceLoss,
     SoftLocalCurvatureSurfaceLoss,
 )
-from util import landmark_regression
+from util import landmark_regression, landmark_regression_original
+from xlsx_utils import write_dataframes_to_xlsx
 from augmentations import normalize_data  # [핵심] 학습 코드와 정규화 동기화
 
 matplotlib.use('Agg')
@@ -184,7 +185,11 @@ class UniversalPipeline_Eval(nn.Module):
                 self.stage1_paconv = PAConv(args, landmark_num)
             self.stage2_deeppa = DeepPA_Wrapper(args, landmark_num)
         elif self.mode in ['single_paconv', 'single_paconv_heat']:
-            self.model = PAConv(args, landmark_num)
+            if is_original_github_stage1(args):
+                self.model = build_original_github_stage1(args, landmark_num)
+                print("[INFO] Single PAConv source: original_github (xyz-only latent)")
+            else:
+                self.model = PAConv(args, landmark_num)
         elif self.mode in ['single_deeppa', 'single_deepla']:
             self.model = DeepPA_Wrapper(args, landmark_num)
 
@@ -207,12 +212,14 @@ class UniversalPipeline_Eval(nn.Module):
     def forward(self, x):   
         points_xyz = x[:, :3, :].permute(0, 2, 1).contiguous()
         if self.mode in ['single_paconv', 'single_paconv_heat']:
-            multi_scale_hints, hm_raw = self.model(x)
+            stage1_input = get_stage1_input(self.args, x)
+            multi_scale_hints, hm_raw = self.model(stage1_input)
             k_val = getattr(self.args, 'regression_point_num', 10)
             coord_method = getattr(self.args, 'eval_heatmap_coord_method', 'topk').lower()
-            if coord_method == 'mds':
+            if coord_method in ['mds', 'mds_original']:
+                regression_fn = landmark_regression_original if coord_method == 'mds_original' else landmark_regression
                 pred_coords = torch.cat([
-                    landmark_regression(
+                    regression_fn(
                         points_xyz[sample_idx],
                         hm_raw[sample_idx].permute(1, 0).contiguous(),
                         k_val,
@@ -445,11 +452,15 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
 
     df_samples = pd.DataFrame(sample_records)
 
-    with pd.ExcelWriter(result_excel_path, engine='openpyxl') as writer:
-        df_summary.to_excel(writer, sheet_name='1_Summary', index=False)
-        df_landmarks.to_excel(writer, sheet_name='2_Per_Landmark', index=False)
-        df_top10.to_excel(writer, sheet_name='3_Top10_Hardest', index=False)
-        df_samples.to_excel(writer, sheet_name='4_Per_Sample', index=False)
+    write_dataframes_to_xlsx(
+        result_excel_path,
+        [
+            ('1_Summary', df_summary),
+            ('2_Per_Landmark', df_landmarks),
+            ('3_Top10_Hardest', df_top10),
+            ('4_Per_Sample', df_samples),
+        ]
+    )
 
     txt_path = result_excel_path.replace(".xlsx", ".txt")
     with open(txt_path, 'w', encoding='utf-8') as f:
@@ -490,6 +501,12 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 f"{sample_record['Mean_Error_mm']:.4f} mm "
                 f"({sample_record['Pred_ASC']})\n"
             )
+
+    if not os.path.exists(result_excel_path) or not os.path.exists(txt_path):
+        print("[ERROR] Evaluation artifacts were not written correctly.")
+        print(f"[ERROR] Results Excel path: {result_excel_path}")
+        print(f"[ERROR] Results text path : {txt_path}")
+        sys.exit(1)
 
     print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
     print(f"  └─ 📄 Text summary perfectly synchronized & saved to: {os.path.basename(txt_path)}")

@@ -264,7 +264,7 @@ class DeepPALossController:
         return total_loss, weights
 
     # 🌟 t_hm_PA 수신부 추가
-    def print_and_get_log(self, model_name, epoch, t_loss_n, t_mm, v_mm, weights, num_b, t_hm_main, t_hm_aux, t_crd, t_srf, t_str, t_hm_PA=0.0):
+    def print_and_get_log(self, model_name, epoch, t_loss_n, t_mm, v_mm, weights, num_b, t_hm_main, t_hm_aux, t_crd, t_srf, t_str, t_hm_PA=0.0, val_surface_mm=None):
         """모델별로 불필요한 값은 가리고, Str(관계로스)는 포함시켜 터미널 출력 및 엑셀 데이터 반환"""
         m_name = model_name.lower()
         
@@ -296,13 +296,15 @@ class DeepPALossController:
             l_str = f"PA_HM: {pa_hm_raw:.4f} | PA_HM*w: {pa_hm_weighted:.4f} | {l_str}"
 
         # 터미널 프린팅
-        print(f" [{model_name.upper()} Ep {epoch+1:03d}] Total_L: {t_loss_n/num_b:.4f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f} ")
+        val_surface_str = f" | Val_Surface_mm: {val_surface_mm:.2f}" if val_surface_mm is not None else ""
+        print(f" [{model_name.upper()} Ep {epoch+1:03d}] Total_L: {t_loss_n/num_b:.4f} | Train_mm: {t_mm:.2f} || Val_mm: {v_mm:.2f}{val_surface_str} ")
         print(f"  ├─ ⚙️ {w_str}")
         print(f"  └─ 🎯 [Loss] {l_str}")
 
         # 엑셀 데이터 반환
         log_record = {
             'Epoch': epoch + 1, 'Total_Loss': t_loss_n/num_b, 'Train_mm': t_mm, 'Val_mm': v_mm,
+            'Val_Surface_mm': val_surface_mm,
             'W_Main': weights.get('w_main', 0), 'W_Geom': weights.get('w_geom', 0), 'W_Aux': weights.get('w_hds', 0),
             'L_main_hm': t_hm_main/num_b, 'L_aux_hm': t_hm_aux/num_b, 
             'L_coord': t_crd/num_b, 'L_surface': t_srf/num_b, 'L_struct': t_str/num_b,

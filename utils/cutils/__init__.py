@@ -14,12 +14,26 @@ build_dir = path / "build"
 build_dir.mkdir(exist_ok=True)
 sources = [str(p) for p in path.glob("srcs/*.*") if p.suffix in [".cpp", ".cu"]]
 
+# pointnet2_ops may reset this to legacy GPU architectures during import.
+# Use the active CUDA device architecture for this local cutils JIT build.
+if torch.cuda.is_available():
+    major, minor = torch.cuda.get_device_capability()
+    os.environ["TORCH_CUDA_ARCH_LIST"] = os.environ.get(
+        "CUTILS_TORCH_CUDA_ARCH_LIST",
+        f"{major}.{minor}",
+    )
+
 # [PATCH] Use Windows-friendly compiler flags (/O2 for optimization, /wd4624 to suppress warnings)
 cutils = load(
     "cutils_", 
     sources=sources, 
     extra_cflags=['/O2', '/wd4624'], 
-    extra_cuda_cflags=['-O3'], 
+    extra_cuda_cflags=[
+        '-O3',
+        '-U__CUDA_NO_HALF_OPERATORS__',
+        '-U__CUDA_NO_HALF_CONVERSIONS__',
+        '-U__CUDA_NO_HALF2_OPERATORS__',
+    ],
     verbose=False
 )
 

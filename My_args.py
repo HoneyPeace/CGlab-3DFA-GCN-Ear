@@ -116,11 +116,17 @@ parser.add_argument('--paconv_heatmap_activation_mode', type=str, default='raw',
                     choices=['softmax', 'sigmoid', 'raw'],
                     help='Activation used for PAConv heatmap output; default keeps final PAConv heatmap logits raw')
 parser.add_argument('--paconv_feature_mode', type=str, default='center_geometry',
-                    choices=['center_geometry', 'full_extension'],
-                    help='PAConv 7ch edge feature mode: center_geometry uses XYZ relation plus center geometry; full_extension uses center/neighbor/delta for all input channels')
+                    choices=['center_geometry', 'original_center_geometry', 'full_extension', 'surface_pair_no_delta', 'neighbor_attr', 'neighbor_xyz'],
+                    help='PAConv 7ch edge feature mode: center_geometry uses XYZ relation plus center geometry; full_extension uses center/neighbor/delta for all input channels; surface_pair_no_delta uses delta XYZ plus neighbor/center attributes without subtracting dir/curv; neighbor_attr uses delta XYZ plus neighbor attributes; neighbor_xyz uses original PAConv/DGCNN 6ch edge input')
+parser.add_argument('--paconv_conv_feature_mode', type=str, default='',
+                    choices=['', 'center_geometry', 'original_center_geometry', 'full_extension', 'surface_pair_no_delta', 'neighbor_attr', 'neighbor_xyz'],
+                    help='Optional PAConv conv1 feature mode override; empty uses --paconv_feature_mode')
+parser.add_argument('--paconv_scorenet_feature_mode', type=str, default='',
+                    choices=['', 'center_geometry', 'original_center_geometry', 'full_extension', 'surface_pair_no_delta', 'neighbor_attr', 'neighbor_xyz'],
+                    help='Optional PAConv ScoreNet feature mode override; empty uses --paconv_feature_mode')
 parser.add_argument('--deeppa_feature_mode', type=str, default='center_geometry',
-                    choices=['center_geometry', 'full_extension'],
-                    help='DeepPA 7ch local feature mode: center_geometry uses XYZ relation plus center geometry; full_extension uses center/neighbor/delta for all input channels')
+                    choices=['center_geometry', 'full_extension', 'deepla_neighbor_attr', 'surface_pair_no_delta', 'center_attr', 'xyzlocal_neighbor_attr'],
+                    help='DeepPA 7ch local feature mode: center_geometry uses XYZ relation plus center geometry; full_extension uses center/neighbor/delta for all input channels; deepla_neighbor_attr uses relative XYZ plus neighbor dir/curv attributes; surface_pair_no_delta uses delta XYZ plus neighbor/center attributes without subtracting dir/curv; center_attr uses neighbor XYZ plus center dir/curv attributes; xyzlocal_neighbor_attr uses original XYZ-local descriptor plus neighbor dir/curv attributes')
 parser.add_argument('--heatmap_loss_mode', type=str, default='adaptive_wing',
                     choices=['adaptive_wing', 'softmax_ce'],
                     help='Heatmap supervision for main/aux heatmaps')
@@ -230,7 +236,7 @@ parser.add_argument('--plateau_step_size', type=float, default=0.1,
 
 parser.add_argument('--regression_point_num', type=int, default=10)
 parser.add_argument('--eval_heatmap_coord_method', type=str, default='topk',
-                    choices=['topk', 'mds'],
+                    choices=['topk', 'mds', 'mds_original'],
                     help='Evaluation heatmap-to-coordinate method for single PAConv heatmap models')
 parser.add_argument('--plane_knn', type=int, default=5)
 parser.add_argument('--curv_knn', type=int, default=30)

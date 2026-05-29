@@ -44,6 +44,14 @@ def knn(x, k):
 def get_edge_feature_channels(raw_channels, feature_mode='center_geometry'):
     if feature_mode == 'full_extension' and raw_channels > 3:
         return raw_channels * 3 + 1
+    if feature_mode == 'surface_pair_no_delta' and raw_channels > 3:
+        return raw_channels * 2 + 4
+    if feature_mode == 'original_center_geometry' and raw_channels > 3:
+        return 14
+    if feature_mode == 'neighbor_attr' and raw_channels > 3:
+        return raw_channels + 3
+    if feature_mode == 'neighbor_xyz' and raw_channels > 3:
+        return 6
     if raw_channels == 7:
         return 14
     if raw_channels == 6:
@@ -83,6 +91,27 @@ def get_graph_feature(x, k=20, idx=None, feature_mode='center_geometry'):
     if feature_mode == 'full_extension' and raw_channels > 3:
         relative_all = neighbor - center
         feature = torch.cat((relative_all, neighbor, center, dist), dim=3)
+
+    elif feature_mode == 'surface_pair_no_delta' and raw_channels > 3:
+        # Keep the edge relation purely geometric: delta XYZ only.
+        # Direction/curvature channels are passed as neighbor/center attributes,
+        # not subtracted, because PCA directions are sign-ambiguous axes.
+        feature = torch.cat((relative_xyz, neighbor, center, dist), dim=3)
+
+    elif feature_mode == 'original_center_geometry' and raw_channels > 3:
+        # Original PAConv ScoreNet order, with center geometry appended:
+        # center xyz + neighbor xyz + neighbor-center xyz + distance + center dir/curv.
+        center_geom = center[..., 3:]
+        feature = torch.cat((center_xyz, neighbor_xyz, relative_xyz, dist, center_geom), dim=3)
+
+    elif feature_mode == 'neighbor_attr' and raw_channels > 3:
+        # PAConv conv branch variant: original edge relation plus neighbor attributes.
+        # For 7ch input this is delta XYZ 3ch + neighbor XYZ/dir/curv 7ch = 10ch.
+        feature = torch.cat((relative_xyz, neighbor), dim=3)
+
+    elif feature_mode == 'neighbor_xyz' and raw_channels > 3:
+        # Original PAConv/DGCNN edge input: delta XYZ 3ch + neighbor XYZ 3ch = 6ch.
+        feature = torch.cat((relative_xyz, neighbor_xyz), dim=3)
 
     elif target_edge_channels == 14:
         # 곡률 및 방향(4채널) 차이 계산 -> 엣지 피처 14채널

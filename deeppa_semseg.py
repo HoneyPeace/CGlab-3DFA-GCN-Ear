@@ -166,10 +166,16 @@ class Stage_PA(nn.Module):
             nbr_hid_dim = args.nbr_dims[0]
             in_channels = getattr(args, 'in_channels', 3)
             self.deeppa_feature_mode = getattr(args, 'deeppa_feature_mode', 'center_geometry').lower()
-            if self.deeppa_feature_mode not in ('center_geometry', 'full_extension'):
+            if self.deeppa_feature_mode not in ('center_geometry', 'full_extension', 'deepla_neighbor_attr', 'surface_pair_no_delta', 'center_attr', 'xyzlocal_neighbor_attr'):
                 raise ValueError(f"Unknown deeppa_feature_mode: {self.deeppa_feature_mode}")
             if in_channels == 7 and self.deeppa_feature_mode == 'full_extension':
                 in_feat_dim = 22
+            elif in_channels == 7 and self.deeppa_feature_mode == 'surface_pair_no_delta':
+                in_feat_dim = 18
+            elif in_channels == 7 and self.deeppa_feature_mode in ('deepla_neighbor_attr', 'center_attr'):
+                in_feat_dim = 7
+            elif in_channels == 7 and self.deeppa_feature_mode == 'xyzlocal_neighbor_attr':
+                in_feat_dim = 14
             else:
                 in_feat_dim = 14 if in_channels == 7 else (13 if in_channels == 6 else 10)
             
@@ -301,6 +307,19 @@ class Stage_PA(nn.Module):
                 center = x.unsqueeze(2).expand(-1, -1, self.k, -1)
                 if self.deeppa_feature_mode == 'full_extension':
                     nbr = torch.cat([x_knn - center, x_knn, center, dist], dim=-1).view(-1, 22)
+                elif self.deeppa_feature_mode == 'surface_pair_no_delta':
+                    # Use only XYZ for the edge delta; dir/curv are attributes, not vector differences.
+                    nbr = torch.cat([nbr_rel, x_knn, center, dist], dim=-1).view(-1, 18)
+                elif self.deeppa_feature_mode == 'deepla_neighbor_attr':
+                    # Original DeepLA first-stage pattern: relative XYZ plus grouped neighbor attributes.
+                    neighbor_geom = x_knn[..., 3:]
+                    nbr = torch.cat([nbr_rel, neighbor_geom], dim=-1).view(-1, 7)
+                elif self.deeppa_feature_mode == 'center_attr':
+                    center_geom = x[:, :, 3:].unsqueeze(2).expand(-1, -1, self.k, -1)
+                    nbr = torch.cat([x_knn[..., :3], center_geom], dim=-1).view(-1, 7)
+                elif self.deeppa_feature_mode == 'xyzlocal_neighbor_attr':
+                    # Original XYZ-local descriptor plus neighbor dir/curv attributes.
+                    nbr = torch.cat([nbr_rel, x_knn, dist, vector], dim=-1).view(-1, 14)
                 else:
                     center_xyz = xyz.unsqueeze(2).expand(-1, -1, self.k, -1)
                     center_geom = x[:, :, 3:].unsqueeze(2).expand(-1, -1, self.k, -1)

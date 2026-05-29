@@ -35,14 +35,17 @@ class PAConv(nn.Module):
         # 🌟 파라미터 단일화 반영
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
         self.paconv_feature_mode = getattr(args, 'paconv_feature_mode', 'center_geometry').lower()
+        self.paconv_conv_feature_mode = (getattr(args, 'paconv_conv_feature_mode', '') or self.paconv_feature_mode).lower()
+        self.paconv_scorenet_feature_mode = (getattr(args, 'paconv_scorenet_feature_mode', '') or self.paconv_feature_mode).lower()
         
         in_channels = getattr(args, 'in_channels', 3)
-        self.edge_channels = get_edge_feature_channels(in_channels, self.paconv_feature_mode)
+        self.edge_channels = get_edge_feature_channels(in_channels, self.paconv_conv_feature_mode)
+        self.scorenet_channels = get_edge_feature_channels(in_channels, self.paconv_scorenet_feature_mode)
         
-        self.scorenet2 = ScoreNet(self.edge_channels, self.m2, hidden_unit=self.hidden[0])
-        self.scorenet3 = ScoreNet(self.edge_channels, self.m3, hidden_unit=self.hidden[1])
-        self.scorenet4 = ScoreNet(self.edge_channels, self.m4, hidden_unit=self.hidden[2])
-        self.scorenet5 = ScoreNet(self.edge_channels, self.m5, hidden_unit=self.hidden[3])
+        self.scorenet2 = ScoreNet(self.scorenet_channels, self.m2, hidden_unit=self.hidden[0])
+        self.scorenet3 = ScoreNet(self.scorenet_channels, self.m3, hidden_unit=self.hidden[1])
+        self.scorenet4 = ScoreNet(self.scorenet_channels, self.m4, hidden_unit=self.hidden[2])
+        self.scorenet5 = ScoreNet(self.scorenet_channels, self.m5, hidden_unit=self.hidden[3])
 
         self.bn1 = nn.BatchNorm2d(64)
         self.conv1 = nn.Sequential(
@@ -101,8 +104,11 @@ class PAConv(nn.Module):
         xyz_coords = xyz[:, :3, :].contiguous() 
         idx, _ = knn(xyz_coords, self.k)
 
-        x_edge_feat = get_graph_feature(xyz, k=self.k, idx=idx, feature_mode=self.paconv_feature_mode)
-        scorenet_input = get_scorenet_input(x_edge_feat, idx=idx, k=self.k)
+        x_edge_feat = get_graph_feature(xyz, k=self.k, idx=idx, feature_mode=self.paconv_conv_feature_mode)
+        if self.paconv_scorenet_feature_mode == self.paconv_conv_feature_mode:
+            scorenet_input = get_scorenet_input(x_edge_feat, idx=idx, k=self.k)
+        else:
+            scorenet_input = get_graph_feature(xyz, k=self.k, idx=idx, feature_mode=self.paconv_scorenet_feature_mode)
 
         x1 = self.conv1(x_edge_feat).max(dim=-1, keepdim=False)[0]
 

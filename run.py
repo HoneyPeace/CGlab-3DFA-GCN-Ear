@@ -15,7 +15,7 @@ if hasattr(sys.stderr, "reconfigure"):
 def get_latest_run_info(output_root, exp_name, tag=None):
     project_dir = os.path.join(output_root, exp_name)
     if not os.path.exists(project_dir):
-        return None, None
+        return None, None, None
 
     subdirs = [
         os.path.join(project_dir, d)
@@ -25,7 +25,7 @@ def get_latest_run_info(output_root, exp_name, tag=None):
     if tag:
         subdirs = [d for d in subdirs if tag in os.path.basename(d)]
     if not subdirs:
-        return None, None
+        return None, None, None
 
     def get_actual_mtime(folder):
         latest_time = os.path.getmtime(folder)
@@ -48,7 +48,27 @@ def get_latest_run_info(output_root, exp_name, tag=None):
 
     match = re.search(r"_train(\d+)", folder_name)
     train_len = match.group(1) if match else None
-    return run_id, train_len
+    return run_id, train_len, latest_subdir
+
+
+def find_eval_artifacts(run_dir):
+    if not run_dir or not os.path.isdir(run_dir):
+        return [], []
+    files = os.listdir(run_dir)
+    xlsx_files = [f for f in files if f.endswith(".xlsx") and "Results" in f]
+    txt_files = [f for f in files if f.endswith(".txt") and "Results" in f]
+    return xlsx_files, txt_files
+
+
+def assert_eval_artifacts(run_dir):
+    xlsx_files, txt_files = find_eval_artifacts(run_dir)
+    if not xlsx_files or not txt_files:
+        print("[ERROR] Evaluation artifacts missing after eval.")
+        print(f"[ERROR] Run folder: {run_dir}")
+        print(f"[ERROR] Results Excel files: {xlsx_files}")
+        print(f"[ERROR] Results text files : {txt_files}")
+        sys.exit(1)
+    print(f"[CHECK] Evaluation artifacts found: {xlsx_files[-1]} / {txt_files[-1]}")
 
 
 def has_arg(args_list, flag):
@@ -129,7 +149,7 @@ if __name__ == "__main__":
         print(f"\n[ERROR] Training failed, stopping pipeline: {e}")
         sys.exit(1)
 
-    run_id, train_len = get_latest_run_info(args.output_root, args.exp_name, tag=user_tag)
+    run_id, train_len, run_dir = get_latest_run_info(args.output_root, args.exp_name, tag=user_tag)
     if not run_id:
         print("\n[ERROR] Could not find the newly created training run folder.")
         sys.exit(1)
@@ -147,6 +167,7 @@ if __name__ == "__main__":
     eval_cmd = [sys.executable, "eval.py"] + eval_args
     try:
         subprocess.run(eval_cmd, check=True)
+        assert_eval_artifacts(run_dir)
         print("\n===============================================================")
         print(" [PIPELINE SUCCESS] Training and evaluation completed.")
         print("===============================================================")

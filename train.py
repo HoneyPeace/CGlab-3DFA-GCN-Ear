@@ -42,6 +42,7 @@ from loss import (
 from loss import DeepPA_HierarchicalHeatmapLoss 
 from util import landmark_regression, main_sample
 from augmentations import normalize_data, PointcloudScaleAndTranslate, PointcloudJitter
+from xlsx_utils import write_dataframes_to_xlsx
 
 from PAConv_model import PAConv
 from DeepPA_model import DeepPA_Wrapper  
@@ -412,6 +413,7 @@ def train(args):
 
     excel_log_path = os.path.join(paths['root'], f'Training_Log_{m_name}.xlsx')
     log_records = []
+    excel_log_enabled = True
 
     # 🌟 2. 외부 로스 컨트롤러 장착 (파라미터 연동 강화)
     loss_controller = DeepPALossController(
@@ -596,6 +598,7 @@ def train(args):
         # ----------------------------------------------------
         model.eval()
         val_mm_total, val_landmarks = 0.0, 0
+        val_surface_mm_list = []
         with torch.no_grad():
             for point, landmark, seg in val_loader:
                 point, landmark, seg = point.to(device), landmark.to(device), seg.to(device)
@@ -614,12 +617,12 @@ def train(args):
                     if residual_max_mm > 0.0 and hasattr(model, 'set_residual_limit_norm'):
                         model.set_residual_limit_norm(residual_max_mm / max(float(avg_m), 1e-6))
                 pred_coords, _, val_hm = model(point_input)
+                points_norm_xyz = point_input[:, :3, :].permute(0, 2, 1).contiguous()
                 if (
                     pipeline_mode in ['single_paconv', 'single_paconv_heat']
                     and getattr(args, 'eval_heatmap_coord_method', 'topk').lower() == 'mds'
                     and val_hm is not None
                 ):
-                    points_norm_xyz = point_input[:, :3, :].permute(0, 2, 1).contiguous()
                     pred_coords = torch.cat([
                         landmark_regression(
                             points_norm_xyz[sample_idx],
@@ -628,12 +631,20 @@ def train(args):
                         ).to(points_norm_xyz.device, dtype=points_norm_xyz.dtype)
                         for sample_idx in range(points_norm_xyz.size(0))
                     ], dim=0)
+                _, val_p2p_norm, _, _ = surface_criterion(
+                    pred_coords,
+                    landmark_normal.view_as(pred_coords),
+                    points_norm_xyz,
+                    disable_norm=False,
+                )
+                val_surface_mm_list.append(float(val_p2p_norm.item()) * float(avg_m))
                 pred_landmark = pred_coords * scale.view(B_val, 1, 1) + centroid
                 val_dists = torch.linalg.vector_norm(pred_landmark - landmark.view_as(pred_landmark), dim=2)
                 val_mm_total += val_dists.sum().item()
                 val_landmarks += val_dists.numel()
         
         v_mm = val_mm_total / val_landmarks if val_landmarks > 0 else 0.0
+        v_surface_mm = float(np.mean(val_surface_mm_list)) if val_surface_mm_list else 0.0
 
         # ========================================================
         # 🔄 6. 컨트롤러에 Val_mm 전달하여 Patience 스케줄러 작동
@@ -646,12 +657,19 @@ def train(args):
         # ----------------------------------------------------
         log_record = loss_controller.print_and_get_log(
             m_name, epoch, t_loss_n, t_mm/num_b, v_mm, weights, num_b, 
-            t_hm_main, t_hm_aux, t_crd, t_srf, t_str, t_hm_PA
+            t_hm_main, t_hm_aux, t_crd, t_srf, t_str, t_hm_PA, v_surface_mm
         )
         
         log_records.append(log_record)
-        with pd.ExcelWriter(excel_log_path, engine='openpyxl') as writer:
-            pd.DataFrame(log_records).to_excel(writer, sheet_name='Training_Log', index=False)
+        if excel_log_enabled:
+            try:
+                write_dataframes_to_xlsx(
+                    excel_log_path,
+                    [('Training_Log', pd.DataFrame(log_records))]
+                )
+            except Exception as e:
+                print(f"[ERROR] Excel training log write failed: {type(e).__name__}: {e}")
+                raise
 
         scheduler.step()
 
