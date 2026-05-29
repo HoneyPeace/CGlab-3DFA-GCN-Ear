@@ -61,6 +61,27 @@ def shorten_heatmap_name(name, max_len=24):
         return safe_name
     return safe_name[:max_len]
 
+def compute_surface_normal_distances_mm(pred_coords_norm, gt_coords_norm, points_norm, scale, k_p2p):
+    dist_matrix = torch.cdist(gt_coords_norm, points_norm)
+    _, knn_indices = torch.topk(dist_matrix, k_p2p, dim=2, largest=False)
+    idx_expanded = knn_indices.unsqueeze(-1).expand(-1, -1, -1, 3)
+    points_expanded = points_norm.unsqueeze(1).expand(-1, gt_coords_norm.size(1), -1, -1)
+    knn_p2p_gt = torch.gather(points_expanded, 2, idx_expanded)
+
+    center_p2p_gt = knn_p2p_gt.mean(dim=2, keepdim=True)
+    centered = knn_p2p_gt - center_p2p_gt
+    cov_p2p_gt = torch.matmul(centered.transpose(2, 3), centered)
+    _, eigvec_p2p_gt = torch.linalg.eigh(cov_p2p_gt)
+    normal_gt = eigvec_p2p_gt[..., 0]
+
+    distance_norm = torch.abs(
+        torch.sum(
+            (pred_coords_norm - center_p2p_gt.squeeze(2).detach()) * normal_gt.detach(),
+            dim=-1,
+        )
+    )
+    return distance_norm * scale.view(-1, 1)
+
 def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx, prefix):
     os.makedirs(save_dir, exist_ok=True)
     fig = plt.figure(figsize=(30, 10))
@@ -283,6 +304,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             beta=args.dir_beta,
         ).to(device)
     surface_loss_list, surface_p2p_mm_list = [], []
+    surface_distance_sample_me_list, surface_distance_lm_list = [], []
     surface_curv_diff_list, surface_dir_diff_list = [], []
     
     eval_model.eval()
@@ -331,6 +353,19 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             surface_p2p_mm_list.append(surface_p2p_mm)
             surface_curv_diff_list.append(float(curv_diff.item()))
             surface_dir_diff_list.append(float(dir_diff.item()))
+            surface_distance_mm = compute_surface_normal_distances_mm(
+                pred_coords_norm,
+                gt_landmark_norm.view_as(pred_coords_norm),
+                points_for_surface,
+                scale.view(-1),
+                args.plane_knn,
+            )
+            surface_distance_np = surface_distance_mm.detach().cpu().numpy().squeeze(0)
+            surface_distance_sample_me = float(np.mean(surface_distance_np))
+            surface_distance_sample_std = float(np.std(surface_distance_np))
+            surface_distance_sample_95 = float(np.percentile(surface_distance_np, 95))
+            surface_distance_sample_me_list.append(surface_distance_sample_me)
+            surface_distance_lm_list.append(surface_distance_np)
             
             # [히트맵 품질 추출]
             if pipeline_mode in ['single_paconv', 'single_paconv_heat']:
@@ -381,6 +416,9 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 "Sample_Name": real_name,
                 "Mean_Error_mm": round(float(me), 6),
                 "Surface_Normal_Distance_mm": round(float(surface_p2p_mm), 6),
+                "Surface_Distance_ME_mm": round(surface_distance_sample_me, 6),
+                "Surface_Distance_STD_mm": round(surface_distance_sample_std, 6),
+                "Surface_Distance_95ile_mm": round(surface_distance_sample_95, 6),
                 "Surface_Loss_Norm": round(float(L_srf.item()), 6),
                 "Surface_Curvature_Diff": round(float(curv_diff.item()), 6),
                 "Surface_Direction_Diff": round(float(dir_diff.item()), 6),
@@ -388,6 +426,8 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             }
             for lm_idx, dist in enumerate(dists):
                 sample_record[f"LM{lm_idx + 1:02d}_Error_mm"] = round(float(dist), 6)
+            for lm_idx, surface_dist in enumerate(surface_distance_np):
+                sample_record[f"LM{lm_idx + 1:02d}_Surface_Distance_mm"] = round(float(surface_dist), 6)
             sample_records.append(sample_record)
 
     # ------------------ 지표 산출 및 리포팅 ------------------
@@ -400,6 +440,23 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     avg_surface_p2p_mm = np.mean(surface_p2p_mm_list) if surface_p2p_mm_list else 0.0
     avg_surface_curv_diff = np.mean(surface_curv_diff_list) if surface_curv_diff_list else 0.0
     avg_surface_dir_diff = np.mean(surface_dir_diff_list) if surface_dir_diff_list else 0.0
+    if surface_distance_lm_list:
+        surface_distance_array = np.stack(surface_distance_lm_list, axis=0)
+        surface_lm_means = np.mean(surface_distance_array, axis=0)
+        surface_lm_stds = np.std(surface_distance_array, axis=0)
+        surface_lm_95 = np.percentile(surface_distance_array, 95, axis=0)
+        surface_distance_me = float(np.mean(surface_distance_array))
+        surface_distance_std = float(np.std(surface_distance_array))
+        surface_distance_95 = float(np.percentile(surface_distance_array, 95))
+        surface_sample_me_95 = float(np.percentile(surface_distance_sample_me_list, 95))
+    else:
+        surface_lm_means = np.zeros(args.landmark_num)
+        surface_lm_stds = np.zeros(args.landmark_num)
+        surface_lm_95 = np.zeros(args.landmark_num)
+        surface_distance_me = 0.0
+        surface_distance_std = 0.0
+        surface_distance_95 = 0.0
+        surface_sample_me_95 = 0.0
 
     if len(per_landmark_me_list) > 0:
         per_landmark_me_array = np.stack(per_landmark_me_list, axis=0)
@@ -423,7 +480,9 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             "Cosine Sim (%), ", "95%ile Cosine (%)", "mIoU (@0.1, %)", 
             "95%ile mIoU (%)", "Success Rate (<10mm, %)", "Success Rate (<5mm, %)",
             "[Surface Diagnostics]", "Surface Loss Mode", "Surface Loss (norm)",
-            "Surface Normal Distance (mm)", "Surface Curvature Diff", "Surface Direction Diff"
+            "Surface Normal Distance (mm)", "Surface Distance ME (mm)",
+            "Surface Distance Std (mm)", "Surface Distance 95%ile (mm)",
+            "Surface Sample-ME 95%ile (mm)", "Surface Curvature Diff", "Surface Direction Diff"
         ],
         eval_name: [
             "", args.exp_name, target_folder_name, eval_name,
@@ -431,7 +490,9 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             round(avg_cos_sim, 2), round(cos_sim_5_global, 2), round(avg_iou, 2), 
             round(iou_5_global, 2), round(sr_10, 2), round(sr_5, 2),
             "", surface_loss_mode, round(avg_surface_loss, 6),
-            round(avg_surface_p2p_mm, 4), round(avg_surface_curv_diff, 6),
+            round(avg_surface_p2p_mm, 4), round(surface_distance_me, 4),
+            round(surface_distance_std, 4), round(surface_distance_95, 4),
+            round(surface_sample_me_95, 4), round(avg_surface_curv_diff, 6),
             round(avg_surface_dir_diff, 6)
         ]
     }
@@ -441,7 +502,12 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     df_landmarks = pd.DataFrame({
         "LM": [f"{i+1:02d}" for i in range(lm_means.shape[0])],
         f"{eval_name} (Mean ± Std)": lm_me_combined,
-        f"{eval_name} (95%ile)": np.round(lm_me_95, 3)
+        f"{eval_name} (95%ile)": np.round(lm_me_95, 3),
+        "Surface Distance (Mean +/- Std)": [
+            f"{surface_lm_means[i]:.3f} +/- {surface_lm_stds[i]:.3f}"
+            for i in range(surface_lm_means.shape[0])
+        ],
+        "Surface Distance (95%ile)": np.round(surface_lm_95, 3)
     })
 
     df_top10 = pd.DataFrame({
@@ -482,12 +548,20 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         f.write(f"- Surface Loss Mode          : {surface_loss_mode}\n")
         f.write(f"- Surface Loss (norm)        : {avg_surface_loss:.6f}\n")
         f.write(f"- Surface Normal Distance    : {avg_surface_p2p_mm:.4f} mm\n")
+        f.write(f"- Surface Distance ME        : {surface_distance_me:.4f} +/- {surface_distance_std:.4f} mm\n")
+        f.write(f"- Surface Distance 95%ile    : {surface_distance_95:.4f} mm\n")
+        f.write(f"- Surface Sample-ME 95%ile   : {surface_sample_me_95:.4f} mm\n")
         f.write(f"- Surface Curvature Diff     : {avg_surface_curv_diff:.6f}\n")
         f.write(f"- Surface Direction Diff     : {avg_surface_dir_diff:.6f}\n")
         
         f.write("\n[2. Per-Landmark Errors (All 36)]\n")
         for i in range(lm_means.shape[0]):
-            f.write(f"  LM {i+1:02d} : {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm  (95%ile: {lm_me_95[i]:.3f} mm)\n")
+            f.write(
+                f"  LM {i+1:02d} : {lm_means[i]:.3f} ± {lm_stds[i]:.3f} mm "
+                f"(95%ile: {lm_me_95[i]:.3f} mm) | "
+                f"Surface: {surface_lm_means[i]:.3f} +/- {surface_lm_stds[i]:.3f} mm "
+                f"(95%ile: {surface_lm_95[i]:.3f} mm)\n"
+            )
             
         f.write("\n[3. Top 10 Hardest Landmarks (Worst Error)]\n")
         for r, i in enumerate(worst_indices):
@@ -511,6 +585,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
     print(f"  └─ 📄 Text summary perfectly synchronized & saved to: {os.path.basename(txt_path)}")
     print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
+    print(f"Surface Distance: {surface_distance_me:.4f} +/- {surface_distance_std:.4f} (95%ile: {surface_distance_95:.4f} mm)")
 
 # -----------------------------------------------------------------------------
 # 4. 모델 로드 및 평가 분기
