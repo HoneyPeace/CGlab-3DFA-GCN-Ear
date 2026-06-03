@@ -165,7 +165,10 @@ class DeepPALossController:
             rand_weights = rand_weights / rand_weights.sum().clamp_min(1e-8)
             L_pred = rand_weights[0] * L_crd + rand_weights[1] * L_srf + rand_weights[2] * L_str
         else:
-            L_pred = L_crd + L_srf + L_str 
+            coord_w = getattr(self, 'coord_term_weight', 1.0)
+            surface_w = getattr(self, 'surface_term_weight', 1.0)
+            struct_w = getattr(self, 'struct_term_weight', 1.0)
+            L_pred = coord_w * L_crd + surface_w * L_srf + struct_w * L_str
         
         # 기본값 세팅
         w_hds = self.base_hds

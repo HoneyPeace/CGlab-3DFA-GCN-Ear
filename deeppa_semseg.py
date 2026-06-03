@@ -124,6 +124,7 @@ class Stage_PA(nn.Module):
         # 🌟 1. 옵션 파라미터 단일화 (3지 선다형 문자열 기반)
         # =====================================================================
         self.injection_type = getattr(args, 'latent_injection_type', 'raw').lower()
+        self.latent_fusion_mode = getattr(args, 'latent_fusion_mode', 'auto').lower()
         self.use_feature_gating = getattr(args, 'use_feature_gating', False) 
         self.use_interaction_fusion = getattr(args, 'use_interaction_fusion', True)
         self.fusion_residual_base = getattr(args, 'fusion_residual_base', 'deeppa').lower()
@@ -155,7 +156,7 @@ class Stage_PA(nn.Module):
                     nn.BatchNorm1d(dim, momentum=args.bn_momentum),
                     nn.Sigmoid() 
                 )
-            if self.use_interaction_fusion:
+            if self.use_interaction_fusion or self.latent_fusion_mode in ('residual', 'concat'):
                 self.fusion_mlp = nn.Sequential(
                     nn.Linear(dim * 2, dim, bias=False),
                     nn.BatchNorm1d(dim, momentum=args.bn_momentum),
@@ -345,14 +346,29 @@ class Stage_PA(nn.Module):
                 # Linear는 (B, N, C) 입력 필요. 힌트는 이미 (B, N, C) 상태임.
                 p_feat = self.prior_proj(current_stage_hint)
             
-            if self.use_interaction_fusion:
+            if self.latent_fusion_mode == 'auto':
+                use_interaction_fusion = self.use_interaction_fusion
+                use_feature_gating = self.use_feature_gating
+            elif self.latent_fusion_mode == 'residual':
+                use_interaction_fusion = True
+                use_feature_gating = False
+            elif self.latent_fusion_mode in ('concat', 'add'):
+                use_interaction_fusion = False
+                use_feature_gating = False
+            else:
+                raise ValueError(f"Unknown latent_fusion_mode: {self.latent_fusion_mode}")
+
+            if self.latent_fusion_mode == 'concat':
+                fused = torch.cat([x, p_feat], dim=-1)
+                x = self.fusion_mlp(fused.view(-1, fused.shape[-1])).view(B, N, -1)
+            elif use_interaction_fusion:
                 fused = torch.cat([x, p_feat], dim=-1)
                 mixed_residual = self.fusion_mlp(fused.view(-1, fused.shape[-1])).view(B, N, -1)
                 if self.fusion_residual_base == 'prior':
                     x = p_feat + mixed_residual
                 else:
                     x = x + mixed_residual
-            elif self.use_feature_gating:
+            elif use_feature_gating:
                 fused_for_gate = torch.cat([x, p_feat], dim=-1) 
                 gate_matrix = self.gate_mlp(fused_for_gate.view(-1, fused_for_gate.shape[-1])).view(B, N, -1)
                 x = x + (gate_matrix * p_feat) 

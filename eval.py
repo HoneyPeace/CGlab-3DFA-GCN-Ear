@@ -537,12 +537,29 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     if len(per_landmark_me_list) > 0:
         per_landmark_me_array = np.stack(per_landmark_me_list, axis=0)
         lm_means, lm_stds, lm_me_95 = np.mean(per_landmark_me_array, axis=0), np.std(per_landmark_me_array, axis=0), np.percentile(per_landmark_me_array, 95, axis=0)
-        average_me, std_me, me_95_global = np.mean(lm_means), np.mean(lm_stds), np.percentile(me_list, 95)
+        flat_me_values = per_landmark_me_array.reshape(-1)
+        flat_me_values = flat_me_values[np.isfinite(flat_me_values)]
+        sample_me_values = np.array(me_list)
+        average_me, std_me = np.mean(flat_me_values), np.std(flat_me_values)
+        sample_me_95_global = np.percentile(sample_me_values, 95)
+        flat_me_95_global = np.percentile(flat_me_values, 95)
+        me_95_global = flat_me_95_global
+        flat_me_top5_mean = np.mean(flat_me_values[flat_me_values >= flat_me_95_global])
+        sr_2_flat = np.sum(flat_me_values < 2.0) / len(flat_me_values) * 100
+        sr_3_flat = np.sum(flat_me_values < 3.0) / len(flat_me_values) * 100
+        sr_5_flat = np.sum(flat_me_values < 5.0) / len(flat_me_values) * 100
+        fr_2_flat = 100.0 - sr_2_flat
+        fr_3_flat = 100.0 - sr_3_flat
+        fr_5_flat = 100.0 - sr_5_flat
         sr_10 = np.sum(np.array(me_list) < 10.0) / len(me_list) * 100
         sr_5  = np.sum(np.array(me_list) < 5.0) / len(me_list) * 100
         worst_indices = np.argsort(lm_means)[::-1][:10]
     else:
         average_me, std_me, me_95_global, sr_10, sr_5 = 0.0, 0.0, 0.0, 0.0, 0.0
+        sample_me_95_global = 0.0
+        flat_me_95_global, flat_me_top5_mean = 0.0, 0.0
+        sr_2_flat, sr_3_flat, sr_5_flat = 0.0, 0.0, 0.0
+        fr_2_flat, fr_3_flat, fr_5_flat = 0.0, 0.0, 0.0
         lm_means, lm_stds, lm_me_95 = np.zeros(args.landmark_num), np.zeros(args.landmark_num), np.zeros(args.landmark_num)
         worst_indices = np.arange(10)
 
@@ -586,7 +603,12 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         "Metric": [
             "[Metadata]", "Experiment", "Run ID", "Model", "Eval Split",
             "[Coordinate Error]", "Average ME (mm)", "Average Std (mm)",
-            "95%ile ME (sample mean, mm)", "SR@10mm (%)", "SR@5mm (%)",
+            "Average Mode", "P95 ME (flat LM error, mm)",
+            "P95 Surface Distance (flat LM, mm)", "Sample-mean P95 ME (legacy, mm)",
+            "Top 5% ME Mean (flat LM error, mm)",
+            "SR@2mm (flat LM, %)", "SR@3mm (flat LM, %)", "SR@5mm (flat LM, %)",
+            "FR@2mm (flat LM, %)", "FR@3mm (flat LM, %)", "FR@5mm (flat LM, %)",
+            "SR@10mm (sample mean, %)", "SR@5mm (sample mean, %)",
             "Average Inference Time (ms)",
             "[Heatmap]", "Heatmap Cosine Sim (%)", "95%ile Cosine (%)",
             "mIoU (@0.1, %)", "95%ile mIoU (%)",
@@ -601,7 +623,12 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         eval_name: [
             "", args.exp_name, target_folder_name, eval_name, eval_datatype,
             "", round(average_me, 4), round(std_me, 4),
-            round(me_95_global, 4), round(sr_10, 2), round(sr_5, 2),
+            "flat landmark error", round(me_95_global, 4),
+            round(surface_distance_95, 4), round(sample_me_95_global, 4),
+            round(flat_me_top5_mean, 4),
+            round(sr_2_flat, 2), round(sr_3_flat, 2), round(sr_5_flat, 2),
+            round(fr_2_flat, 2), round(fr_3_flat, 2), round(fr_5_flat, 2),
+            round(sr_10, 2), round(sr_5, 2),
             round(avg_time, 2),
             "", round(avg_cos_sim, 2), round(cos_sim_5_global, 2),
             round(avg_iou, 2), round(iou_5_global, 2),
@@ -685,6 +712,13 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
         f.write(f"- 95%ile ME              : {me_95_global:.4f} mm\n")
         f.write(f"- Success Rate (<10mm)   : {sr_10:.2f} %\n")
         f.write(f"- Success Rate (<5mm)    : {sr_5:.2f} %\n")
+        f.write(f"- Average Mode           : flat landmark error\n")
+        f.write(f"- P95 ME (flat LM)       : {me_95_global:.4f} mm\n")
+        f.write(f"- P95 Surface Distance   : {surface_distance_95:.4f} mm\n")
+        f.write(f"- Sample-mean P95 ME (legacy): {sample_me_95_global:.4f} mm\n")
+        f.write(f"- Top 5% ME Mean (flat LM): {flat_me_top5_mean:.4f} mm\n")
+        f.write(f"- SR@2/3/5mm (flat LM)   : {sr_2_flat:.2f} / {sr_3_flat:.2f} / {sr_5_flat:.2f} %\n")
+        f.write(f"- FR@2/3/5mm (flat LM)   : {fr_2_flat:.2f} / {fr_3_flat:.2f} / {fr_5_flat:.2f} %\n")
 
         f.write("\n[1-1. Surface Diagnostics]\n")
         f.write(f"- Surface Loss Mode          : {surface_loss_mode}\n")
@@ -735,6 +769,7 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
     print(f"\n[{eval_name} Done] Excel saved to: {filename_excel}")
     print(f"  └─ 📄 Text summary perfectly synchronized & saved to: {os.path.basename(txt_path)}")
     print(f"Average ME: {average_me:.4f} ± {std_me:.4f} (95%ile: {me_95_global:.4f} mm)")
+    print(f"Flat LM metrics: SR@2/3/5={sr_2_flat:.2f}/{sr_3_flat:.2f}/{sr_5_flat:.2f}%, FR@2/3/5={fr_2_flat:.2f}/{fr_3_flat:.2f}/{fr_5_flat:.2f}%, P95 ME={me_95_global:.4f} mm")
     print(f"Surface Distance: {surface_distance_me:.4f} +/- {surface_distance_std:.4f} (95%ile: {surface_distance_95:.4f} mm)")
 
 # -----------------------------------------------------------------------------

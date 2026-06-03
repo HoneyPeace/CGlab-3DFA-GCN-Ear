@@ -88,6 +88,9 @@ parser.add_argument('--act', default=nn.GELU)
 parser.add_argument('--latent_injection_type', type=str, default='raw', 
                     choices=['none', 'raw', 'compressed'], 
                     help="'none': 주입 없음 / 'raw': 1344ch 통짜 주입 / 'compressed': 각 층별 채널 맞춤 주입")
+parser.add_argument('--latent_fusion_mode', type=str, default='auto',
+                    choices=['auto', 'residual', 'concat', 'add'],
+                    help="'auto': preserve existing flags / 'residual': fusion_mlp residual / 'concat': fusion_mlp only / 'add': x + prior")
 parser.add_argument('--use_feature_gating', type=str2bool, default=False, 
                     help='True: 주입 시 게이팅 어텐션 사용 / False: 단순 잔차 덧셈')
 
@@ -137,9 +140,15 @@ parser.add_argument('--heatmap_softmax_temperature', type=float, default=1.0,
 parser.add_argument('--coord_loss_mode', type=str, default='focal_l1',
                     choices=['focal_l1', 'expected_distance', 'ranking'],
                     help='Coordinate/heatmap geometry supervision used as L_coord')
+parser.add_argument('--coord_term_weight', type=float, default=1.0,
+                    help='Weight for L_coord inside the geometry prediction loss')
+parser.add_argument('--surface_term_weight', type=float, default=1.0,
+                    help='Weight for L_surface inside the geometry prediction loss')
 parser.add_argument('--struct_loss_mode', type=str, default='coord',
                     choices=['coord', 'heatmap'],
                     help='Structural loss source: coordinate pairwise distance or heatmap distribution moment')
+parser.add_argument('--struct_term_weight', type=float, default=1.0,
+                    help='Weight for L_struct inside the geometry prediction loss')
 parser.add_argument('--hm_struct_temperature', type=float, default=1.0,
                     help='Temperature for heatmap-distribution structural loss')
 parser.add_argument('--softargmax_temperature', type=float, default=1.0,
