@@ -1,0 +1,87 @@
+{
+  "release_name": "PEARL Final",
+  "target_result": {
+    "test_me_mm": 1.3948,
+    "test_std_mm": 1.2326,
+    "test_p95_mm": 3.9724,
+    "surface_me_mm": 0.2073
+  },
+  "reproducibility": {
+    "training_seed": 6,
+    "dataset_seed": 1,
+    "train_samples": 200,
+    "validation_samples": 53,
+    "test_samples": 43,
+    "landmarks": 36
+  },
+  "input": {
+    "num_points": 8192,
+    "sample_way": "FPS",
+    "sigma": 2.5,
+    "stage1_input_channels": 3,
+    "stage2_input_channels": 7,
+    "need_resample": false
+  },
+  "optimization": {
+    "epochs": 500,
+    "batch_size": 4,
+    "test_batch_size": 1,
+    "learning_rate": 0.001,
+    "scheduler": "step",
+    "weight_decay": 0.0,
+    "dropout": 0.5
+  },
+  "stage1_prior": {
+    "source": "original_github",
+    "checkpoint_name": "Original_PAConv_best.t7",
+    "checkpoint_sha256": "B7B2B7FFB3EFDD4C6CAC0F33478BAD86E0D01B97D99000D3572DB034B1C969E2",
+    "feature_mode": "center_geometry",
+    "heatmap_activation": "raw",
+    "frozen_during_pearl_training": true
+  },
+  "stage2_pearl": {
+    "feature_mode": "surface_pair_no_delta",
+    "latent_injection_type": "raw",
+    "latent_fusion_mode": "residual",
+    "fusion_residual_base": "prior",
+    "decoder_fusion": "prog_half_final320",
+    "stage_downsample_method": "fps",
+    "train_coord_readout": "heatmap_attn_residual",
+    "heatmap_activation": "sigmoid",
+    "residual_limit_mm": 0.0
+  },
+  "loss": {
+    "heatmap_loss": "adaptive_wing",
+    "coord_loss": "focal_l1",
+    "focal_gamma": 1.0,
+    "coord_term_weight": 1.0,
+    "surface_term_weight": 1.0,
+    "struct_term_weight": 1.0,
+    "struct_loss_mode": "coord",
+    "surface_loss_mode": "topk",
+    "plane_knn": 5,
+    "curv_knn": 30,
+    "curvature_alpha": 10.0,
+    "direction_beta": 1.0
+  },
+  "schedule": {
+    "model": "frozen_aux_drop",
+    "aux_drop_epochs": 30,
+    "loss_schedule": "train_hm_plateau",
+    "fixed_heatmap_epochs": 60,
+    "plateau_start_epoch": 30,
+    "plateau_window": 20,
+    "plateau_patience": 10,
+    "plateau_threshold": 0.01,
+    "plateau_transition_epochs": 1,
+    "plateau_transition_mode": "linear",
+    "fixed_main_weight": 1.0,
+    "fixed_geom_weight": 1.0
+  },
+  "evaluation": {
+    "partition": "test",
+    "checkpoint": "Frozen_Aux_Drop_best.t7",
+    "heatmap_coord_method": "mds",
+    "calc_scores": "softmax"
+  }
+}

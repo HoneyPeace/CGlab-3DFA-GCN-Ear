@@ -41,6 +41,18 @@ parser.add_argument('--user_tag', type=str, default='')
 parser.add_argument('--model_epoch', type=str, default="deeppa_frozen_last.t7")
 parser.add_argument('--eval_result_tag', type=str, default='',
                     help='Optional suffix for eval output names, e.g. last or best. Empty preserves existing names.')
+parser.add_argument('--heatmap_save_every_n', type=int, default=40,
+                    help='Eval heatmap visualization interval. Default 40 preserves existing behavior; 1 saves every sample.')
+parser.add_argument('--save_per_landmark_heatmap_png', type=str2bool, default=True,
+                    help='Eval only: save per-landmark multiview heatmap PNGs at --heatmap_save_every_n interval.')
+parser.add_argument('--save_combined_heatmap_png', type=str2bool, default=False,
+                    help='Eval only: save one multiview PNG per sample combining all landmark heatmaps by argmax color.')
+parser.add_argument('--save_heatmap_vertex_ply', type=str2bool, default=False,
+                    help='Eval only: save one vertex-colored PLY per sample from combined landmark heatmaps for Blender.')
+parser.add_argument('--save_heatmap_npz', type=str2bool, default=False,
+                    help='Eval only: save true model heatmap arrays as NPZ with points and heatmap_NxL.')
+parser.add_argument('--save_deeppa_residual_npz', type=str2bool, default=False,
+                    help='Eval only: save DeepPA heatmap-attention pooled coordinates, residuals, and final coordinates as NPZ/CSV.')
 
 parser.add_argument('--no_cuda', type=str2bool, default=False) 
 parser.add_argument('--seed', type=int, default=1)
@@ -110,7 +122,9 @@ parser.add_argument('--coord_from_heatmap', type=str2bool, default=True,
                     help='True: derive final DeepPA coordinates from main heatmap by differentiable top-k')
 parser.add_argument('--train_coord_readout', type=str, default='topk',
                     choices=['topk', 'softargmax', 'soft_ot_topk', 'sigmoid_xyz_pool',
-                             'heatmap_attn_residual', 'heatmap_attn_residual_feature_only'],
+                             'heatmap_attn_residual', 'topk_heatmap_residual',
+                             'heatmap_attn_residual_feature_only',
+                             'direct_regression'],
                     help='Training-only DeepPA coordinate readout for Crd/Srf/Str losses')
 parser.add_argument('--heatmap_activation_mode', type=str, default='sigmoid',
                     choices=['sigmoid', 'softmax'],

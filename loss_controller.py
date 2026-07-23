@@ -245,6 +245,7 @@ class DeepPALossController:
             if m_name == 'deeppa_frozen_no_heat':
                 total_loss = L_pred
                 w_main = 0.0
+                w_geom = 1.0
             else:
                 total_loss = (w_main * L_main) + (w_geom * L_pred) + frozen_pa_loss
 

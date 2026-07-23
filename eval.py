@@ -40,6 +40,7 @@ from stage1_paconv_bridge import (
 )
 from loss import (
     get_differentiable_coords,
+    get_softargmax_coords,
     CurvatureSurfaceLoss,
     SoftLocalCurvatureSurfaceLoss,
 )
@@ -96,6 +97,133 @@ def save_multiview_heatmap(points, heatmap, save_dir, sample_name, landmark_idx,
     filename = f"{prefix}_{short_sample_name}_L{landmark_idx + 1:02d}.png"
     plt.savefig(windows_write_path(os.path.join(save_dir, filename)), dpi=100, bbox_inches='tight')
     plt.close()
+
+def normalize_heatmap_for_vis(heatmap):
+    heatmap = np.nan_to_num(heatmap.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    lo, hi = np.percentile(heatmap, [1, 99])
+    if hi <= lo:
+        hi = float(np.max(heatmap))
+        lo = float(np.min(heatmap))
+    if hi <= lo:
+        return np.zeros_like(heatmap, dtype=np.float32)
+    return np.clip((heatmap - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+
+def combined_heatmap_colors(heatmap_nl):
+    heatmap_vis = normalize_heatmap_for_vis(heatmap_nl)
+    winner = np.argmax(heatmap_vis, axis=1)
+    strength = np.max(heatmap_vis, axis=1)
+    cmap = plt.get_cmap("turbo", heatmap_nl.shape[1])
+    colors = cmap(winner)[:, :3]
+    base = np.full_like(colors, 0.72)
+    colors = base * (1.0 - strength[:, None]) + colors * strength[:, None]
+    return colors, winner, strength
+
+def save_combined_multiview_heatmap(points, heatmap_nl, save_dir, sample_name, prefix):
+    os.makedirs(save_dir, exist_ok=True)
+    colors, _, strength = combined_heatmap_colors(heatmap_nl)
+    fig = plt.figure(figsize=(30, 10))
+    views = [(131, 90, -100, "Front"), (132, 30, 120, "Side"), (133, 45, -45, "Downside")]
+    for pos, elev, azim, title in views:
+        ax = fig.add_subplot(pos, projection='3d')
+        ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=colors, s=10 + 18 * strength, alpha=0.9)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_title(title)
+        ax.axis('off')
+    short_sample_name = shorten_heatmap_name(sample_name, max_len=32)
+    filename = f"{prefix}_{short_sample_name}_combined_L{heatmap_nl.shape[1]:02d}.png"
+    plt.savefig(windows_write_path(os.path.join(save_dir, filename)), dpi=120, bbox_inches='tight')
+    plt.close()
+
+def save_combined_heatmap_ply(points, heatmap_nl, save_dir, sample_name, prefix):
+    os.makedirs(save_dir, exist_ok=True)
+    colors, winner, strength = combined_heatmap_colors(heatmap_nl)
+    rgb = np.clip(colors * 255.0, 0, 255).astype(np.uint8)
+    short_sample_name = shorten_heatmap_name(sample_name, max_len=32)
+    ply_path = os.path.join(save_dir, f"{prefix}_{short_sample_name}_combined_heatmap.ply")
+    with open(windows_write_path(ply_path), "w", encoding="ascii") as f:
+        f.write("ply\n")
+        f.write("format ascii 1.0\n")
+        f.write(f"element vertex {points.shape[0]}\n")
+        f.write("property float x\n")
+        f.write("property float y\n")
+        f.write("property float z\n")
+        f.write("property uchar red\n")
+        f.write("property uchar green\n")
+        f.write("property uchar blue\n")
+        f.write("property uchar alpha\n")
+        f.write("property uchar landmark_index_1based\n")
+        f.write("property float heatmap_strength\n")
+        f.write("end_header\n")
+        for p, c, lm_idx, s in zip(points, rgb, winner, strength):
+            alpha = int(np.clip(80 + 175 * float(s), 0, 255))
+            f.write(
+                f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f} "
+                f"{int(c[0])} {int(c[1])} {int(c[2])} {alpha} {int(lm_idx) + 1} {float(s):.6f}\n"
+            )
+
+def save_heatmap_npz(points, heatmap_nl, save_dir, sample_name, prefix):
+    os.makedirs(save_dir, exist_ok=True)
+    short_sample_name = shorten_heatmap_name(sample_name, max_len=32)
+    save_path = os.path.join(save_dir, f"{prefix}_{short_sample_name}_heatmap_NxL.npz")
+    np.savez_compressed(
+        windows_write_path(save_path),
+        points_xyz=points.astype(np.float32),
+        heatmap_NxL=heatmap_nl.astype(np.float32),
+        sample_name=str(sample_name),
+    )
+
+def get_deeppa_residual_debug_module(eval_model):
+    for module_name in ["stage2_deeppa", "model"]:
+        module = getattr(eval_model, module_name, None)
+        if module is not None and hasattr(module, "latest_hm_attn_pooled_xyz"):
+            return module
+    return None
+
+def save_deeppa_residual_npz(
+    pooled_xyz_mm,
+    residual_mm,
+    final_xyz_mm,
+    gt_xyz_mm,
+    save_dir,
+    sample_name,
+    prefix,
+):
+    os.makedirs(save_dir, exist_ok=True)
+    short_sample_name = shorten_heatmap_name(sample_name, max_len=32)
+    movement_mm = np.linalg.norm(residual_mm, axis=1)
+
+    save_path = os.path.join(save_dir, f"{prefix}_{short_sample_name}_deeppa_residual.npz")
+    np.savez_compressed(
+        windows_write_path(save_path),
+        pooled_xyz_mm=pooled_xyz_mm.astype(np.float32),
+        residual_mm=residual_mm.astype(np.float32),
+        final_xyz_mm=final_xyz_mm.astype(np.float32),
+        gt_xyz_mm=gt_xyz_mm.astype(np.float32),
+        movement_mm=movement_mm.astype(np.float32),
+        sample_name=str(sample_name),
+    )
+
+    csv_path = os.path.join(save_dir, f"{prefix}_{short_sample_name}_deeppa_residual.csv")
+    rows = []
+    for lm_idx in range(pooled_xyz_mm.shape[0]):
+        rows.append({
+            "LM": f"LM{lm_idx + 1:02d}",
+            "Index_1based": lm_idx + 1,
+            "pooled_x_mm": pooled_xyz_mm[lm_idx, 0],
+            "pooled_y_mm": pooled_xyz_mm[lm_idx, 1],
+            "pooled_z_mm": pooled_xyz_mm[lm_idx, 2],
+            "residual_dx_mm": residual_mm[lm_idx, 0],
+            "residual_dy_mm": residual_mm[lm_idx, 1],
+            "residual_dz_mm": residual_mm[lm_idx, 2],
+            "movement_mm": movement_mm[lm_idx],
+            "final_x_mm": final_xyz_mm[lm_idx, 0],
+            "final_y_mm": final_xyz_mm[lm_idx, 1],
+            "final_z_mm": final_xyz_mm[lm_idx, 2],
+            "gt_x_mm": gt_xyz_mm[lm_idx, 0],
+            "gt_y_mm": gt_xyz_mm[lm_idx, 1],
+            "gt_z_mm": gt_xyz_mm[lm_idx, 2],
+        })
+    pd.DataFrame(rows).to_csv(windows_write_path(csv_path), index=False, encoding="utf-8-sig")
 
 def windows_write_path(path):
     if os.name == 'nt':
@@ -235,12 +363,17 @@ class UniversalPipeline_Eval(nn.Module):
         elif self.mode in ['single_deeppa', 'single_deepla']:
             self.model = DeepPA_Wrapper(args, landmark_num)
 
-    def _coords_from_main_heatmap(self, points_xyz, sem_list, fallback_coords=None):
+    def _coords_from_main_heatmap(self, points_xyz, sem_list, fallback_coords=None, main_logits=None):
         if sem_list:
             readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
-            if readout_mode in ['sigmoid_xyz_pool', 'heatmap_attn_residual',
+            if readout_mode in ['direct_regression', 'sigmoid_xyz_pool', 'heatmap_attn_residual',
+                                'topk_heatmap_residual',
                                 'heatmap_attn_residual_feature_only'] and fallback_coords is not None:
                 return fallback_coords
+            if readout_mode == 'softargmax':
+                heatmap_scores = main_logits if main_logits is not None else sem_list[-1]
+                temperature = getattr(self.args, 'softargmax_temperature', 1.0)
+                return get_softargmax_coords(points_xyz, heatmap_scores, temperature=temperature)
             k_val = getattr(self.args, 'regression_point_num', 10)
             return get_differentiable_coords(points_xyz, sem_list[-1], k=k_val)
         return fallback_coords
@@ -277,7 +410,12 @@ class UniversalPipeline_Eval(nn.Module):
             sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
             main_hm = sem_list[-1] if len(sem_list) > 0 else None
             fallback_coords = out[0] if isinstance(out, tuple) else out
-            pred_coords = self._coords_from_main_heatmap(points_xyz, sem_list, fallback_coords=fallback_coords)
+            pred_coords = self._coords_from_main_heatmap(
+                points_xyz,
+                sem_list,
+                fallback_coords=fallback_coords,
+                main_logits=getattr(self.model, 'latest_main_heatmap_logits', None),
+            )
             return pred_coords, sem_list, main_hm
             
         elif self.mode in ['frozen', 'finetune', 'e2e']:
@@ -286,7 +424,12 @@ class UniversalPipeline_Eval(nn.Module):
             out = self.stage2_deeppa(x, prior_hints=multi_scale_hints)
             sem_list = out[2] if isinstance(out, tuple) and len(out) > 2 else []
             fallback_coords = out[0] if isinstance(out, tuple) else out
-            pred_coords = self._coords_from_main_heatmap(points_xyz, sem_list, fallback_coords=fallback_coords)
+            pred_coords = self._coords_from_main_heatmap(
+                points_xyz,
+                sem_list,
+                fallback_coords=fallback_coords,
+                main_logits=getattr(self.stage2_deeppa, 'latest_main_heatmap_logits', None),
+            )
             return pred_coords, sem_list, s1_hm_raw
 
 # -----------------------------------------------------------------------------
@@ -362,7 +505,8 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
             point_normal, gt_landmark_norm = normalize_data(point, gt_landmark)
             point_input = point_normal.permute(0, 2, 1).contiguous()
             if getattr(args, 'train_coord_readout', 'topk').lower() in [
-                'heatmap_attn_residual', 'heatmap_attn_residual_feature_only'
+                'heatmap_attn_residual', 'topk_heatmap_residual',
+                'heatmap_attn_residual_feature_only'
             ]:
                 residual_max_mm = float(getattr(args, 'hm_attn_residual_max_mm', 0.0))
                 if residual_max_mm > 0.0 and hasattr(eval_model, 'set_residual_limit_norm'):
@@ -424,16 +568,51 @@ def evaluate_target_model(eval_name, eval_model, pipeline_mode):
                 
                 iou_list.append(iou_k.mean().item()) 
 
-                if idx % 40 == 0:
-                    points_np, heatmap_np = point_xyz[0].cpu().numpy(), pred_heatmap[0].cpu().numpy()
-                    for lm_idx in range(heatmap_np.shape[1]):
-                         save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], current_hm_dir, real_name, lm_idx, "p")
+                heatmap_save_every_n = int(getattr(args, 'heatmap_save_every_n', 40))
+                save_this_heatmap = heatmap_save_every_n > 0 and idx % heatmap_save_every_n == 0
+                if save_this_heatmap:
+                    points_np = point_xyz[0].cpu().numpy()
+                    heatmap_np = pred_heatmap[0].detach().cpu().numpy()
+                    if getattr(args, 'save_per_landmark_heatmap_png', True):
+                        for lm_idx in range(heatmap_np.shape[1]):
+                             save_multiview_heatmap(points_np, heatmap_np[:, lm_idx], current_hm_dir, real_name, lm_idx, "p")
+                    if getattr(args, 'save_combined_heatmap_png', False):
+                        combined_dir = os.path.join(current_hm_dir, "combined")
+                        save_combined_multiview_heatmap(points_np, heatmap_np, combined_dir, real_name, "p")
+                    if getattr(args, 'save_heatmap_vertex_ply', False):
+                        ply_dir = os.path.join(current_hm_dir, "combined_ply")
+                        save_combined_heatmap_ply(points_np, heatmap_np, ply_dir, real_name, "p")
+                    if getattr(args, 'save_heatmap_npz', False):
+                        npz_dir = os.path.join(current_hm_dir, "heatmap_npz")
+                        save_heatmap_npz(points_np, heatmap_np, npz_dir, real_name, "p")
 
             # 4. 정밀 스케일 복원 (Denormalization)
             pred_landmark = (pred_coords_norm * scale) + centroid
             
             pred_np = pred_landmark.cpu().numpy().squeeze(0)
             gt_np = gt_landmark.cpu().numpy().squeeze(0)
+
+            if getattr(args, 'save_deeppa_residual_npz', False):
+                debug_module = get_deeppa_residual_debug_module(eval_model)
+                if debug_module is not None and debug_module.latest_hm_attn_pooled_xyz is not None:
+                    pooled_xyz_norm = debug_module.latest_hm_attn_pooled_xyz
+                    residual_norm = debug_module.latest_hm_attn_residual
+                    final_coords_norm = debug_module.latest_hm_attn_final_coords
+
+                    pooled_xyz_mm = (pooled_xyz_norm * scale + centroid).detach().cpu().numpy().squeeze(0)
+                    residual_mm = (residual_norm * scale).detach().cpu().numpy().squeeze(0)
+                    final_xyz_mm = (final_coords_norm * scale + centroid).detach().cpu().numpy().squeeze(0)
+
+                    residual_dir = os.path.join(current_hm_dir, "deeppa_residual_npz")
+                    save_deeppa_residual_npz(
+                        pooled_xyz_mm,
+                        residual_mm,
+                        final_xyz_mm,
+                        gt_np,
+                        residual_dir,
+                        real_name,
+                        "p",
+                    )
                 
             # 5. 밀리미터 단위 오차(ME) 추출
             dists = np.linalg.norm(pred_np - gt_np, axis=1)

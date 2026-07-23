@@ -241,7 +241,7 @@ class UniversalPipeline(nn.Module):
     def _coords_from_main_heatmap(self, points_xyz, sem_list, fallback_coords=None, main_logits=None):
         if sem_list:
             readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
-            if readout_mode in ['sigmoid_xyz_pool', 'heatmap_attn_residual',
+            if readout_mode in ['sigmoid_xyz_pool', 'heatmap_attn_residual', 'topk_heatmap_residual',
                                 'heatmap_attn_residual_feature_only'] and fallback_coords is not None:
                 return fallback_coords
             if self.training and readout_mode == 'softargmax':
@@ -359,7 +359,7 @@ def train(args):
         pipeline_mode = 'single_paconv'
     elif m_name == 'paconv_heat': 
         pipeline_mode = 'single_paconv_heat'
-    elif m_name in ['deeppa_frozen', 'frozen_aux_drop', 'frozen_aux_fixed', 'frozen_no_aux']:
+    elif m_name in ['deeppa_frozen', 'deeppa_frozen_no_heat', 'frozen_aux_drop', 'frozen_aux_fixed', 'frozen_no_aux']:
         pipeline_mode = 'frozen'
     elif m_name in ['deepla_ori', 'deepla_decay', 'deepla_all_tied', 'deepla_progress']:
         pipeline_mode = 'single_deepla'
@@ -491,7 +491,8 @@ def train(args):
                 point_input = point_normal.permute(0, 2, 1).contiguous()
                 points_for_coords = point_input[:, :3, :].permute(0, 2, 1).contiguous() 
                 if getattr(args, 'train_coord_readout', 'topk').lower() in [
-                    'heatmap_attn_residual', 'heatmap_attn_residual_feature_only'
+                    'heatmap_attn_residual', 'topk_heatmap_residual',
+                    'heatmap_attn_residual_feature_only'
                 ]:
                     residual_max_mm = float(getattr(args, 'hm_attn_residual_max_mm', 0.0))
                     if residual_max_mm > 0.0 and hasattr(model, 'set_residual_limit_norm'):
@@ -620,7 +621,8 @@ def train(args):
                 point_normal, landmark_normal = normalize_data(point, landmark)
                 point_input = point_normal.permute(0, 2, 1).contiguous() 
                 if getattr(args, 'train_coord_readout', 'topk').lower() in [
-                    'heatmap_attn_residual', 'heatmap_attn_residual_feature_only'
+                    'heatmap_attn_residual', 'topk_heatmap_residual',
+                    'heatmap_attn_residual_feature_only'
                 ]:
                     residual_max_mm = float(getattr(args, 'hm_attn_residual_max_mm', 0.0))
                     if residual_max_mm > 0.0 and hasattr(model, 'set_residual_limit_norm'):

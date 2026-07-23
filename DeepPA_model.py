@@ -165,6 +165,9 @@ class DeepPA_Wrapper(nn.Module):
         self.coord_from_heatmap = True
         self.latest_main_heatmap_logits = None
         self.latest_sem_heatmap_logits = None
+        self.latest_hm_attn_pooled_xyz = None
+        self.latest_hm_attn_residual = None
+        self.latest_hm_attn_final_coords = None
         self.current_residual_limit_norm = None
         
         if not hasattr(args, 'use_cp'): args.use_cp = False
@@ -245,7 +248,39 @@ class DeepPA_Wrapper(nn.Module):
         if limit and limit > 0.0:
             residual = float(limit) * torch.tanh(residual)
 
-        return pooled_xyz + residual
+        final_coords = pooled_xyz + residual
+        self.latest_hm_attn_pooled_xyz = pooled_xyz.detach()
+        self.latest_hm_attn_residual = residual.detach()
+        self.latest_hm_attn_final_coords = final_coords.detach()
+        return final_coords
+
+    def _heatmap_topk_residual_coords(self, xyz_coords, point_features, heatmap_logits):
+        heatmap_scores = torch.sigmoid(heatmap_logits)
+        k_val = min(int(getattr(self.args, 'regression_point_num', 10)), heatmap_scores.shape[2])
+        topk_scores, topk_idx = torch.topk(heatmap_scores, k_val, dim=2)
+        attention = F.softmax(topk_scores, dim=2)
+
+        topk_xyz = index_points(xyz_coords, topk_idx)
+        point_features_bnc = point_features.transpose(1, 2).contiguous()
+        topk_features = index_points(point_features_bnc, topk_idx)
+        pooled_xyz = torch.sum(topk_xyz * attention.unsqueeze(-1), dim=2)
+        pooled_feature = torch.sum(topk_features * attention.unsqueeze(-1), dim=2)
+        residual_input = torch.cat([pooled_feature, pooled_xyz], dim=2)
+
+        B, L, _ = residual_input.shape
+        residual = self.coord_residual_mlp(residual_input.view(B * L, -1)).view(B, L, 3)
+
+        limit = self.current_residual_limit_norm
+        if limit is None:
+            limit = float(getattr(self.args, 'hm_attn_residual_max_norm', 0.0))
+        if limit and limit > 0.0:
+            residual = float(limit) * torch.tanh(residual)
+
+        final_coords = pooled_xyz + residual
+        self.latest_hm_attn_pooled_xyz = pooled_xyz.detach()
+        self.latest_hm_attn_residual = residual.detach()
+        self.latest_hm_attn_final_coords = final_coords.detach()
+        return final_coords
 
     def _heatmap_attention_feature_residual_coords(self, xyz_coords, point_features, heatmap_logits):
         attention = torch.sigmoid(heatmap_logits)
@@ -263,7 +298,16 @@ class DeepPA_Wrapper(nn.Module):
         if limit and limit > 0.0:
             residual = float(limit) * torch.tanh(residual)
 
-        return pooled_xyz + residual
+        final_coords = pooled_xyz + residual
+        self.latest_hm_attn_pooled_xyz = pooled_xyz.detach()
+        self.latest_hm_attn_residual = residual.detach()
+        self.latest_hm_attn_final_coords = final_coords.detach()
+        return final_coords
+
+    def _direct_regression_coords(self, point_features):
+        global_feature = torch.max(point_features, dim=2)[0]
+        coords = self.head_linear(global_feature)
+        return coords.view(point_features.size(0), self.landmark_num, 3)
 
     def forward(self, x, prior_hints=None):
         B, C_in, N_in = x.shape
@@ -271,6 +315,9 @@ class DeepPA_Wrapper(nn.Module):
         self.latest_stage_hm_indices = None
         self.latest_main_heatmap_logits = None
         self.latest_sem_heatmap_logits = None
+        self.latest_hm_attn_pooled_xyz = None
+        self.latest_hm_attn_residual = None
+        self.latest_hm_attn_final_coords = None
 
         # ==============================================================================
         # 🌟 2. [Ablation] 3지 선다 옵션에 따른 피처 주입 전처리
@@ -374,6 +421,13 @@ class DeepPA_Wrapper(nn.Module):
         
         # 6. 회귀 헤드 (Regression Head)
         x_fused = self.head_conv(fused_features) 
+        readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
+        if readout_mode == 'direct_regression':
+            coords = self._direct_regression_coords(x_fused)
+            spa_loss = out[1] if isinstance(out, tuple) else torch.tensor(0.0).to(device)
+            self.latest_sem_heatmap_logits = []
+            return coords, spa_loss, []
+
         main_heatmap_logits = self.main_heatmap_head(x_fused)
         self.latest_main_heatmap_logits = main_heatmap_logits
         main_heatmap = torch.sigmoid(main_heatmap_logits)
@@ -381,9 +435,10 @@ class DeepPA_Wrapper(nn.Module):
         # kept in the module for checkpoint compatibility, but it is not used for
         # DeepPA coordinate supervision/evaluation.
         k_val = getattr(self.args, 'regression_point_num', 10)
-        readout_mode = getattr(self.args, 'train_coord_readout', 'topk').lower()
         if readout_mode == 'heatmap_attn_residual':
             coords = self._heatmap_attention_residual_coords(xyz_coords, x_fused, main_heatmap_logits)
+        elif readout_mode == 'topk_heatmap_residual':
+            coords = self._heatmap_topk_residual_coords(xyz_coords, x_fused, main_heatmap_logits)
         elif readout_mode == 'heatmap_attn_residual_feature_only':
             coords = self._heatmap_attention_feature_residual_coords(xyz_coords, x_fused, main_heatmap_logits)
         elif readout_mode == 'sigmoid_xyz_pool':
